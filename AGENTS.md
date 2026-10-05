@@ -26,6 +26,40 @@ This has already produced a false green here: an `npm install` that failed with
 `Cannot read properties of null` reported exit 0 through a pipe, and the suite
 then ran against an ad-hoc vitest instead of the pinned one.
 
+## The live proof — opt-in, and why it injects its own bad key
+
+```sh
+npm run test:live     # spawns `claude` twice; costs a little subscription usage
+```
+
+Two controls against the real binary:
+
+- **negative** — a bogus `ANTHROPIC_API_KEY` passed *through* must be **used and
+  rejected `401`**;
+- **positive** — the same key **stripped** must let the call succeed on the
+  user's own login.
+
+The negative one is load-bearing. Without it, an `env` builder that returned an
+empty object would satisfy the positive half completely.
+
+It injects the bad key rather than using the machine's, deliberately. The hazard
+was first seen because a workstation happened to carry an invalid key — and a
+test written against that condition would pass only while a workstation stayed
+misconfigured, then silently stop testing anything once someone fixed it. **A
+guard that works only while the environment is broken is not a guard.**
+
+It also asserts the 401 rather than a non-zero exit, because measuring showed
+why: with a rejected credential the CLI does not fail, it **retries ten times
+with backoff and runs past three minutes**. The first version of this test timed
+out instead of failing, which reads as a broken test rather than as the
+behaviour it exists to pin. Watching for the auth rejection is faster and
+asserts the mechanism — the key reached the child and outranked the login — which
+a bare non-zero exit cannot distinguish from any other failure.
+
+On Windows the `test:live` script's `VAR=1 cmd` prefix is POSIX-only; run it
+from a POSIX shell. If the flag is absent the suite **skips** rather than passes,
+so a wrong invocation cannot read as a green result.
+
 ## What this package holds
 
 The trust boundary is the **credential**, and it is unusual: this package's job
