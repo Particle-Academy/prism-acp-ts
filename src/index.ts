@@ -33,3 +33,10 @@ export {
 
 export { ClaudeToAcp } from './claude/to-acp.js';
 export type { AcpUpdate, ToolStatus } from './claude/to-acp.js';
+
+export { ClaudeDriver, claudeArgs, promptLine, updatesFromFrames } from './claude/driver.js';
+export type {
+  ClaudeDriverEvents,
+  ClaudeDriverOptions,
+  ClaudePermissionMode,
+} from './claude/driver.js';

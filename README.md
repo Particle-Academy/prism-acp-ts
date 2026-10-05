@@ -19,12 +19,13 @@ API key to supply and no adapter program to install.
 
 ## Status
 
-Early. The transport layers are built and tested — framing, the child
-environment, the JSON-RPC peer, the policy for values ACP has no field for, and
-the Claude `stream-json` → ACP mapping, which is tested against **captured
-traffic** rather than a hand-written fixture. What is missing is the process
-driver that joins them, so nothing yet talks to a running agent. The surface
-will change.
+Early, but it runs: the driver spawns the Claude CLI and produces ACP updates
+from a real turn, proven end to end against an authenticated binary. The mapping
+is tested against **captured traffic** rather than a hand-written fixture.
+
+What is missing is the ACP server surface — `initialize`, `session/new`,
+`session/prompt` — so a client cannot yet speak to it over a pipe, and the Codex
+driver. The surface will change.
 
 | piece | state |
 |---|---|
@@ -33,7 +34,8 @@ will change.
 | JSON-RPC peer | built |
 | extension-field policy (`_meta`) | built |
 | Claude `stream-json` → ACP mapping | built |
-| Claude process driver | not yet |
+| Claude process driver | built |
+| ACP server surface (`initialize`, `session/*`) | not yet |
 | Codex driver (`app-server`) | not yet |
 
 ## Why drive a CLI rather than call an API

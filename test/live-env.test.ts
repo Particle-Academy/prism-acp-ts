@@ -31,6 +31,8 @@
 import { spawn } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { childEnv } from '../src/env.js';
+import { ClaudeDriver } from '../src/claude/driver.js';
+import type { AcpUpdate } from '../src/claude/to-acp.js';
 import { NdjsonFramer } from '../src/ndjson.js';
 
 const LIVE = process.env.PRISM_ACP_LIVE === '1';
@@ -137,5 +139,59 @@ describe.skipIf(!LIVE)('the credential strip, against the real CLI', () => {
     const run = await runClaude(env);
     expect(run.code).toBe(0);
     expect(run.stdout.length).toBeGreaterThan(0);
+  }, 180_000);
+});
+
+describe.skipIf(!LIVE)('the whole driver, against a real agent', () => {
+  it('drives a real turn and produces ACP updates', async () => {
+    // The end-to-end claim this package makes: spawn the CLI the user already
+    // authenticated, and get structured ACP state back. Everything below the
+    // driver is unit-tested; this is the only test that proves the parts are
+    // wired to each other AND to a real agent.
+    const updates: AcpUpdate[] = [];
+    const problems: string[] = [];
+    const stderr: string[] = [];
+
+    const exit = await new Promise<number | null>((resolve) => {
+      const driver = new ClaudeDriver(
+        {
+          cwd: process.cwd(),
+          permissionMode: 'dontAsk',
+          disallowedTools: ['Bash', 'Write', 'Edit', 'WebFetch', 'WebSearch', 'Task'],
+        },
+        {
+          onUpdate: (u) => updates.push(u),
+          onProtocolError: (p) => problems.push(p),
+          onStderr: (l) => stderr.push(l),
+          onExit: (code) => resolve(code),
+        },
+      );
+
+      driver.start();
+      // An inherited credential must not reach the agent even here, where the
+      // test is about something else entirely.
+      expect(driver.withheldCredentials).not.toContain('CLAUDE_CONFIG_DIR');
+      driver.prompt('Reply with exactly: ok');
+      driver.endInput();
+    });
+
+    expect(problems).toEqual([]);
+    expect(exit).toBe(0);
+
+    const kinds = new Set(updates.map((u) => u.sessionUpdate));
+    expect(kinds.has('agent_message_chunk')).toBe(true);
+
+    const text = updates
+      .filter((u) => u.sessionUpdate === 'agent_message_chunk')
+      .map((u) => (u.content as { text: string }).text)
+      .join('');
+    expect(text.toLowerCase()).toContain('ok');
+
+    // usage_update is the one that needed a context size, so a live turn is
+    // what proves `modelUsage.<model>.contextWindow` is really there.
+    const usage = updates.find((u) => u.sessionUpdate === 'usage_update');
+    expect(usage).toBeDefined();
+    expect(usage?.used as number).toBeGreaterThan(0);
+    expect(usage?.size as number).toBeGreaterThan(1000);
   }, 180_000);
 });
