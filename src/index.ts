@@ -30,3 +30,6 @@ export {
   metaKey,
   withMeta,
 } from './meta.js';
+
+export { ClaudeToAcp } from './claude/to-acp.js';
+export type { AcpUpdate, ToolStatus } from './claude/to-acp.js';

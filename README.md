@@ -20,8 +20,11 @@ API key to supply and no adapter program to install.
 ## Status
 
 Early. The transport layers are built and tested — framing, the child
-environment, the JSON-RPC peer, and the policy for values ACP has no field for.
-Neither driver exists yet, so nothing talks to an agent. The surface will change.
+environment, the JSON-RPC peer, the policy for values ACP has no field for, and
+the Claude `stream-json` → ACP mapping, which is tested against **captured
+traffic** rather than a hand-written fixture. What is missing is the process
+driver that joins them, so nothing yet talks to a running agent. The surface
+will change.
 
 | piece | state |
 |---|---|
@@ -29,7 +32,8 @@ Neither driver exists yet, so nothing talks to an agent. The surface will change
 | child-environment construction | built |
 | JSON-RPC peer | built |
 | extension-field policy (`_meta`) | built |
-| Claude driver (`stream-json`) | not yet |
+| Claude `stream-json` → ACP mapping | built |
+| Claude process driver | not yet |
 | Codex driver (`app-server`) | not yet |
 
 ## Why drive a CLI rather than call an API
