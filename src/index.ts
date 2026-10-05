@@ -3,3 +3,30 @@ export type { Frame, FrameError } from './ndjson.js';
 
 export { BASE_ALLOW, OUTRANKING_CREDENTIALS, childEnv } from './env.js';
 export type { ChildEnvOptions, ChildEnvResult } from './env.js';
+
+export {
+  JsonRpcPeer,
+  RPC_INTERNAL_ERROR,
+  RPC_INVALID_PARAMS,
+  RPC_INVALID_REQUEST,
+  RPC_METHOD_NOT_FOUND,
+  RPC_PARSE_ERROR,
+  RpcError,
+} from './jsonrpc.js';
+export type {
+  JsonRpcPeerOptions,
+  NotificationHandler,
+  RequestHandler,
+  RpcId,
+} from './jsonrpc.js';
+
+export {
+  META_NS,
+  META_RATE_LIMIT,
+  META_THINKING_SIGNATURE,
+  META_THINKING_TOKENS_ESTIMATE,
+  META_UNMAPPED_FRAME,
+  RESERVED_META_KEYS,
+  metaKey,
+  withMeta,
+} from './meta.js';

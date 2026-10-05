@@ -19,14 +19,16 @@ API key to supply and no adapter program to install.
 
 ## Status
 
-Early. The framing and environment layers are built and tested; the protocol
-peer, the Claude driver and the Codex driver are not. The surface will change.
+Early. The transport layers are built and tested — framing, the child
+environment, the JSON-RPC peer, and the policy for values ACP has no field for.
+Neither driver exists yet, so nothing talks to an agent. The surface will change.
 
 | piece | state |
 |---|---|
 | NDJSON framing | built |
 | child-environment construction | built |
-| JSON-RPC peer | not yet |
+| JSON-RPC peer | built |
+| extension-field policy (`_meta`) | built |
 | Claude driver (`stream-json`) | not yet |
 | Codex driver (`app-server`) | not yet |
 
