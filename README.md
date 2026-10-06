@@ -39,6 +39,15 @@ agent can make back, and the Codex driver. The surface will change.
 | `session/set_mode`, `fs/*`, `terminal/*` | not yet |
 | Codex driver (`app-server`) | not yet |
 
+**It maps 7 of ACP's 19 `session/update` kinds**, and that number is asserted by
+a test rather than described here, so raising it means moving it. The twelve it
+does not map each carry a measured reason — most notably the three plan kinds:
+the CLI emits **no plan frame at all**. A captured turn that built a three-item
+plan produced it entirely as `TaskCreate` / `TaskUpdate` tool calls, so ACP's
+plan kinds could only ever be *synthesised* here, and that is a decision to take
+deliberately rather than a mapping to add casually. Until then a plan is not
+lost — it is visible as the tool calls that built it.
+
 ## Why drive a CLI rather than call an API
 
 Because of the authentication, and it is the whole reason this package exists.
