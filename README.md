@@ -36,6 +36,7 @@ agent can make back, and the Codex driver. The surface will change.
 | Claude `stream-json` → ACP mapping | built |
 | Claude process driver | built |
 | ACP server surface + stdio | built |
+| `session/load` resume | built, and **proven** to remember the first turn |
 | `session/set_mode`, `fs/*`, `terminal/*` | not yet |
 | Codex driver (`app-server`) | not yet |
 

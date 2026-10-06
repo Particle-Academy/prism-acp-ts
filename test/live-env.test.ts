@@ -284,3 +284,70 @@ describe.skipIf(!LIVE)('the ACP surface, end to end, against a real agent', () =
     await served.closed;
   }, 300_000);
 });
+
+describe.skipIf(!LIVE)('resume: does a loaded session remember the first turn?', () => {
+  it('answers from the FIRST turn after a resume', async () => {
+    // loadSession is reported true in `initialize`, and until this test existed
+    // that claim rested on the flag being wired rather than on resume working.
+    // A wrong resume does not error -- it starts a FRESH conversation while the
+    // caller believes it continued one.
+    //
+    // So the assertion is on a value that could ONLY come from the first turn.
+    // Asking "do you remember?" would be answered agreeably by an agent with no
+    // memory at all; asking for the number cannot be.
+    const SECRET = '47829';
+
+    async function turn(
+      prompt: string,
+      resumeSessionId?: string,
+    ): Promise<{ text: string; cliSessionId: string | null; code: number | null }> {
+      const chunks: string[] = [];
+      let driverRef: ClaudeDriver | null = null;
+
+      const code = await new Promise<number | null>((resolve) => {
+        const driver = new ClaudeDriver(
+          {
+            cwd: process.cwd(),
+            permissionMode: 'dontAsk',
+            disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'WebFetch', 'WebSearch', 'Task'],
+            ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
+          },
+          {
+            onUpdate: (u) => {
+              if (u.sessionUpdate === 'agent_message_chunk') {
+                chunks.push((u.content as { text: string }).text);
+              }
+            },
+            onExit: (c) => resolve(c),
+          },
+        );
+        driverRef = driver;
+        driver.start();
+        driver.prompt(prompt);
+        driver.endInput();
+      });
+
+      return {
+        text: chunks.join(''),
+        cliSessionId: (driverRef as ClaudeDriver | null)?.cliSessionId ?? null,
+        code,
+      };
+    }
+
+    const first = await turn(
+      `Remember this number: ${SECRET}. Reply with exactly: stored.`,
+    );
+    expect(first.code).toBe(0);
+    // The CLI's own id, which is what --resume wants -- not an ACP sessionId.
+    expect(first.cliSessionId).toBeTruthy();
+
+    const second = await turn(
+      'What number did I ask you to remember? Reply with just the digits.',
+      first.cliSessionId ?? undefined,
+    );
+    expect(second.code).toBe(0);
+
+    // The whole test. A fresh conversation cannot produce this number.
+    expect(second.text).toContain(SECRET);
+  }, 420_000);
+});

@@ -127,9 +127,13 @@ export class AcpAgent {
       // travels in this protocol. Empty is the honest answer, not a placeholder.
       authMethods: [],
       agentCapabilities: {
-        // True only because session/load is implemented over the CLI's own
-        // --resume. A capability reported optimistically is worse than one
-        // reported absent: a client plans around the answer.
+        // True, and PROVEN rather than wired. A live test stores a number in
+        // one turn, resumes, and asks for it back -- an assertion a fresh
+        // conversation cannot satisfy. That test exists because a wrong resume
+        // does not error: it starts a new conversation while the caller
+        // believes it continued one, so the flag being set proves nothing on
+        // its own. A capability reported optimistically is worse than one
+        // reported absent, because a client plans around the answer.
         loadSession: true,
         promptCapabilities: {
           // Text only, for now. Reported as false rather than omitted, because
