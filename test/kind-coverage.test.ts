@@ -84,12 +84,19 @@ const UNIMPLEMENTED: Readonly<Record<string, string>> = {
   session_info_update: 'no CLI counterpart observed in any capture so far',
   compaction_update: 'the CLI does compact context, but no frame for it has been captured yet',
   compaction_summary_chunk: 'same as compaction_update: the event has not been captured yet',
-  subagent_update: 'subagent text arrives with parent_tool_use_id, not as its own kind',
+  subagent_update:
+    'the CLI DOES emit system/task_started, task_updated and task_notification with full ' +
+    'detail, but ACP publishes no payload shape for subagent_update, so mapping it would ' +
+    'mean inventing field names',
   session_message: 'no CLI counterpart observed in any capture so far',
   session_message_chunk: 'no CLI counterpart observed in any capture so far',
 };
 
-const FIXTURES = ['claude-tool-turn.ndjson', 'claude-plan-turn.ndjson'];
+const FIXTURES = [
+  'claude-tool-turn.ndjson',
+  'claude-plan-turn.ndjson',
+  'claude-subagent-turn.ndjson',
+];
 
 function kindsProducedBy(fixture: string): Set<string> {
   const path = fileURLToPath(new URL(`./fixtures/${fixture}`, import.meta.url));
@@ -198,5 +205,60 @@ describe('the plan finding, which is the reason three kinds are unimplemented', 
         JSON.stringify(u.rawInput ?? {}).includes('desk'),
     );
     expect(withArgs).toBeDefined();
+  });
+});
+
+describe('widening the capture found frames nobody had seen', () => {
+  function mapperFor(fixture: string) {
+    const path = fileURLToPath(new URL(`./fixtures/${fixture}`, import.meta.url));
+    const framer = new NdjsonFramer();
+    const mapper = new ClaudeToAcp();
+    for (const frame of [...framer.push(readFileSync(path)), ...framer.end()]) {
+      if (frame.ok) mapper.frame(frame.value);
+    }
+    return mapper;
+  }
+
+  it('records the three task frames rather than dropping them', () => {
+    // A subagent turn produced system/task_started, task_updated and
+    // task_notification -- three subtypes that did not appear in either earlier
+    // capture, and which the mapper has no case for.
+    //
+    // They are in `unmapped` with their contents intact, which is the decision
+    // to keep the FRAME rather than a count earning its place: the question
+    // "what did we not handle" has an answer, and the answer is what raised
+    // the coverage conversation from seven kinds to eight candidates.
+    const subtypes = new Set(
+      mapperFor('claude-subagent-turn.ndjson').unmapped.map(
+        (f) => (f as { subtype?: string }).subtype,
+      ),
+    );
+    expect(subtypes).toContain('task_started');
+    expect(subtypes).toContain('task_updated');
+    expect(subtypes).toContain('task_notification');
+  });
+
+  it('kept enough detail in them to implement subagent_update later', () => {
+    // The reason subagent_update stays unimplemented is that ACP publishes no
+    // payload shape for it -- not that the CLI is quiet. This asserts the CLI's
+    // side is rich enough, so a future implementation is blocked on the spec
+    // rather than on another capture.
+    const started = mapperFor('claude-subagent-turn.ndjson').unmapped.find(
+      (f) => (f as { subtype?: string }).subtype === 'task_started',
+    ) as Record<string, unknown> | undefined;
+
+    expect(started).toBeDefined();
+    for (const field of ['description', 'subagent_type', 'spawn_depth', 'task_type']) {
+      expect(started?.[field], field).toBeDefined();
+    }
+  });
+
+  it('still emits no new ACP kind, so the count is honestly 7', () => {
+    // Three new frame subtypes did NOT raise coverage, because recording a
+    // frame is not mapping it. Worth asserting: a capture that found something
+    // new is exactly when a coverage number is most likely to drift upward on
+    // optimism.
+    const kinds = kindsProducedBy('claude-subagent-turn.ndjson');
+    for (const kind of kinds) expect(IMPLEMENTED as readonly string[]).toContain(kind);
   });
 });
