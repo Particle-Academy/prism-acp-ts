@@ -40,3 +40,17 @@ export type {
   ClaudeDriverOptions,
   ClaudePermissionMode,
 } from './claude/driver.js';
+
+export { AcpAgent, PROTOCOL_VERSION } from './acp/agent.js';
+export type {
+  AcpAgentOptions,
+  AgentDriver,
+  DriverEvents,
+  DriverFactory,
+} from './acp/agent.js';
+
+export { serve } from './acp/stdio.js';
+export type { Served, ServeOptions } from './acp/stdio.js';
+
+export { cliSessionIdOf, turnOutcomeOf } from './claude/driver.js';
+export type { StopReason, TurnOutcome } from './claude/driver.js';

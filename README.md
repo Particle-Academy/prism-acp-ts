@@ -19,13 +19,13 @@ API key to supply and no adapter program to install.
 
 ## Status
 
-Early, but it runs: the driver spawns the Claude CLI and produces ACP updates
-from a real turn, proven end to end against an authenticated binary. The mapping
+Early, but a client can talk to it. `initialize`, `session/new`,
+`session/load`, `session/prompt` and `session/cancel` work over a pipe, driving
+the Claude CLI, proven end to end against an authenticated binary. The mapping
 is tested against **captured traffic** rather than a hand-written fixture.
 
-What is missing is the ACP server surface — `initialize`, `session/new`,
-`session/prompt` — so a client cannot yet speak to it over a pipe, and the Codex
-driver. The surface will change.
+Missing: `session/set_mode`, the client-side `fs/*` and `terminal/*` calls an
+agent can make back, and the Codex driver. The surface will change.
 
 | piece | state |
 |---|---|
@@ -35,7 +35,8 @@ driver. The surface will change.
 | extension-field policy (`_meta`) | built |
 | Claude `stream-json` → ACP mapping | built |
 | Claude process driver | built |
-| ACP server surface (`initialize`, `session/*`) | not yet |
+| ACP server surface + stdio | built |
+| `session/set_mode`, `fs/*`, `terminal/*` | not yet |
 | Codex driver (`app-server`) | not yet |
 
 ## Why drive a CLI rather than call an API
@@ -97,6 +98,23 @@ implementations of one protocol disagree without anyone noticing. So:
 - an oversized or unparseable line reports its **size, never its content** — a
   line here can carry a prompt, a file or a credential, and a framing error is
   not a reason to copy it into a log.
+
+## Using it
+
+```ts
+import { serve, ClaudeDriver } from '@particle-academy/prism-acp';
+
+serve({
+  input: process.stdin,
+  output: process.stdout,
+  driverFactory: (options, events) =>
+    new ClaudeDriver({ cwd: options.cwd, ...options }, events),
+});
+```
+
+A client then speaks ACP on those pipes. Several sessions run at once, each with
+its own agent process, its own in-flight turn and its own updates — tagged with
+the session they belong to, because a room of agents shares one stream.
 
 ## Development
 

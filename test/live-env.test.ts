@@ -31,7 +31,10 @@
 import { spawn } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { childEnv } from '../src/env.js';
+import { PassThrough } from 'node:stream';
 import { ClaudeDriver } from '../src/claude/driver.js';
+import { serve } from '../src/acp/stdio.js';
+import { encodeLine } from '../src/ndjson.js';
 import type { AcpUpdate } from '../src/claude/to-acp.js';
 import { NdjsonFramer } from '../src/ndjson.js';
 
@@ -194,4 +197,90 @@ describe.skipIf(!LIVE)('the whole driver, against a real agent', () => {
     expect(usage?.used as number).toBeGreaterThan(0);
     expect(usage?.size as number).toBeGreaterThan(1000);
   }, 180_000);
+});
+
+describe.skipIf(!LIVE)('the ACP surface, end to end, against a real agent', () => {
+  it('initializes, opens a session, prompts, and streams real updates', async () => {
+    // The complete claim this package makes, with nothing faked: a client
+    // speaks ACP over a pipe, and a real authenticated CLI answers through it.
+    // Everything below is unit-tested and the stdio surface is covered with a
+    // fake driver; this is the only test where both halves are real at once.
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const received: Record<string, unknown>[] = [];
+    let buffer = '';
+
+    output.setEncoding('utf8');
+    output.on('data', (chunk: string) => {
+      buffer += chunk;
+      let newline = buffer.indexOf('\n');
+      while (newline !== -1) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (line.trim().length > 0) received.push(JSON.parse(line) as Record<string, unknown>);
+        newline = buffer.indexOf('\n');
+      }
+    });
+
+    const problems: string[] = [];
+    const served = serve({
+      input,
+      output,
+      onProtocolError: (_s, p) => problems.push(p),
+      newSessionId: () => 'sess_live',
+      driverFactory: (options, events) =>
+        new ClaudeDriver(
+          {
+            cwd: options.cwd,
+            ...(options.resumeSessionId === undefined
+              ? {}
+              : { resumeSessionId: options.resumeSessionId }),
+            permissionMode: 'dontAsk',
+            disallowedTools: ['Bash', 'Write', 'Edit', 'WebFetch', 'WebSearch', 'Task'],
+          },
+          events,
+        ),
+    });
+
+    async function request(id: number, method: string, params?: unknown) {
+      input.write(encodeLine({ jsonrpc: '2.0', id, method, params }));
+      for (let waited = 0; waited < 1800; waited++) {
+        const reply = received.find((m) => m.id === id);
+        if (reply !== undefined) return reply;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      throw new Error(`no reply to ${method}`);
+    }
+
+    const init = await request(1, 'initialize', { protocolVersion: 1, clientCapabilities: {} });
+    expect((init.result as Record<string, unknown>).protocolVersion).toBe(1);
+
+    const opened = await request(2, 'session/new', { cwd: process.cwd(), mcpServers: [] });
+    expect((opened.result as Record<string, string>).sessionId).toBe('sess_live');
+
+    const prompted = await request(3, 'session/prompt', {
+      sessionId: 'sess_live',
+      prompt: [{ type: 'text', text: 'Reply with exactly: ok' }],
+    });
+
+    expect(problems).toEqual([]);
+    expect(prompted.error).toBeUndefined();
+    expect(prompted.result).toEqual({ stopReason: 'end_turn' });
+
+    const updates = received
+      .filter((m) => m.method === 'session/update')
+      .map((m) => (m.params as { update: Record<string, unknown> }).update);
+
+    const text = updates
+      .filter((u) => u.sessionUpdate === 'agent_message_chunk')
+      .map((u) => (u.content as { text: string }).text)
+      .join('');
+    expect(text.toLowerCase()).toContain('ok');
+
+    const usage = updates.find((u) => u.sessionUpdate === 'usage_update');
+    expect(usage?.size as number).toBeGreaterThan(1000);
+
+    input.end();
+    await served.closed;
+  }, 300_000);
 });

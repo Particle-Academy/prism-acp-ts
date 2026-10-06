@@ -61,6 +61,15 @@ export interface ClaudeDriverEvents {
   /** A frame that arrived but could not be framed or parsed. */
   readonly onProtocolError?: (problem: string) => void;
   readonly onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
+  /**
+   * One turn finished.
+   *
+   * Separate from onExit because with `--input-format stream-json` the CLI
+   * stays alive ACROSS turns -- the process exiting and a turn ending are
+   * different events, and a server that conflated them would resolve every
+   * prompt only when the agent shut down.
+   */
+  readonly onTurnEnd?: (outcome: TurnOutcome) => void;
 }
 
 /**
@@ -113,6 +122,70 @@ export function promptLine(text: string): string {
   });
 }
 
+/** ACP's five stop reasons. No sixth, and no "unknown". */
+export type StopReason = 'end_turn' | 'max_tokens' | 'max_turn_requests' | 'refusal' | 'cancelled';
+
+export interface TurnOutcome {
+  /** Null when the turn did not finish cleanly -- see {@link turnOutcomeOf}. */
+  readonly stopReason: StopReason | null;
+  readonly isError: boolean;
+  /** The CLI's own reason string, kept even when it maps to nothing. */
+  readonly raw: string | null;
+}
+
+/**
+ * ACP stop reasons the CLI reports under the same names.
+ *
+ * Shared vocabulary for the common cases, which is luck rather than design, so
+ * it is written as a map instead of passed through. A pass-through would import
+ * every future CLI value into a closed ACP enum silently.
+ */
+const STOP_REASONS: Readonly<Record<string, StopReason>> = {
+  end_turn: 'end_turn',
+  max_tokens: 'max_tokens',
+  max_turn_requests: 'max_turn_requests',
+  refusal: 'refusal',
+  cancelled: 'cancelled',
+  canceled: 'cancelled',
+};
+
+/**
+ * Read a turn's outcome from a `result` frame, or null if it is not one.
+ *
+ * `stopReason` comes back **null** when the CLI reported an error or a reason
+ * ACP has no literal for. That is deliberate and it is the whole reason this
+ * returns a structure rather than a string: ACP's five reasons all describe a
+ * turn that FINISHED, and none of them describes a crash. Answering `end_turn`
+ * for a failed turn would report a clean finish, and `refusal` would report a
+ * decision the agent never made. A caller that cannot name the stop reason
+ * should fail the request instead of inventing one.
+ */
+export function turnOutcomeOf(frame: unknown): TurnOutcome | null {
+  if (!isObject(frame) || frame.type !== 'result') return null;
+
+  const raw = typeof frame.stop_reason === 'string' ? frame.stop_reason : null;
+  const isError = frame.is_error === true || frame.subtype === 'error';
+  const mapped = raw === null ? undefined : STOP_REASONS[raw];
+
+  return { stopReason: isError || mapped === undefined ? null : mapped, isError, raw };
+}
+
+/**
+ * The CLI's own session id, from its `init` frame.
+ *
+ * Needed for `--resume`, which is how ACP's `session/load` is served. Captured
+ * from the stream rather than invented, because the two ids are not the same
+ * thing: ACP's sessionId is ours to choose, the CLI's is the CLI's.
+ */
+export function cliSessionIdOf(frame: unknown): string | null {
+  if (!isObject(frame) || frame.type !== 'system' || frame.subtype !== 'init') return null;
+  return typeof frame.session_id === 'string' ? frame.session_id : null;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
  * Turn framed output into ACP updates, separating what mapped from what failed
  * to frame.
@@ -148,9 +221,19 @@ export class ClaudeDriver {
   readonly #mapper = new ClaudeToAcp();
   #child: ChildProcess | null = null;
   #stderr = '';
+  #pendingOutcome: TurnOutcome | null = null;
 
   /** Names of credentials withheld from the child, available after start(). */
   withheldCredentials: readonly string[] = [];
+
+  /**
+   * The CLI's own session id, once it has announced one.
+   *
+   * Not the same thing as an ACP sessionId: that one is ours to choose, this
+   * one is the CLI's, and `--resume` wants the CLI's. Conflating them is how a
+   * resume silently starts a fresh conversation.
+   */
+  cliSessionId: string | null = null;
 
   constructor(options: ClaudeDriverOptions, events: ClaudeDriverEvents = {}) {
     this.#options = options;
@@ -240,9 +323,32 @@ export class ClaudeDriver {
   }
 
   #emit(frames: ReturnType<NdjsonFramer['push']>): void {
+    // Raw frames are inspected for turn boundaries and the CLI's session id
+    // BEFORE mapping, because neither survives translation: the `result` frame
+    // becomes a usage_update and the `init` frame maps to nothing at all.
+    for (const frame of frames) {
+      if (!frame.ok) continue;
+
+      const cliSessionId = cliSessionIdOf(frame.value);
+      if (cliSessionId !== null) this.cliSessionId = cliSessionId;
+
+      const outcome = turnOutcomeOf(frame.value);
+      if (outcome !== null) this.#pendingOutcome = outcome;
+    }
+
     const { updates, problems } = updatesFromFrames(frames, this.#mapper);
     for (const problem of problems) this.#events.onProtocolError?.(problem);
     for (const update of updates) this.#events.onUpdate?.(update);
+
+    // Fired AFTER the updates, so a caller resolving a turn on this signal has
+    // already received everything the turn produced -- including the
+    // usage_update that the same `result` frame generates. Firing first would
+    // resolve session/prompt before its own usage arrived.
+    if (this.#pendingOutcome !== null) {
+      const outcome = this.#pendingOutcome;
+      this.#pendingOutcome = null;
+      this.#events.onTurnEnd?.(outcome);
+    }
   }
 
   #onStderr(chunk: string): void {
