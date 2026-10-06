@@ -17,7 +17,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22, 24]
+        # 22 and 24 are the supported LTS lines; 26 is current. NODE 20 WAS
+        # REMOVED because it reached end of life on 2026-04-30 -- testing against
+        # an unsupported runtime proves a package works where nobody should run
+        # it, and declaring engines >=20 told consumers otherwise.
+        #
+        # This matrix was copied from a sibling that still carries 20, which is
+        # how it got here: the list froze a correct answer from when 20 was
+        # current LTS and went on defending the copy.
+        node: [22, 24, 26]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
