@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "Speak the Agent Client Protocol to a coding-agent CLI the user has already authenticated. No API key, no third-party adapter.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Particle-Academy/prism-acp-ts.git"
+  },
   "type": "module",
   "exports": {
     ".": {
