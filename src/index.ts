@@ -34,6 +34,9 @@ export {
 export { ClaudeToAcp } from './claude/to-acp.js';
 export type { AcpUpdate, ToolStatus } from './claude/to-acp.js';
 
+export { parseRateLimit, rateLimitNotice } from './claude/rate-limit.js';
+export type { ClaudeRateLimit, ClaudeRateLimitWindow } from './claude/rate-limit.js';
+
 export { ClaudeDriver, claudeArgs, promptLine, updatesFromFrames } from './claude/driver.js';
 export type {
   ClaudeDriverEvents,

@@ -109,6 +109,49 @@ implementations of one protocol disagree without anyone noticing. So:
   line here can carry a prompt, a file or a credential, and a framing error is
   not a reason to copy it into a log.
 
+## Rate limits are a gauge, not just a breach event
+
+ACP has no field for a rate limit, so the detail rides in `_meta` under
+`particle.academy/rate_limit` alongside a human-readable notice. It is a
+**declared type**, not a passthrough:
+
+```ts
+import { parseRateLimit, type ClaudeRateLimit } from '@particle-academy/prism-acp';
+
+const limit: ClaudeRateLimit | undefined = parseRateLimit(payload);
+const fiveHour = limit?.windows.five_hour;
+
+if (fiveHour !== undefined) {
+  const remaining = Math.max(0, 1 - fiveHour.utilization);
+  console.log(`${Math.round(remaining * 100)}% left, resets ${new Date(fiveHour.resetsAtMs)}`);
+}
+```
+
+The frame arrives **mid-turn with `status: "allowed"`**, not only once you are
+limited, and `utilization` moves as work is done — so remaining headroom is a
+real reading rather than a feature invented to fill a panel.
+
+Three things a consumer needs and cannot infer:
+
+- **`resetsAt` is epoch SECONDS on the wire.** `resetsAtMs` is this package's,
+  converted once. Read the provider's field as milliseconds and every reset
+  time lands in January 1970.
+- **`utilization` can exceed 1.** The frame models overage, so a window past
+  its allowance is a real state; the parse does not cap it, because a capped
+  figure would be one this package made up. Clamp where you draw the bar, next
+  to `isUsingOverage`.
+- **`status` and `overageStatus` are open string unions.** Every frame captured
+  says `"allowed"`; no breached frame has ever been captured, so the breached
+  spelling is unknown. Test `status !== 'allowed'`, and never match a specific
+  breach value.
+
+`parseRateLimit` returns `undefined` rather than a partial, and a payload it
+does not recognise gets **no `rate_limit` key at all** — the frame goes to
+`particle.academy/unmapped_frame` instead. That is the whole reason it is a
+parse and not an interface: an interface over `unknown` is a cast, so a renamed
+provider field would still read as `undefined`, and a gauge renders `undefined`
+as empty. An empty headroom gauge is read by a human as plenty of headroom.
+
 ## Using it
 
 ```ts
@@ -117,8 +160,7 @@ import { serve, ClaudeDriver } from '@particle-academy/prism-acp';
 serve({
   input: process.stdin,
   output: process.stdout,
-  driverFactory: (options, events) =>
-    new ClaudeDriver({ cwd: options.cwd, ...options }, events),
+  driverFactory: (options, events) => new ClaudeDriver(options, events),
 });
 ```
 

@@ -28,6 +28,7 @@ import {
   META_UNMAPPED_FRAME,
   withMeta,
 } from '../meta.js';
+import { parseRateLimit, rateLimitNotice } from './rate-limit.js';
 
 /** An ACP `session/update` payload: the `update` object, without the sessionId. */
 export type AcpUpdate = Record<string, unknown> & { readonly sessionUpdate: string };
@@ -328,13 +329,39 @@ export class ClaudeToAcp {
   #rateLimit(input: Record<string, unknown>): AcpUpdate[] {
     // A notice because it is genuinely user-facing, AND _meta so a client can
     // act on the reset times rather than parse a sentence.
+    //
+    // The payload is NARROWED rather than passed through. A rename by the
+    // provider used to reach the consumer as a field it could not read, which
+    // a gauge renders as empty -- and an empty headroom gauge reads as plenty
+    // of headroom. So an unrecognised payload now emits no rate-limit value at
+    // all and keeps the frame under `unmapped_frame` instead: absent and
+    // explained, rather than zero and plausible.
+    const limit = parseRateLimit(input.rate_limit_info ?? input);
+
+    if (limit === undefined) {
+      return [
+        withMeta(
+          {
+            sessionUpdate: 'notice',
+            notice: { level: 'warning', message: 'The provider reported a rate limit.' },
+          },
+          {
+            [META_UNMAPPED_FRAME]: {
+              reason: 'rate_limit payload not recognised',
+              frame: input,
+            },
+          },
+        ),
+      ];
+    }
+
     return [
       withMeta(
         {
           sessionUpdate: 'notice',
-          notice: { level: 'warning', message: 'The provider reported a rate limit.' },
+          notice: { level: 'warning', message: rateLimitNotice(limit) },
         },
-        { [META_RATE_LIMIT]: input.rate_limit_info ?? input },
+        { [META_RATE_LIMIT]: limit },
       ),
     ];
   }
