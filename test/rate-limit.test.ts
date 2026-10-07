@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ClaudeToAcp, type AcpUpdate } from '../src/claude/to-acp.js';
 import { META_RATE_LIMIT, META_UNMAPPED_FRAME } from '../src/meta.js';
-import { parseRateLimit, rateLimitNotice } from '../src/claude/rate-limit.js';
+import { parseRateLimit, rateLimitNotice, readRateLimit } from '../src/claude/rate-limit.js';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
 
@@ -145,6 +145,72 @@ describe('what the parse refuses', () => {
   });
 });
 
+describe('the refusal says WHICH field, because it is the only diagnostic', () => {
+  // Raised by this package's first external reviewer: since one bad field
+  // rejects the whole payload, a generic reason turns a bug report from "they
+  // renamed utilization" into "the gauge vanished".
+  it('names the exact path and what was expected', () => {
+    const payload = onePayload();
+    (payload.unifiedWindows as Record<string, Record<string, unknown>>).five_hour.utilization =
+      null;
+
+    const read = readRateLimit(payload);
+    expect(read.ok).toBe(false);
+    if (read.ok) return;
+    expect(read.reason).toBe(
+      'rate_limit: unifiedWindows.five_hour.utilization expected finite number >= 0, got null',
+    );
+  });
+
+  it('names a renamed top-level field rather than the payload as a whole', () => {
+    const payload = onePayload();
+    payload.resets_at = payload.resetsAt;
+    delete payload.resetsAt;
+
+    const read = readRateLimit(payload);
+    expect(read.ok).toBe(false);
+    if (read.ok) return;
+    expect(read.reason).toContain('resetsAt expected finite number > 0 (epoch seconds)');
+    expect(read.reason).toContain('got undefined');
+  });
+
+  it('describes a string by TYPE AND LENGTH, never by quoting it', () => {
+    // This module sits on the same stream as prompts, file contents and
+    // credentials, and the package already refuses to put a framing error's
+    // content in a log. `string(10)` identifies a provider turning a number
+    // into a string just as well as the digits would, and cannot leak whatever
+    // a future frame puts in that field.
+    const payload = onePayload();
+    payload.resetsAt = '1791260400';
+
+    const read = readRateLimit(payload);
+    expect(read.ok).toBe(false);
+    if (read.ok) return;
+    expect(read.reason).toContain('got string(10)');
+    expect(read.reason).not.toContain('1791260400');
+  });
+
+  it('reaches the consumer: the mapper puts that reason on unmapped_frame', () => {
+    const payload = onePayload();
+    delete payload.unifiedWindows;
+
+    const [update] = new ClaudeToAcp().frame({
+      type: 'rate_limit_event',
+      rate_limit_info: payload,
+    });
+    const unmapped = ((update._meta ?? {}) as Record<string, unknown>)[META_UNMAPPED_FRAME] as {
+      reason: string;
+    };
+
+    expect(unmapped.reason).toBe('rate_limit: unifiedWindows expected an object, got undefined');
+  });
+
+  it('parseRateLimit stays the convenience it was -- value or undefined', () => {
+    expect(parseRateLimit(onePayload())).toBeDefined();
+    expect(parseRateLimit({ nope: true })).toBeUndefined();
+  });
+});
+
 describe('what the parse must NOT refuse', () => {
   it('accepts a status nobody here has ever captured', () => {
     const payload = onePayload();
@@ -246,7 +312,9 @@ describe('through the mapper', () => {
     expect(meta[META_RATE_LIMIT]).toBeUndefined();
 
     const unmapped = meta[META_UNMAPPED_FRAME] as { reason?: string; frame?: unknown };
-    expect(unmapped.reason).toBe('rate_limit payload not recognised');
+    expect(unmapped.reason).toBe(
+      'rate_limit: resetsAt expected finite number > 0 (epoch seconds), got undefined',
+    );
     expect(unmapped.frame).toEqual({ type: 'rate_limit_event', rate_limit_info: payload });
   });
 

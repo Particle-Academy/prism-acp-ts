@@ -28,7 +28,7 @@ import {
   META_UNMAPPED_FRAME,
   withMeta,
 } from '../meta.js';
-import { parseRateLimit, rateLimitNotice } from './rate-limit.js';
+import { rateLimitNotice, readRateLimit } from './rate-limit.js';
 
 /** An ACP `session/update` payload: the `update` object, without the sessionId. */
 export type AcpUpdate = Record<string, unknown> & { readonly sessionUpdate: string };
@@ -336,9 +336,15 @@ export class ClaudeToAcp {
     // of headroom. So an unrecognised payload now emits no rate-limit value at
     // all and keeps the frame under `unmapped_frame` instead: absent and
     // explained, rather than zero and plausible.
-    const limit = parseRateLimit(input.rate_limit_info ?? input);
+    //
+    // The refusal NAMES THE FIELD, because the refusal is total: one bad field
+    // rejects the whole payload, so this reason is the only thing a human gets.
+    // A generic "not recognised" would turn a bug report from "they renamed
+    // utilization" into "the gauge vanished", and someone diffing a frame by
+    // hand to tell the difference.
+    const read = readRateLimit(input.rate_limit_info ?? input);
 
-    if (limit === undefined) {
+    if (!read.ok) {
       return [
         withMeta(
           {
@@ -346,10 +352,7 @@ export class ClaudeToAcp {
             notice: { level: 'warning', message: 'The provider reported a rate limit.' },
           },
           {
-            [META_UNMAPPED_FRAME]: {
-              reason: 'rate_limit payload not recognised',
-              frame: input,
-            },
+            [META_UNMAPPED_FRAME]: { reason: read.reason, frame: input },
           },
         ),
       ];
@@ -359,9 +362,9 @@ export class ClaudeToAcp {
       withMeta(
         {
           sessionUpdate: 'notice',
-          notice: { level: 'warning', message: rateLimitNotice(limit) },
+          notice: { level: 'warning', message: rateLimitNotice(read.limit) },
         },
-        { [META_RATE_LIMIT]: limit },
+        { [META_RATE_LIMIT]: read.limit },
       ),
     ];
   }

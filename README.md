@@ -147,7 +147,22 @@ Three things a consumer needs and cannot infer:
 
 `parseRateLimit` returns `undefined` rather than a partial, and a payload it
 does not recognise gets **no `rate_limit` key at all** — the frame goes to
-`particle.academy/unmapped_frame` instead. That is the whole reason it is a
+`particle.academy/unmapped_frame` instead, **with the field that failed named**:
+
+```
+rate_limit: unifiedWindows.five_hour.utilization expected finite number >= 0, got null
+```
+
+That reason is load-bearing precisely because the refusal is total: one bad
+field rejects the whole payload, so this string is the only thing a human gets.
+Generic would mean a bug report of "the gauge vanished" rather than "they
+renamed `utilization`". `readRateLimit()` returns it to you directly
+(`{ ok: true, limit } | { ok: false, reason }`) if you would rather handle the
+refusal than check for `undefined`.
+
+A string value is described as `string(10)`, never quoted. This mapper sits on
+the same stream as prompts, file contents and credentials, and the type tells
+you a number became a string just as well as the digits would. That is the whole reason it is a
 parse and not an interface: an interface over `unknown` is a cast, so a renamed
 provider field would still read as `undefined`, and a gauge renders `undefined`
 as empty. An empty headroom gauge is read by a human as plenty of headroom.

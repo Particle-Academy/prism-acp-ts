@@ -98,6 +98,19 @@ export interface ClaudeRateLimit {
   readonly raw: Record<string, unknown>;
 }
 
+/**
+ * The result of reading a payload: the value, or WHY it was refused.
+ *
+ * The reason exists because the refusal is total. Since one bad field rejects
+ * the whole payload, the explanation is the ONLY thing a human gets when the
+ * provider changes shape -- so "not recognised" would turn a bug report into
+ * somebody diffing a frame by hand. Raised by prism-acp's first external
+ * reviewer, against this exact design.
+ */
+export type RateLimitRead =
+  | { readonly ok: true; readonly limit: ClaudeRateLimit }
+  | { readonly ok: false; readonly reason: string };
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -114,6 +127,33 @@ function optionalString(value: unknown): string | undefined {
 }
 
 /**
+ * Describe what arrived, WITHOUT quoting it.
+ *
+ * A number, boolean, null or undefined is reported as itself -- those are the
+ * cases that identify a shape change and none of them can carry content. A
+ * STRING is reported as its type and length only, because this module sits on
+ * the same stream as prompts, file contents and credentials, and this package
+ * already refuses to put a framing error's content in a log (see
+ * `MAX_LINE_BYTES` in the README). "expected finite number, got string(10)"
+ * identifies a provider switching a number to a string just as well as the
+ * digits would, and cannot leak anything if a future frame puts something else
+ * in that field.
+ */
+function describe(value: unknown): string {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'string') return `string(${value.length})`;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (typeof value === 'object') return 'object';
+  return typeof value;
+}
+
+function refuse(path: string, expected: string, got: unknown): RateLimitRead {
+  return { ok: false, reason: `rate_limit: ${path} expected ${expected}, got ${describe(got)}` };
+}
+
+/**
  * Narrow an unknown rate-limit payload, or refuse it.
  *
  * Returns `undefined` rather than a partial value. A partial is the thing worth
@@ -125,29 +165,55 @@ function optionalString(value: unknown): string | undefined {
  * number, off the wrong window, with nothing to indicate the substitution.
  */
 export function parseRateLimit(value: unknown): ClaudeRateLimit | undefined {
-  if (!isObject(value)) return undefined;
+  const read = readRateLimit(value);
+  return read.ok ? read.limit : undefined;
+}
+
+/**
+ * The same read, but saying WHY when it refuses.
+ *
+ * {@link parseRateLimit} is the convenience; this is what the mapper uses,
+ * because the mapper is what has to explain itself to a human.
+ */
+export function readRateLimit(value: unknown): RateLimitRead {
+  if (!isObject(value)) return refuse('payload', 'an object', value);
 
   const status = optionalString(value.status);
-  const rateLimitType = optionalString(value.rateLimitType);
-  const resetsAtSeconds = finite(value.resetsAt, Number.MIN_VALUE);
+  if (status === undefined) return refuse('status', 'string', value.status);
 
-  if (status === undefined || rateLimitType === undefined || resetsAtSeconds === undefined) {
-    return undefined;
+  const rateLimitType = optionalString(value.rateLimitType);
+  if (rateLimitType === undefined) return refuse('rateLimitType', 'string', value.rateLimitType);
+
+  const resetsAtSeconds = finite(value.resetsAt, Number.MIN_VALUE);
+  if (resetsAtSeconds === undefined) {
+    return refuse('resetsAt', 'finite number > 0 (epoch seconds)', value.resetsAt);
   }
 
   // An absent `unifiedWindows` is refused, not treated as "no windows": it is
   // the only part of this payload that answers "how much is left", so a
   // consumer receiving a typed value without it would have a reset time and no
   // gauge, which is the shape this type exists to stop being ambiguous.
-  if (!isObject(value.unifiedWindows)) return undefined;
+  if (!isObject(value.unifiedWindows)) {
+    return refuse('unifiedWindows', 'an object', value.unifiedWindows);
+  }
 
   const windows: Record<string, ClaudeRateLimitWindow> = {};
   for (const [name, window] of Object.entries(value.unifiedWindows)) {
-    if (!isObject(window)) return undefined;
+    if (!isObject(window)) return refuse(`unifiedWindows.${name}`, 'an object', window);
 
     const utilization = finite(window.utilization, 0);
+    if (utilization === undefined) {
+      return refuse(`unifiedWindows.${name}.utilization`, 'finite number >= 0', window.utilization);
+    }
+
     const windowResetsAtSeconds = finite(window.resetsAt, Number.MIN_VALUE);
-    if (utilization === undefined || windowResetsAtSeconds === undefined) return undefined;
+    if (windowResetsAtSeconds === undefined) {
+      return refuse(
+        `unifiedWindows.${name}.resetsAt`,
+        'finite number > 0 (epoch seconds)',
+        window.resetsAt,
+      );
+    }
 
     windows[name] = { utilization, resetsAtMs: windowResetsAtSeconds * 1000 };
   }
@@ -156,18 +222,21 @@ export function parseRateLimit(value: unknown): ClaudeRateLimit | undefined {
     typeof value.isUsingOverage === 'boolean' ? value.isUsingOverage : undefined;
 
   return {
-    status,
-    resetsAtMs: resetsAtSeconds * 1000,
-    rateLimitType,
-    ...(optionalString(value.overageStatus) === undefined
-      ? {}
-      : { overageStatus: value.overageStatus as string }),
-    ...(optionalString(value.overageDisabledReason) === undefined
-      ? {}
-      : { overageDisabledReason: value.overageDisabledReason as string }),
-    ...(isUsingOverage === undefined ? {} : { isUsingOverage }),
-    windows,
-    raw: value,
+    ok: true,
+    limit: {
+      status,
+      resetsAtMs: resetsAtSeconds * 1000,
+      rateLimitType,
+      ...(optionalString(value.overageStatus) === undefined
+        ? {}
+        : { overageStatus: value.overageStatus as string }),
+      ...(optionalString(value.overageDisabledReason) === undefined
+        ? {}
+        : { overageDisabledReason: value.overageDisabledReason as string }),
+      ...(isUsingOverage === undefined ? {} : { isUsingOverage }),
+      windows,
+      raw: value,
+    },
   };
 }
 
