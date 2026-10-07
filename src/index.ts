@@ -21,6 +21,7 @@ export type {
 } from './jsonrpc.js';
 
 export {
+  META_CLI_SESSION_ID,
   META_NS,
   META_RATE_LIMIT,
   META_THINKING_SIGNATURE,

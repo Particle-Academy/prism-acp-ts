@@ -22,6 +22,7 @@
  * reasoning, or the arguments to a command about to run.
  */
 import {
+  META_CLI_SESSION_ID,
   META_RATE_LIMIT,
   META_THINKING_SIGNATURE,
   META_THINKING_TOKENS_ESTIMATE,
@@ -287,7 +288,28 @@ export class ClaudeToAcp {
           ),
         ];
 
-      case 'init':
+      case 'init': {
+        // The init frame carries the CLI's OWN session id, and that is the only
+        // string `--resume` accepts -- so it is the only string `session/load`
+        // can work with. It used to be recorded as unmapped, which meant the
+        // driver captured it, kept it correctly separate from ACP's sessionId,
+        // and then nothing handed it to the client. Resume was a method the
+        // client could not supply an argument for.
+        //
+        // Emitted on the FIRST frame of a session rather than at the end of a
+        // turn: a session that fails early still needs to be resumable, and a
+        // client cannot store what it was never sent.
+        const cliSessionId = asString(input.session_id);
+        if (cliSessionId === undefined) return this.#unknown(input);
+
+        return [
+          withMeta(
+            { sessionUpdate: 'notice', notice: { level: 'debug', message: 'session started' } },
+            { [META_CLI_SESSION_ID]: cliSessionId },
+          ),
+        ];
+      }
+
       case 'status':
       case 'api_retry':
         // Not mapped, but RECORDED. api_retry especially: it is how an

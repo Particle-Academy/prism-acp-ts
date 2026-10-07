@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { ClaudeToAcp, type AcpUpdate } from '../src/claude/to-acp.js';
 import { NdjsonFramer } from '../src/ndjson.js';
 import {
+  META_CLI_SESSION_ID,
   META_RATE_LIMIT,
   META_THINKING_SIGNATURE,
   META_THINKING_TOKENS_ESTIMATE,
@@ -238,12 +239,52 @@ describe('frames with no ACP home are recorded, not dropped', () => {
     expect(mapper.unmapped.every((f) => typeof f === 'object' && f !== null)).toBe(true);
   });
 
-  it('records system/init rather than mapping it', () => {
+  it('no longer records system/init, because it now carries the resume id', () => {
+    // This test used to assert the opposite, and the opposite was a defect:
+    // init carries the CLI's own session id, which is the ONLY string
+    // `session/load` can resume with, and recording it as unmapped meant the
+    // client was never sent the argument the resume method requires.
     const { mapper } = mapFixture();
     const subtypes = mapper.unmapped
       .map((f) => (f as { subtype?: string }).subtype)
       .filter(Boolean);
-    expect(subtypes).toContain('init');
+    expect(subtypes).not.toContain('init');
+
+    // status and api_retry are still recorded -- api_retry especially, since it
+    // is how an outranked credential announces itself.
+    expect(subtypes).toContain('status');
+  });
+
+  it('maps system/init to a notice carrying the CLI session id', () => {
+    const { updates } = mapFixture();
+    const started = updates.find(
+      (u) =>
+        u.sessionUpdate === 'notice' &&
+        (u._meta as Record<string, unknown> | undefined)?.[META_CLI_SESSION_ID] !== undefined,
+    );
+
+    expect(started).toBeDefined();
+    const id = (started?._meta as Record<string, unknown>)[META_CLI_SESSION_ID];
+    expect(typeof id).toBe('string');
+    expect(id).not.toBe('');
+  });
+
+  it('emits it on the FIRST update, so a session that fails early is still resumable', () => {
+    // A client cannot store what it was never sent, and a session can die
+    // before its first turn completes.
+    const { updates } = mapFixture();
+    const index = updates.findIndex(
+      (u) => (u._meta as Record<string, unknown> | undefined)?.[META_CLI_SESSION_ID] !== undefined,
+    );
+    expect(index).toBe(0);
+  });
+
+  it('records an init frame with no session_id rather than inventing one', () => {
+    const mapper = new ClaudeToAcp();
+    const updates = mapper.frame({ type: 'system', subtype: 'init', model: 'x' });
+
+    expect(updates).toEqual([]);
+    expect(mapper.unmapped.length).toBe(1);
   });
 
   it('does NOT record any content frame as unmapped', () => {

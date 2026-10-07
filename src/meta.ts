@@ -91,6 +91,26 @@ export const META_RATE_LIMIT = metaKey('rate_limit');
 export const META_UNMAPPED_FRAME = metaKey('unmapped_frame');
 
 /**
+ * The CLI's OWN session id -- the only string `session/load` can resume with.
+ *
+ * This exists because its absence was a hole in the middle of resume. ACP's
+ * `sessionId` is minted by this server; the CLI has a different id of its own,
+ * a UUID, and `--resume` wants that one. The two were kept correctly separate
+ * inside the driver and then **never handed to the client**, so a client that
+ * stored the id `session/new` returned and passed it back to `session/load`
+ * was passing a string the CLI cannot resume.
+ *
+ * ACP has no field for a provider's internal session id, which is precisely
+ * what `_meta` is for. It rides on the `init` frame's notice, so it is the
+ * first thing a client learns about a session -- a client that only reads it
+ * after the first turn would miss it on a session that fails early.
+ *
+ * Store it against your own record of the session. It is what you pass to
+ * `session/load` after a restart, and ACP's own `sessionId` is not.
+ */
+export const META_CLI_SESSION_ID = metaKey('cli_session_id');
+
+/**
  * Attach `_meta` entries to an ACP object without disturbing its own fields.
  *
  * Returns a new object; the input is not mutated. Existing `_meta` is merged

@@ -370,6 +370,148 @@ describe('session/load', () => {
     expect((await call(h, 'session/load', { cwd: '/work', mcpServers: [] })).error).toBeDefined();
   });
 
+  it('REVIVES a session whose agent exited, which is what resume is for', async () => {
+    // This was refused as "already open", and that described the sessions map
+    // rather than reality: an exited session is never removed from it, only
+    // flagged. So the one state anyone resumes from -- a crashed or killed
+    // agent, or one lost to a restart -- was the one state rejected.
+    const h = harness();
+    await call(h, 'session/new', { cwd: '/work', mcpServers: [] }, 1);
+    const cliId = h.drivers[0]?.cliSessionId;
+    expect(cliId).toBe('cli-session');
+
+    h.drivers[0]?.events.onExit?.(1, null);
+
+    const revived = await call(
+      h,
+      'session/load',
+      { sessionId: cliId, cwd: '/work', mcpServers: [] },
+      2,
+    );
+
+    expect(revived.result).toEqual({});
+    // One new agent, and it is resuming -- not a second agent on a fresh
+    // conversation, which is the failure that looks like success.
+    expect(h.drivers).toHaveLength(2);
+    expect(h.drivers[1]?.options.resumeSessionId).toBe(cliId);
+  });
+
+  it('resumes the SAME conversation twice, which a restart loop requires', async () => {
+    // The case the exited-versus-live distinction actually exists for, and the
+    // one `REVIVES` above does not reach: a load keys the session by the CLI id,
+    // so the SECOND load of that id finds its own earlier entry in the map.
+    // Refusing it as "already open" would mean a conversation could survive one
+    // restart and never two -- and a machine that wedges 21 agents at a time
+    // restarts more than once.
+    const h = harness();
+    const cliId = 'cli-session';
+
+    await call(h, 'session/load', { sessionId: cliId, cwd: '/work', mcpServers: [] }, 1);
+    h.drivers[0]?.events.onExit?.(1, null);
+
+    const second = await call(
+      h,
+      'session/load',
+      { sessionId: cliId, cwd: '/work', mcpServers: [] },
+      2,
+    );
+
+    expect(second.result).toEqual({});
+    expect(h.drivers).toHaveLength(2);
+    expect(h.drivers[1]?.options.resumeSessionId).toBe(cliId);
+  });
+
+  it('still refuses a session whose agent is STILL RUNNING', async () => {
+    // The narrower refusal must not have become no refusal: two processes
+    // writing updates for one session id makes the second look like the first
+    // stuttering.
+    const h = harness();
+    await call(h, 'session/new', { cwd: '/work', mcpServers: [] }, 1);
+    const cliId = h.drivers[0]?.cliSessionId;
+
+    const again = await call(
+      h,
+      'session/load',
+      { sessionId: cliId, cwd: '/work', mcpServers: [] },
+      2,
+    );
+
+    expect(again.error).toMatchObject({
+      message: expect.stringContaining('still running'),
+    });
+    expect(h.drivers).toHaveLength(1);
+  });
+
+  it('REFUSES an id this server minted, which --resume provably cannot take', async () => {
+    // The hole this closes: session/new hands back an id of OUR making, the CLI
+    // resumes only by its own UUID, and passing the former to --resume cannot
+    // work. The CLI does error on it rather than silently starting fresh --
+    // verified against claude 2.1.292, both for a non-UUID and for a well-formed
+    // UUID that does not exist -- but that error arrives when the first PROMPT
+    // runs, long after session/load has returned success and the client has
+    // concluded it holds a resumed session.
+    const h = harness();
+    const reply = await call(h, 'session/load', {
+      sessionId: 'sess_1_1791400000000',
+      cwd: '/work',
+      mcpServers: [],
+    });
+
+    expect(reply.error).toBeDefined();
+    // The message must say what to pass INSTEAD. The CLI's own error cannot,
+    // because the CLI has never heard of ACP.
+    expect(reply.error).toMatchObject({
+      message: expect.stringContaining('particle.academy/cli_session_id'),
+    });
+    // And nothing is spawned, so no process is left writing updates for a
+    // session the client does not actually have.
+    expect(h.drivers).toHaveLength(0);
+  });
+
+  it('still accepts a session TITLE, which the CLI does take alongside a UUID', async () => {
+    // The refusal above is deliberately narrow. A broader "does not look like a
+    // UUID" test would reject a title, and the CLI accepts those.
+    const h = harness();
+    const reply = await call(h, 'session/load', {
+      sessionId: 'my-saved-conversation',
+      cwd: '/work',
+      mcpServers: [],
+    });
+
+    expect(reply.result).toEqual({});
+    expect(h.drivers[0]?.options.resumeSessionId).toBe('my-saved-conversation');
+  });
+
+  it('closes the loop: the id handed out by session/new is refused by session/load', async () => {
+    // The whole defect in one assertion. A client doing the obvious thing --
+    // store what session/new returned, pass it back to session/load -- must now
+    // be TOLD, rather than discovering it when its first prompt dies.
+    //
+    // This harness injects `newSessionId: () => 'sess_N'`, which the default
+    // mint PATTERN does not match. That makes this the embedder case: it passes
+    // only because the agent records the ids it actually handed out, not because
+    // the id looks like ours.
+    const h = harness();
+    const created = await call(h, 'session/new', { cwd: '/work', mcpServers: [] }, 1);
+    const mintedId = (created.result as { sessionId: string }).sessionId;
+    expect(mintedId).not.toMatch(/^sess_\d+_\d+$/);
+
+    // The agent process dies -- a crash, a kill, a Genie restart. This is the
+    // state anyone actually tries to resume from.
+    h.drivers[0]?.events.onExit?.(1, null);
+
+    const resumed = await call(
+      h,
+      'session/load',
+      { sessionId: mintedId, cwd: '/work', mcpServers: [] },
+      2,
+    );
+
+    expect(resumed.error).toMatchObject({
+      message: expect.stringContaining('particle.academy/cli_session_id'),
+    });
+  });
+
   it('does NOT pass resumeSessionId for a new session', async () => {
     // A wrong resume flag does not error -- it starts a fresh conversation
     // while the caller believes it continued one.

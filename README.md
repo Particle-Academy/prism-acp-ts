@@ -109,6 +109,43 @@ implementations of one protocol disagree without anyone noticing. So:
   line here can carry a prompt, a file or a credential, and a framing error is
   not a reason to copy it into a log.
 
+## Resuming a session: use the CLI's id, not ACP's
+
+`session/load` works, and `initialize` reports `loadSession: true`. The trap is
+which id to pass.
+
+**ACP's `sessionId` is not resumable.** `session/new` returns an id this server
+minted; the CLI has its own session id, a UUID, and `claude --resume` accepts
+only that one (or a session title). The two are deliberately separate, and the
+CLI's is published on the **first** `session/update` of every session:
+
+```ts
+import { META_CLI_SESSION_ID } from '@particle-academy/prism-acp';
+
+// on the first session/update of a session
+const cliSessionId = update._meta?.[META_CLI_SESSION_ID];
+// store this against your own record -- it is what survives a restart
+```
+
+Then after a crash, a kill, or a restart:
+
+```
+session/load { sessionId: <the cli session id>, cwd: <absolute> }
+```
+
+Pass the ACP id instead and you get an error naming the key above, rather than a
+success followed by a dead first prompt. That refusal exists because the CLI's
+own complaint arrives one turn too late: it does error on an id it cannot
+resume -- verified against claude 2.1.292 for both a non-UUID and a well-formed
+UUID that does not exist, and it never silently starts a fresh conversation --
+but by then `session/load` has already returned `{}` and you believe you have a
+resumed session.
+
+A session whose agent has **exited** is loadable; one whose agent is **still
+running** is refused, by either id. No history is replayed on load, because the
+CLI replays none -- `session/load` returning `{}` with no `session/update`
+notifications is the honest report of that, not an omission.
+
 ## Rate limits are a gauge, not just a breach event
 
 ACP has no field for a rate limit, so the detail rides in `_meta` under

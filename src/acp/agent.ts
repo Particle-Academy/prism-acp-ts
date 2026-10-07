@@ -24,6 +24,7 @@
 import { JsonRpcPeer, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR, RpcError } from '../jsonrpc.js';
 import type { AcpUpdate } from '../claude/to-acp.js';
 import type { StopReason, TurnOutcome } from '../claude/driver.js';
+import { META_CLI_SESSION_ID } from '../meta.js';
 
 /** The protocol version this agent speaks. */
 export const PROTOCOL_VERSION = 1;
@@ -77,11 +78,23 @@ interface Session {
   exited: boolean;
 }
 
+/**
+ * The shape `#sessionNew` mints: `sess_<counter>_<epoch ms>`.
+ *
+ * Deliberately narrow. A broader "does not look like a UUID" test would refuse
+ * a session TITLE, which the CLI accepts alongside a UUID -- so this refuses
+ * only the ids this server is known to have handed out and which provably
+ * cannot resume.
+ */
+const MINTED_SESSION_ID = /^sess_\d+_\d+$/;
+
 export class AcpAgent {
   readonly #peer: JsonRpcPeer;
   readonly #options: AcpAgentOptions;
   readonly #sessions = new Map<string, Session>();
   #counter = 0;
+  /** Ids this process handed out via session/new. See the refusal in #sessionLoad. */
+  readonly #minted = new Set<string>();
 
   constructor(peer: JsonRpcPeer, options: AcpAgentOptions) {
     this.#peer = peer;
@@ -156,6 +169,7 @@ export class AcpAgent {
   #sessionNew(params: unknown): Record<string, unknown> {
     const cwd = requireAbsoluteCwd(params);
     const id = this.#options.newSessionId?.() ?? `sess_${++this.#counter}_${Date.now()}`;
+    this.#minted.add(id);
     this.#open(id, cwd, undefined);
     return { sessionId: id };
   }
@@ -171,8 +185,71 @@ export class AcpAgent {
     // Resuming an id this server already has open would leave two processes
     // writing updates for one session, and the second would look like the
     // first stuttering.
-    if (this.#sessions.has(sessionId)) {
-      throw new RpcError(RPC_INVALID_PARAMS, `session ${sessionId} is already open`);
+    // Refused only while the session is genuinely LIVE. A session whose agent
+    // process has exited is the main thing anyone resumes -- a crashed or
+    // killed agent, or one lost to a restart -- and refusing that as "already
+    // open" described the map rather than reality: an exited session is never
+    // removed from it, only flagged. The old check made the one case resume
+    // exists for the one case it rejected.
+    const existing = this.#sessions.get(sessionId);
+    if (existing !== undefined && !existing.exited) {
+      throw new RpcError(
+        RPC_INVALID_PARAMS,
+        `session ${sessionId} is already open and its agent is still running`,
+      );
+    }
+
+    // The same refusal, by the CLI's id rather than ACP's.
+    //
+    // The sessions map is keyed by the ACP session id, so a lookup for a CLI id
+    // never matched a session opened by `session/new` -- meaning a client
+    // resuming a conversation whose agent was STILL RUNNING got a second agent
+    // on the same conversation, with no collision reported. That was
+    // unreachable while nothing could obtain a CLI id to resume with, and
+    // publishing the id is exactly what makes it reachable. Fixing the one
+    // without the other would have traded a dead end for two processes writing
+    // updates for one conversation.
+    for (const session of this.#sessions.values()) {
+      if (!session.exited && session.driver?.cliSessionId === sessionId) {
+        throw new RpcError(
+          RPC_INVALID_PARAMS,
+          `session ${sessionId} is already open as ${session.id} and its agent is still running`,
+        );
+      }
+    }
+
+    // REFUSE an id this server minted, because `--resume` provably cannot take
+    // it: `session/new` returns an id of OUR making, the CLI has its own UUID,
+    // and only the CLI's works. A client that stored the id it was handed and
+    // passed it back here was the obvious thing to do and could never have
+    // worked.
+    //
+    // Refused HERE rather than left to the CLI, even though the CLI does error
+    // on it (verified: "is not a UUID and does not match any session title",
+    // and "No conversation found with session ID" for a well-formed one that
+    // does not exist -- it never silently starts a fresh conversation). That
+    // error arrives when the FIRST PROMPT runs, by which point `session/load`
+    // has already returned success and the client believes it has a resumed
+    // session. Moving the refusal to the load makes the failure land where the
+    // mistake was made, and the message can say what to pass instead -- which
+    // the CLI's cannot, because the CLI has never heard of ACP.
+    // Two tests, because neither alone is enough. The PATTERN catches the
+    // default mint and survives a restart, which is the case that matters most
+    // -- but an embedder supplying its own `newSessionId` is not covered by it.
+    // The SET catches any id this process actually handed out, whatever its
+    // shape, and does not survive a restart.
+    //
+    // Nothing covers "an id minted by a previous process using an injected
+    // generator", and nothing can: this server cannot tell such a string from a
+    // CLI session title by inspection. That residue is exactly why the CLI's
+    // own id is published in `_meta` rather than left to be guessed at.
+    if (MINTED_SESSION_ID.test(sessionId) || this.#minted.has(sessionId)) {
+      throw new RpcError(
+        RPC_INVALID_PARAMS,
+        `${sessionId} is an ACP session id minted by this server, which 'claude --resume' cannot accept. ` +
+          `Resume with the CLI's own session id, sent as '${META_CLI_SESSION_ID}' in the _meta of the first ` +
+          `session/update of the original session.`,
+      );
     }
 
     this.#open(sessionId, cwd, sessionId);
