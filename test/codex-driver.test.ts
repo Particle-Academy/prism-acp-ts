@@ -11,9 +11,19 @@ class FakeTransport implements CodexTransport {
   readonly sent: Record<string, unknown>[] = [];
   #handlers: CodexTransportHandlers;
   #turnPage = 0;
+  #historyItems: readonly Record<string, unknown>[];
+  #singleHistoryTurn: boolean;
 
-  constructor(handlers: CodexTransportHandlers) {
+  constructor(
+    handlers: CodexTransportHandlers,
+    historyItems: readonly Record<string, unknown>[] = [
+      { item: { type: 'agentMessage', id: 'item-history', text: 'remembered' } },
+    ],
+    singleHistoryTurn = false,
+  ) {
     this.#handlers = handlers;
+    this.#historyItems = historyItems;
+    this.#singleHistoryTurn = singleHistoryTurn;
   }
 
   async start(): Promise<void> {}
@@ -42,13 +52,15 @@ class FakeTransport implements CodexTransport {
         break;
       case 'thread/turns/list':
         this.#turnPage += 1;
-        result = this.#turnPage === 1
-          ? { data: [{ id: 'turn-history' }], nextCursor: 'turn-cursor' }
-          : { data: [{ id: 'turn-history-2' }], nextCursor: null };
+        result = this.#singleHistoryTurn
+          ? { data: [{ id: 'turn-history' }], nextCursor: null }
+          : this.#turnPage === 1
+            ? { data: [{ id: 'turn-history' }], nextCursor: 'turn-cursor' }
+            : { data: [{ id: 'turn-history-2' }], nextCursor: null };
         break;
       case 'thread/items/list':
         result = {
-          data: [{ item: { type: 'agentMessage', id: 'item-history', text: 'remembered' } }],
+          data: this.#historyItems,
           nextCursor: null,
         };
         break;
@@ -66,10 +78,15 @@ class FakeTransport implements CodexTransport {
   }
 }
 
-function setup(options: { resumeSessionId?: string; turnInactivityTimeoutMs?: number } = {}, events: ConstructorParameters<typeof CodexDriver>[1] = {}) {
+function setup(
+  options: { resumeSessionId?: string; turnInactivityTimeoutMs?: number } = {},
+  events: ConstructorParameters<typeof CodexDriver>[1] = {},
+  historyItems?: readonly Record<string, unknown>[],
+  singleHistoryTurn = false,
+) {
   let transport!: FakeTransport;
   const factory: CodexTransportFactory = (_options: CodexTransportOptions, handlers) => {
-    transport = new FakeTransport(handlers);
+    transport = new FakeTransport(handlers, historyItems, singleHistoryTurn);
     return transport;
   };
   const updates: Record<string, unknown>[] = [];
@@ -165,6 +182,70 @@ describe('CodexDriver', () => {
       result: { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['git', 'status'] } } },
     });
     state.close();
+  });
+
+  it('emits one full user message when a live item starts and completes', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    const item = {
+      type: 'userMessage',
+      id: 'user-message-live',
+      content: [{ type: 'text', text: 'the full client prompt' }],
+    };
+    state.transport.frame({ jsonrpc: '2.0', method: 'item/started', params: { item } });
+    state.transport.frame({
+      jsonrpc: '2.0',
+      method: 'item/completed',
+      params: { item: { ...item, status: 'completed' } },
+    });
+
+    const userMessages = state.updates.filter((update) => update.sessionUpdate === 'user_message_chunk');
+    expect(userMessages).toHaveLength(1);
+    expect(userMessages[0]).toEqual({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: 'the full client prompt' },
+    });
+  });
+
+  it('emits one user message for a replayed history item', async () => {
+    const state = setup(
+      { resumeSessionId: 'thread-captured' },
+      {},
+      [{ item: {
+        type: 'userMessage',
+        id: 'user-message-history',
+        content: [{ type: 'text', text: 'remembered client prompt' }],
+      } }],
+      true,
+    );
+    state.driver.start();
+    await state.driver.ready;
+
+    const userMessages = state.updates.filter((update) => update.sessionUpdate === 'user_message_chunk');
+    expect(userMessages).toHaveLength(1);
+    expect(userMessages[0]).toEqual({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: 'remembered client prompt' },
+    });
+  });
+
+  it('records one unmapped frame for a live user message with no text', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    const item = { type: 'userMessage', id: 'user-message-empty', content: [] };
+    state.transport.frame({ jsonrpc: '2.0', method: 'item/started', params: { item } });
+    state.transport.frame({
+      jsonrpc: '2.0',
+      method: 'item/completed',
+      params: { item: { ...item, status: 'completed' } },
+    });
+
+    const unmapped = state.updates.filter((update) =>
+      (update._meta?.[META_UNMAPPED_FRAME] as Record<string, unknown> | undefined)?.reason ===
+        'Codex userMessage had no text content');
+    expect(unmapped).toHaveLength(1);
   });
 
   it('sends cancel when the ACP client cancels a permission request', async () => {

@@ -172,12 +172,13 @@ the CLI did not echo the client's prompt as `user_message_chunk`, and loading
 its session replayed zero updates. A Claude client cannot reconstruct the whole
 conversation from ACP alone; record the human turn yourself. Codex's mapping
 does emit text from `userMessage` items as `user_message_chunk` during history
-replay, so a Codex `session/load` will carry that human text. The mapping also
-does this for live items, so a live Codex turn may echo the client's own prompt
-as `user_message_chunk`; this is what our mapping allows, not a claim about
-every Codex frame. Record the human turn yourself for both providers, and treat
-a live `user_message_chunk` as the agent's record of what it received, not as
-new input to append again.
+replay, so a Codex `session/load` will carry that human text. Measured against a
+real Codex child, a live turn reports the user's text as one
+`user_message_chunk`. Releases 0.5.2 and earlier emitted it twice because our
+mapper handled both `item/started` and `item/completed`; client-side
+deduplication added for that behavior is no longer needed. Record the human
+turn yourself for both providers, and treat a live `user_message_chunk` as the
+agent's record of what it received, not as new input to append again.
 
 ### Refusing an unknown id at load, not a turn later
 

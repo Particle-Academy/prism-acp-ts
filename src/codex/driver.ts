@@ -536,9 +536,11 @@ export class CodexDriver implements AgentDriver {
       this.#recordUnmapped('completed Codex item had an unknown status', item);
     }
     if (type === 'userMessage') {
-      const text = textFromContent(item.content);
-      if (text.length > 0) this.#emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text } });
-      else this.#recordUnmapped('Codex userMessage had no text content', item);
+      if (replay || completed) {
+        const text = textFromContent(item.content);
+        if (text.length > 0) this.#emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text } });
+        else this.#recordUnmapped('Codex userMessage had no text content', item);
+      }
       return;
     }
     if (type === 'agentMessage') {
