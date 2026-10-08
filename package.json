@@ -1,6 +1,6 @@
 {
   "name": "@particle-academy/prism-acp",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Speak the Agent Client Protocol to a coding-agent CLI the user has already authenticated. No API key, no third-party adapter.",
   "license": "MIT",
   "repository": {
