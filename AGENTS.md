@@ -29,7 +29,7 @@ then ran against an ad-hoc vitest instead of the pinned one.
 ## The live proof — opt-in, and why it injects its own bad key
 
 ```sh
-npm run test:live     # spawns `claude` twice; costs a little subscription usage
+npm run test:live     # spawns `claude` twice and Codex App Server once; uses subscription turns
 ```
 
 Two controls against the real binary:
@@ -59,6 +59,11 @@ a bare non-zero exit cannot distinguish from any other failure.
 On Windows the `test:live` script's `VAR=1 cmd` prefix is POSIX-only; run it
 from a POSIX shell. If the flag is absent the suite **skips** rather than passes,
 so a wrong invocation cannot read as a green result.
+
+The Codex real-child case shares this opt-in lane. It checks for the Codex home
+directory (`CODEX_HOME` or `~/.codex`) and names its path when absent; it never
+looks for a particular credential filename. Its child environment must omit
+`OPENAI_API_KEY`, so authentication comes from the stored Codex login.
 
 ## What this package holds
 

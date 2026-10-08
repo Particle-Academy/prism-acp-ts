@@ -21,9 +21,10 @@ API key to supply and no adapter program to install.
 
 Early, but a client can talk to it. `initialize`, `session/new`,
 `session/load`, `session/prompt` and `session/cancel` work over a pipe. Claude
-has been proven end to end against an authenticated binary; Codex is driven
-through its App Server and tested against a fake transport, with the wire
-shapes measured against captured traffic.
+and Codex have both been proven end to end against authenticated binaries:
+Claude through `stream-json`, and Codex through `codex app-server`. The opt-in
+Codex real-child test completes an ACP turn and verifies that `OPENAI_API_KEY`
+is absent from the spawned child's environment.
 
 Missing: `session/set_mode` and the client-side `fs/*` and `terminal/*` calls an
 agent can make back. The surface will change.
@@ -39,7 +40,7 @@ agent can make back. The surface will change.
 | ACP server surface + stdio | built |
 | `session/load` resume | built, and **proven** to remember the first turn |
 | `session/set_mode`, `fs/*`, `terminal/*` | not yet |
-| Codex App Server driver | built; paged history and permission requests |
+| Codex App Server driver | built; real-child turn, paged history and permission requests |
 
 **It maps 7 of ACP's 19 `session/update` kinds**, and that number is asserted by
 a test rather than described here, so raising it means moving it. The twelve it
@@ -339,6 +340,11 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+`npm run test:live` opts into real Claude and Codex children and uses the
+authenticated CLI subscriptions. The Codex case checks for the home directory
+at `CODEX_HOME` or `~/.codex`; if it is missing, Vitest reports a skip naming
+the path. It does not inspect a credential filename.
 
 ## License
 
