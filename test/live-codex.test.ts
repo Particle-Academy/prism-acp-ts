@@ -8,15 +8,17 @@ import { startLiveCodexHost } from './live-codex-host.js';
 
 const codexHome = process.env.CODEX_HOME || join(homedir(), '.codex');
 const hasCodexHome = isDirectory(codexHome);
-const missing = hasCodexHome ? [] : [`no Codex home found at ${codexHome}`];
+const missing = preconditionSkipReasons(codexHome, hasCodexHome);
 const liveEnabled = process.env.PRISM_ACP_LIVE === '1';
 
 describe('Codex real-child preconditions', () => {
-  it('checks the Codex home directory and names it when absent', () => {
-    expect(codexHome.length).toBeGreaterThan(0);
-    expect(missing).toEqual(
-      hasCodexHome ? [] : [`no Codex home found at ${codexHome}`],
-    );
+  it('omits a skip reason for a present home and names the path when absent', () => {
+    const samplePath = '/home/runner/.codex';
+    expect(preconditionSkipReasons(samplePath, true)).toEqual([]);
+    expect(preconditionSkipReasons(samplePath, false)).toEqual([
+      `no Codex home found at ${samplePath}`,
+    ]);
+    expect(missing.every((reason) => reason.includes(codexHome))).toBe(true);
   });
 });
 
@@ -88,7 +90,10 @@ describe.skipIf(!liveEnabled || missing.length > 0)(`Codex App Server real child
         .filter((message) => message.method === 'session/update')
         .map((message) => (message.params as { update: Record<string, unknown> }).update);
       const stopReason = (prompted.result as Record<string, unknown> | undefined)?.stopReason;
-      expect(stopReason === 'end_turn' || updates.length > 0).toBe(true);
+      const turnEvidence = { stopReason, updateCount: updates.length };
+      // A prompt that resolves with no completion and no updates did no useful visible work.
+      const acceptable = stopReason === 'end_turn' || turnEvidence.updateCount > 0;
+      expect({ ...turnEvidence, acceptable }).toEqual({ ...turnEvidence, acceptable: true });
       expect(childEnvironment).toBeDefined();
       expect('OPENAI_API_KEY' in (childEnvironment ?? {})).toBe(false);
       expect(problems).toEqual([]);
@@ -105,4 +110,8 @@ function isDirectory(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+function preconditionSkipReasons(path: string, exists: boolean): string[] {
+  return exists ? [] : [`no Codex home found at ${path}`];
 }
