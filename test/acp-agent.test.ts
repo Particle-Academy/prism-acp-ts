@@ -53,7 +53,10 @@ class FakeDriver implements AgentDriver {
   }
 }
 
-function harness(probeSession?: AcpAgentOptions['probeSession']) {
+function harness(
+  probeSession?: AcpAgentOptions['probeSession'],
+  driverCapabilities?: AcpAgentOptions['driverCapabilities'],
+) {
   const sent: Record<string, unknown>[] = [];
   const drivers: FakeDriver[] = [];
   const peer = new JsonRpcPeer({ send: (m) => sent.push(m as Record<string, unknown>) });
@@ -66,6 +69,7 @@ function harness(probeSession?: AcpAgentOptions['probeSession']) {
     },
     newSessionId: () => `sess_${++n}`,
     ...(probeSession === undefined ? {} : { probeSession }),
+    ...(driverCapabilities === undefined ? {} : { driverCapabilities }),
   });
   return { agent, peer, sent, drivers };
 }
@@ -83,6 +87,21 @@ async function call(
 }
 
 describe('initialize', () => {
+  it('reports declared driver capabilities only in _meta', async () => {
+    const declared = { permissionRequests: false, transcriptReplay: false } as const;
+    const h = harness(undefined, declared);
+    const result = (await call(h, 'initialize', {})).result as Record<string, unknown>;
+    expect((result._meta as Record<string, unknown>)?.['particle.academy/driver_capabilities']).toEqual(declared);
+    expect(result.agentCapabilities).not.toHaveProperty('permissionRequests');
+    expect(result.agentCapabilities).not.toHaveProperty('transcriptReplay');
+  });
+
+  it('omits driver capabilities when the embedder did not declare them', async () => {
+    const h = harness();
+    const result = (await call(h, 'initialize', {})).result as Record<string, unknown>;
+    expect(result).not.toHaveProperty('_meta');
+  });
+
   it('answers with the version it will speak, not the one it was asked', async () => {
     // A client may ask for anything; echoing a number we do not implement back
     // at it would be a claim rather than a negotiation.

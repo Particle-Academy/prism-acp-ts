@@ -1,9 +1,14 @@
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CodexDriver, type CodexTransportFactory } from '../src/codex/driver.js';
+import { CODEX_DRIVER_CAPABILITIES, CodexDriver, type CodexTransportFactory } from '../src/codex/driver.js';
 import type { CodexTransport, CodexTransportHandlers, CodexTransportOptions } from '../src/codex/transport.js';
 import { serve } from '../src/acp/stdio.js';
-import { META_CLI_SESSION_ID, META_EXEC_POLICY_AMENDMENT, META_UNMAPPED_FRAME } from '../src/meta.js';
+import {
+  META_CLI_SESSION_ID,
+  META_DRIVER_CAPABILITIES,
+  META_EXEC_POLICY_AMENDMENT,
+  META_UNMAPPED_FRAME,
+} from '../src/meta.js';
 import { encodeLine } from '../src/ndjson.js';
 import { readCodexRateLimit } from '../src/codex/rate-limit.js';
 
@@ -124,6 +129,7 @@ async function permissionHarness() {
   const { agent } = serve({
     input,
     output,
+    driverCapabilities: CODEX_DRIVER_CAPABILITIES,
     driverFactory: (options, events) => new CodexDriver({ ...options, parentEnv: {} }, events, factory),
   });
   input.write(encodeLine({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } }));
@@ -146,6 +152,8 @@ async function permissionHarness() {
   await settle();
   const permissionRequest = outputFrames.find((frame) => frame.method === 'session/request_permission');
   expect(permissionRequest).toBeDefined();
+  const initializeResult = outputFrames.find((frame) => frame.id === 1)?.result as Record<string, unknown>;
+  expect((initializeResult?._meta as Record<string, unknown>)?.[META_DRIVER_CAPABILITIES]).toEqual(CODEX_DRIVER_CAPABILITIES);
   return {
     input,
     outputFrames,
@@ -166,8 +174,10 @@ describe('CodexDriver', () => {
     vi.restoreAllMocks();
   });
 
-  it('sends an accepted ACP permission choice to Codex', async () => {
+  it('declares permissionRequests when the Codex fixture sends session/request_permission', async () => {
     const state = await permissionHarness();
+    const observed = state.outputFrames.some((frame) => frame.method === 'session/request_permission');
+    expect(CODEX_DRIVER_CAPABILITIES.permissionRequests).toBe(observed);
     const result = await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-accept' } });
 
     expect(result).toMatchObject({ result: { decision: 'accept' } });
@@ -438,7 +448,7 @@ describe('CodexDriver', () => {
     expect(state.transport).toBeUndefined();
   });
 
-  it('resumes the captured id and replays history through paged endpoints', async () => {
+  it('declares transcriptReplay when the Codex history fixture emits session_message', async () => {
     const state = setup({ resumeSessionId: 'thread-captured' });
     state.driver.start();
     await state.driver.ready;
@@ -454,7 +464,8 @@ describe('CodexDriver', () => {
       params: { threadId: 'thread-captured', turnId: 'turn-history' },
     });
     expect(calls.some((frame) => (frame.params as Record<string, unknown> | undefined)?.cursor === 'turn-cursor')).toBe(true);
-    expect(state.updates.some((update) => update.sessionUpdate === 'session_message')).toBe(true);
+    const replayed = state.updates.some((update) => update.sessionUpdate === 'session_message');
+    expect(CODEX_DRIVER_CAPABILITIES.transcriptReplay).toBe(replayed);
   });
 
   it('preserves the execpolicy argv on its own ACP permission option', async () => {

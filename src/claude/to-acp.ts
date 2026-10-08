@@ -23,12 +23,14 @@
  */
 import {
   META_CLI_SESSION_ID,
+  META_PERMISSION_DENIED,
   META_RATE_LIMIT,
   META_THINKING_SIGNATURE,
   META_THINKING_TOKENS_ESTIMATE,
   META_UNMAPPED_FRAME,
   withMeta,
 } from '../meta.js';
+import { stripAnsiControlSequences } from '../text.js';
 import { rateLimitNotice, readRateLimit } from './rate-limit.js';
 
 /** An ACP `session/update` payload: the `update` object, without the sessionId. */
@@ -287,6 +289,57 @@ export class ClaudeToAcp {
             { [META_THINKING_TOKENS_ESTIMATE]: input.estimated_tokens ?? null },
           ),
         ];
+
+      case 'permission_denied': {
+        // This payload shape was captured from Claude Code 2.1.295; the ids in
+        // the checked-in projection are redacted, and the rejection text is UI input.
+        const toolCallId = asString(input.tool_use_id);
+        if (toolCallId === undefined) return this.#unknown(input);
+
+        // `failed` is ACP's nearest honest status; it cannot distinguish a
+        // refusal from a crash, so the metadata below carries that distinction.
+        // Emit even without a prior tool_call: a missing opener must not hide
+        // the denial, and the provider id is the only correlation we have.
+        const details: Record<string, unknown> = {};
+        let providerTextSanitized = false;
+        for (const field of [
+          'tool_name',
+          'decision_reason_type',
+          'decision_reason_code',
+          'decision_reason',
+        ]) {
+          const value = asString(input[field]);
+          if (value !== undefined) {
+            const sanitized = stripAnsiControlSequences(value);
+            details[field] = sanitized.text;
+            providerTextSanitized ||= sanitized.changed;
+          }
+        }
+
+        const message = asString(input.message);
+        const content = message === undefined ? undefined : stripAnsiControlSequences(message);
+        if (content?.changed) providerTextSanitized = true;
+        // Preserve the fact of sanitization without echoing removed provider bytes.
+        if (providerTextSanitized) details.providerTextSanitized = true;
+
+        const update: AcpUpdate = {
+          sessionUpdate: 'tool_call_update',
+          toolCallId,
+          status: 'failed' satisfies ToolStatus,
+          ...(content === undefined
+            ? {}
+            : {
+                content: [
+                  {
+                    type: 'content' as const,
+                    content: { type: 'text' as const, text: content.text },
+                  },
+                ],
+              }),
+        };
+
+        return [withMeta(update, { [META_PERMISSION_DENIED]: details })];
+      }
 
       case 'init': {
         // The init frame carries the CLI's OWN session id, and that is the only

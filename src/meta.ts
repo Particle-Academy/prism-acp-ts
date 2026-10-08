@@ -87,6 +87,12 @@ export const META_THINKING_TOKENS_ESTIMATE = metaKey('thinking_tokens_estimate')
 /** Structured rate-limit detail, alongside the human-readable notice. */
 export const META_RATE_LIMIT = metaKey('rate_limit');
 
+/** Refusal details for a provider-denied tool call. */
+export const META_PERMISSION_DENIED = metaKey('permission_denied');
+
+/** Measured capabilities of the selected agent driver. */
+export const META_DRIVER_CAPABILITIES = metaKey('driver_capabilities');
+
 /** A command-line approval's persistent execpolicy amendment, tied to its ACP option. */
 export const META_EXEC_POLICY_AMENDMENT = metaKey('execpolicy_amendment');
 

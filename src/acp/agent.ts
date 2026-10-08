@@ -24,7 +24,7 @@
 import { JsonRpcPeer, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR, RpcError } from '../jsonrpc.js';
 import type { AcpUpdate } from '../claude/to-acp.js';
 import type { StopReason, TurnOutcome } from '../claude/driver.js';
-import { META_CLI_SESSION_ID } from '../meta.js';
+import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, withMeta } from '../meta.js';
 
 /** The protocol version this agent speaks. */
 export const PROTOCOL_VERSION = 1;
@@ -89,12 +89,19 @@ export type SessionProbe = (
 
 export interface AcpAgentOptions {
   readonly driverFactory: DriverFactory;
+  readonly driverCapabilities?: DriverCapabilities;
   readonly probeSession?: SessionProbe;
   readonly agentInfo?: { readonly name: string; readonly title?: string; readonly version: string };
   /** Generate a session id. Injected so tests can assert on stable ids. */
   readonly newSessionId?: () => string;
   readonly onStderr?: (sessionId: string, line: string) => void;
   readonly onProtocolError?: (sessionId: string, problem: string) => void;
+}
+
+/** The two provider differences clients currently need to know. */
+export interface DriverCapabilities {
+  readonly permissionRequests: boolean;
+  readonly transcriptReplay: boolean;
 }
 
 interface Session {
@@ -156,7 +163,7 @@ export class AcpAgent {
     // do not implement back at the client.
     void requested;
 
-    return {
+    const response = {
       protocolVersion: PROTOCOL_VERSION,
       agentInfo: this.#options.agentInfo ?? {
         name: '@particle-academy/prism-acp',
@@ -185,6 +192,14 @@ export class AcpAgent {
         },
       },
     };
+
+    const capabilities = this.#options.driverCapabilities;
+    if (capabilities === undefined) {
+      // No declaration means the embedder did not identify a driver; inventing
+      // false values here would turn missing information into a provider claim.
+      return response;
+    }
+    return withMeta(response, { [META_DRIVER_CAPABILITIES]: capabilities });
   }
 
   #authenticate(): null {

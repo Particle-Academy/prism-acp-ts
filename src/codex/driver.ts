@@ -10,6 +10,7 @@ import {
 import type {
   AgentDriver,
   DriverEvents,
+  DriverCapabilities,
   PermissionOutcome,
   PermissionRequest,
 } from '../acp/agent.js';
@@ -62,6 +63,15 @@ const APPROVAL_METHODS = new Set([
 ]);
 const MAX_HISTORY_PAGES = 10_000;
 const DEFAULT_TURN_INACTIVITY_TIMEOUT_MS = 600_000;
+
+/**
+ * Codex driver's behavior claim, published by initialize for clients.
+ * Clients should read this declaration rather than branch on a provider name.
+ */
+export const CODEX_DRIVER_CAPABILITIES = {
+  permissionRequests: true,
+  transcriptReplay: true,
+} as const satisfies DriverCapabilities;
 
 const KNOWN_NOTIFICATIONS = new Set([
   'thread/started',

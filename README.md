@@ -6,8 +6,9 @@ coding-agent CLI **the user has already authenticated**.
 A client — an editor, a terminal UI, an orchestrator — gets structured state
 from an agent instead of guessing it from bytes on a pseudo-terminal: session
 state, streaming assistant output with thought content separable, tool calls
-with status, a plan that changes in place, mid-turn permission requests it can
-answer, token usage and cost.
+with status, a plan that changes in place, token usage and cost. Codex can raise
+mid-turn permission requests for the client to answer; Claude currently cannot,
+though Claude tool denials are reported as failed tool calls.
 
 ```sh
 npm install @particle-academy/prism-acp
@@ -239,6 +240,13 @@ between one-time approval and a remembered command. Human decisions have no
 default timeout. Cancelling a session, disconnecting the ACP client, or shutting
 down the driver answers any outstanding Codex approval with `cancel`.
 
+Claude permission denials arrive as `tool_call_update` with `status: "failed"`
+and the sanitized rejection message in `content`. The structured refusal detail
+is in `_meta` under `particle.academy/permission_denied`, allowing a client to
+distinguish a refusal from a crash. If provider text contained terminal control
+sequences, `providerTextSanitized: true` records that fact without forwarding
+the removed bytes. If the CLI omits its message, the update omits `content`.
+
 ## Rate limits are a gauge, not just a breach event
 
 ACP has no field for a rate limit, so the detail rides in `_meta` under
@@ -331,6 +339,23 @@ boundary is the only delimiter between replies, so commit the accumulated
 message there. Clearing the in-flight message without committing loses the
 reply (including the whole reply in a single-message turn); not clearing it
 appends the next turn to the previous one.
+
+### Tool call updates
+
+A recognized `tool_call` opener includes ACP's `kind`. Streaming tool arguments
+are not on that opener; `rawInput` arrives on `tool_call_update` after the
+arguments finish streaming. The closing `tool_call_update` carries `content`.
+
+## Driver capabilities
+
+When the embedder identifies the selected driver, `initialize` declares its
+measured behavior in `_meta` under
+`particle.academy/driver_capabilities`. The object has exactly
+`permissionRequests` and `transcriptReplay`. If the key is absent, capabilities
+were not declared; absence does not mean `false`. Claude reports
+`permissionRequests: false` today, and that is expected to change when its
+permission bridge lands. Read this declaration at runtime rather than caching
+capabilities against a provider name.
 
 ## Development
 

@@ -5,6 +5,7 @@ import { ClaudeToAcp, type AcpUpdate } from '../src/claude/to-acp.js';
 import { NdjsonFramer } from '../src/ndjson.js';
 import {
   META_CLI_SESSION_ID,
+  META_PERMISSION_DENIED,
   META_RATE_LIMIT,
   META_THINKING_SIGNATURE,
   META_THINKING_TOKENS_ESTIMATE,
@@ -147,6 +148,77 @@ describe('content mapping', () => {
 
     expect(mapped).toBe(expected);
     expect(mapped.length).toBeGreaterThan(100);
+  });
+});
+
+describe('permission denial mapping', () => {
+  it('maps the captured denial to one failed tool update with sanitized detail', () => {
+    const bytes = readFileSync(
+      fileURLToPath(new URL('./fixtures/claude-permission-denied.jsonl', import.meta.url)),
+    );
+    const framer = new NdjsonFramer();
+    const mapper = new ClaudeToAcp();
+    const updates: AcpUpdate[] = [];
+    for (const frame of [...framer.push(bytes), ...framer.end()]) {
+      expect(frame.ok).toBe(true);
+      if (frame.ok) updates.push(...mapper.frame(frame.value));
+    }
+
+    const denial = updates.filter((update) => update.sessionUpdate === 'tool_call_update');
+    expect(denial).toHaveLength(1);
+    expect(denial[0]).toMatchObject({
+      toolCallId: 'REDACTED',
+      status: 'failed',
+      content: [{ content: { text: expect.stringContaining("don't ask mode") } }],
+      _meta: {
+        [META_PERMISSION_DENIED]: { tool_name: 'Write', decision_reason_type: 'mode' },
+      },
+    });
+  });
+
+  it('keeps an unmatched provider tool id visible instead of hiding its denial', () => {
+    const updates = new ClaudeToAcp().frame({
+      type: 'system', subtype: 'permission_denied', tool_use_id: 'unseen-call',
+      message: 'denied', tool_name: 'Write',
+    });
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'unseen-call',
+      status: 'failed',
+    });
+  });
+
+  it('sanitizes provider message and decision detail before the client sees them', () => {
+    const [update] = new ClaudeToAcp().frame({
+      type: 'system', subtype: 'permission_denied', tool_use_id: 'tool-1',
+      message: '\u001b[31mdenied\u001b[0m', decision_reason: 'rule\u001b',
+    });
+    expect(update).toMatchObject({
+      content: [{ content: { text: 'denied' } }],
+      _meta: {
+        [META_PERMISSION_DENIED]: { decision_reason: 'rule', providerTextSanitized: true },
+      },
+    });
+  });
+
+  it('omits content when the provider denial has no message', () => {
+    const [update] = new ClaudeToAcp().frame({
+      type: 'system', subtype: 'permission_denied', tool_use_id: 'tool-1', tool_name: 'Write',
+    });
+    expect(update).not.toHaveProperty('content');
+  });
+
+  it('records that provider text was sanitized without retaining the removed bytes', () => {
+    const [update] = new ClaudeToAcp().frame({
+      type: 'system', subtype: 'permission_denied', tool_use_id: 'tool-1',
+      message: '\u001b[31mdenied\u001b[0m',
+    });
+    expect(update).toMatchObject({
+      content: [{ content: { text: 'denied' } }],
+      _meta: { [META_PERMISSION_DENIED]: { providerTextSanitized: true } },
+    });
+    expect(JSON.stringify(update)).not.toMatch(/[\u007f-\u009f]|\\u00(?:7f|8[0-9a-f]|9[0-9a-f])/i);
   });
 });
 

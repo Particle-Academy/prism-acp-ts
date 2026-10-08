@@ -22,7 +22,9 @@ export type {
 
 export {
   META_CLI_SESSION_ID,
+  META_DRIVER_CAPABILITIES,
   META_EXEC_POLICY_AMENDMENT,
+  META_PERMISSION_DENIED,
   META_NS,
   META_RATE_LIMIT,
   META_THINKING_SIGNATURE,
@@ -33,13 +35,22 @@ export {
   withMeta,
 } from './meta.js';
 
+export { stripAnsiControlSequences } from './text.js';
+export type { SanitizedProviderText } from './text.js';
+
 export { ClaudeToAcp } from './claude/to-acp.js';
 export type { AcpUpdate, ToolStatus } from './claude/to-acp.js';
 
 export { parseRateLimit, rateLimitNotice, readRateLimit } from './claude/rate-limit.js';
 export type { ClaudeRateLimit, ClaudeRateLimitWindow, RateLimitRead } from './claude/rate-limit.js';
 
-export { ClaudeDriver, claudeArgs, promptLine, updatesFromFrames } from './claude/driver.js';
+export {
+  CLAUDE_DRIVER_CAPABILITIES,
+  ClaudeDriver,
+  claudeArgs,
+  promptLine,
+  updatesFromFrames,
+} from './claude/driver.js';
 export type {
   ClaudeDriverEvents,
   ClaudeDriverOptions,
@@ -52,6 +63,7 @@ export type {
   AgentDriver,
   DriverEvents,
   DriverFactory,
+  DriverCapabilities,
   PermissionOutcome,
   PermissionRequest,
   SessionProbe as AcpSessionProbe,
@@ -66,7 +78,7 @@ export type { Served, ServeOptions } from './acp/stdio.js';
 export { cliSessionIdOf, turnOutcomeOf } from './claude/driver.js';
 export type { StopReason, TurnOutcome } from './claude/driver.js';
 
-export { CodexDriver } from './codex/driver.js';
+export { CODEX_DRIVER_CAPABILITIES, CodexDriver } from './codex/driver.js';
 export type { CodexDriverOptions, CodexTransportFactory } from './codex/driver.js';
 export { codexRateLimitNotice, parseCodexRateLimit, readCodexRateLimit } from './codex/rate-limit.js';
 export type { CodexRateLimit, CodexRateLimitRead, CodexRateLimitWindow } from './codex/rate-limit.js';

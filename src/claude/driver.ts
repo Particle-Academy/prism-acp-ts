@@ -15,6 +15,17 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { childEnv } from '../env.js';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
+import type { DriverCapabilities } from '../acp/agent.js';
+
+/**
+ * Claude driver's behavior claim, published by initialize for clients.
+ * permissionRequests is expected to become true in 0.7.0; clients should read
+ * this declaration rather than branch on a provider name.
+ */
+export const CLAUDE_DRIVER_CAPABILITIES = {
+  permissionRequests: false,
+  transcriptReplay: false,
+} as const satisfies DriverCapabilities;
 
 /** ACP permission modes map onto the CLI's own `--permission-mode` values. */
 export type ClaudePermissionMode =
