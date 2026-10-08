@@ -172,6 +172,23 @@ proceeds exactly as it did before. Calling a real session absent would refuse a
 resume that would have worked, which is worse than the late error this replaces;
 that error is still there as the backstop.
 
+**It looks where the CLI looks, including `CLAUDE_CONFIG_DIR`.** The CLI resolves
+its configuration home as that variable or, unset, `<home>/.claude`, and keeps
+`projects` under whichever it picked — so the probe does the same. This is not a
+detail: an installation that sets it does so because the stored subscription
+credential lives there, which is exactly the installation whose resumes matter,
+and reading the wrong store would report a real conversation `absent` and refuse
+a resume that would have worked.
+
+`childEnv` passes that variable through unchanged, so a driver spawned from this
+process resolves the same store the probe read, by construction. Hand the driver
+a `parentEnv` you built yourself and hand the same environment to the probe, or
+name the store outright:
+
+```ts
+const probeSession = (sessionId: string) => probeSessionStore(sessionId, { env: parentEnv });
+```
+
 `probeSession` is yours to supply because the answer belongs to the agent being
 driven, not to ACP: `probeSessionStore` reads claude's session store, and a Codex
 driver would resolve the same question through `thread/resume`. Omit it and

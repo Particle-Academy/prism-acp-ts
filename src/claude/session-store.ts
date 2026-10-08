@@ -27,7 +27,7 @@
 
 import { readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 /**
  * Three states, and the third is the point.
@@ -51,6 +51,67 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export interface SessionStoreOptions {
   /** Overridable so tests never read the developer's real sessions. */
   readonly home?: string;
+  /**
+   * The CLI's configuration home, naming the store directly. Outranks both
+   * {@link home} and the environment -- for a caller that knows where the store
+   * is, or that builds the driven CLI's environment itself.
+   */
+  readonly configDir?: string;
+  /**
+   * The environment the DRIVEN CLI will see, read for `CLAUDE_CONFIG_DIR`.
+   *
+   * Defaults to this process's own, which is correct by construction when the
+   * driver is spawned from here: `childEnv` passes `CLAUDE_CONFIG_DIR` through
+   * unchanged, so the probe and the child resolve one store. Hand the driver a
+   * `parentEnv` of your own and hand the same one here, or they will not.
+   */
+  readonly env?: Readonly<Record<string, string | undefined>>;
+}
+
+/**
+ * WHERE THE STORE IS. The CLI resolves its configuration home as
+ * `CLAUDE_CONFIG_DIR` or, unset, `<home>/.claude`, and keeps `projects` under
+ * whichever it picked.
+ *
+ * Reading only the second was this probe's one serious bug (0.4.0). An
+ * installation that sets the variable -- Genie forwards it deliberately,
+ * because the stored subscription credential lives there and is what lets a
+ * child run with no API key at all -- had the probe read a store the CLI does
+ * not use, find nothing, and report `absent` for a conversation that exists.
+ * That refuses a resume that would have worked: the failure this whole
+ * three-state design exists to avoid, reintroduced by the check meant to
+ * prevent it.
+ *
+ * The variable names the configuration home ITSELF, so `projects` sits directly
+ * inside it and no `.claude` is appended. Resolving it as
+ * `home: dirname(CLAUDE_CONFIG_DIR)` instead would work only while the
+ * directory happens to be named `.claude`.
+ */
+function storeRoot(options: SessionStoreOptions): { readonly root: string } | { readonly reason: string } {
+  const configured = options.configDir ?? (options.env ?? process.env).CLAUDE_CONFIG_DIR;
+  const trimmed = configured?.trim();
+
+  // The CLI reads it with `||`, so an empty or blank value is no value. Taking
+  // it literally would resolve `projects` against this process's working
+  // directory.
+  if (trimmed === undefined || trimmed === '') {
+    return { root: join(options.home ?? homedir(), '.claude', 'projects') };
+  }
+
+  // The CLI refuses to run at all with a relative configuration home -- "the
+  // configuration home (CLAUDE_CONFIG_DIR) is not an absolute path" -- so there
+  // is no store to name, and resolving it against our own cwd would answer
+  // about a directory the CLI never looks in. It is also not a case for the
+  // `<home>/.claude` fallback: the CLI will not fall back either.
+  if (!isAbsolute(trimmed)) {
+    // The value itself stays out of the message. Every other `detail` here
+    // names the path it looked at, which is useful and harmless for a path we
+    // derived; this one is an environment value, and a detail string travels to
+    // the client.
+    return { reason: 'CLAUDE_CONFIG_DIR is not an absolute path, so the session store it names cannot be located' };
+  }
+
+  return { root: join(trimmed, 'projects') };
 }
 
 export function probeSessionStore(sessionId: string, options: SessionStoreOptions = {}): SessionProbe {
@@ -70,7 +131,9 @@ export function probeSessionStore(sessionId: string, options: SessionStoreOption
     };
   }
 
-  const root = join(options.home ?? homedir(), '.claude', 'projects');
+  const resolved = storeRoot(options);
+  if ('reason' in resolved) return { existence: 'indeterminate', detail: resolved.reason };
+  const { root } = resolved;
 
   let projects: readonly string[];
   try {
