@@ -326,7 +326,8 @@ export class AcpAgent {
             sessionId: id,
             ...request,
           });
-          return isPermissionOutcome(result) ? result : { outcome: 'cancelled' };
+          const outcome = asObject(result)?.outcome;
+          return isPermissionOutcome(outcome) ? outcome : { outcome: 'cancelled' };
         },
         onTurnEnd: (outcome) => {
           const turn = session.turn;
@@ -473,8 +474,7 @@ function asString(value: unknown): string | undefined {
 }
 
 function isPermissionOutcome(value: unknown): value is PermissionOutcome {
-  const object = asObject(value);
-  const outcome = asObject(object?.outcome);
+  const outcome = asObject(value);
   if (outcome?.outcome === 'cancelled') return true;
   return outcome?.outcome === 'selected' && typeof outcome.optionId === 'string';
 }

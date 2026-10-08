@@ -32,6 +32,7 @@ export interface CodexDriverOptions {
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   readonly allowEnv?: readonly string[];
   readonly resumeSessionId?: string;
+  readonly turnInactivityTimeoutMs?: number;
 }
 
 export type CodexTransportFactory = (
@@ -59,6 +60,7 @@ const APPROVAL_METHODS = new Set([
   'execCommandApproval',
 ]);
 const MAX_HISTORY_PAGES = 10_000;
+const DEFAULT_TURN_INACTIVITY_TIMEOUT_MS = 120_000;
 
 const KNOWN_NOTIFICATIONS = new Set([
   'thread/started',
@@ -106,6 +108,10 @@ export class CodexDriver implements AgentDriver {
   #queuedPrompt: string | null = null;
   #activeTurn: string | null = null;
   #turnInFlight = false;
+  #turnDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  #turnDeadlineExpiresAt = 0;
+  #turnDeadlineRemainingMs = 0;
+  readonly #turnInactivityTimeoutMs: number;
   #sessionUpdateSent = false;
   #threadId: string | null = null;
 
@@ -120,6 +126,10 @@ export class CodexDriver implements AgentDriver {
     this.#options = options;
     this.#events = events;
     this.#transportFactory = transportFactory;
+    this.#turnInactivityTimeoutMs = options.turnInactivityTimeoutMs ?? DEFAULT_TURN_INACTIVITY_TIMEOUT_MS;
+    if (!Number.isFinite(this.#turnInactivityTimeoutMs) || this.#turnInactivityTimeoutMs <= 0) {
+      throw new Error('turnInactivityTimeoutMs must be a positive finite number');
+    }
   }
 
   /** Resolves once initialize and thread start/resume have completed. */
@@ -331,6 +341,7 @@ export class CodexDriver implements AgentDriver {
       this.#queuedPrompt = text;
       return;
     }
+    this.#beginTurnDeadline();
     void this.#requirePeer()
       .request('turn/start', {
         threadId,
@@ -340,7 +351,10 @@ export class CodexDriver implements AgentDriver {
       .then((value) => {
         const turn = asObject(asObject(value)?.turn);
         const id = asString(turn?.id);
-        if (id !== undefined && !this.#completedTurns.has(id)) this.#activeTurn = id;
+        if (id !== undefined && !this.#completedTurns.has(id)) {
+          this.#activeTurn = id;
+          this.#touchTurnDeadline();
+        }
       })
       .catch((cause: unknown) => {
         this.#events.onProtocolError?.(safeError('Codex turn/start failed', cause));
@@ -369,6 +383,7 @@ export class CodexDriver implements AgentDriver {
     }
 
     const method = asString(object.method);
+    this.#noteTurnActivity(method, object.params);
     const hasId = typeof object.id === 'number' || typeof object.id === 'string';
     if (method !== undefined && hasId) {
       if (APPROVAL_METHODS.has(method)) {
@@ -608,10 +623,12 @@ export class CodexDriver implements AgentDriver {
     const resultPromise = new Promise<Record<string, unknown> | null>((resolve) => {
       settle = resolve;
     });
+    if (this.#pendingApprovals.size === 0) this.#pauseTurnDeadline();
     const finish = (result: Record<string, unknown>) => {
       if (settled) return;
       settled = true;
       this.#pendingApprovals.delete(approvalKey);
+      this.#resumeTurnDeadlineIfReady();
       settle(result);
     };
     this.#pendingApprovals.set(approvalKey, {
@@ -619,6 +636,7 @@ export class CodexDriver implements AgentDriver {
         if (settled) return;
         settled = true;
         this.#pendingApprovals.delete(approvalKey);
+        this.#resumeTurnDeadlineIfReady();
         try {
           // Send before closing the socket. Resolving a promise here would let
           // shutdown close the transport before the continuation runs.
@@ -734,7 +752,7 @@ export class CodexDriver implements AgentDriver {
       toolTitle = isPatch ? 'Apply file changes' : asString(params.command) ?? 'Run command';
       toolCallId = asString(params.callId) ?? toolCallId;
       rawInput = isPatch ? params.fileChanges : { command: params.command, cwd: params.cwd };
-      add('codex-approve', 'Allow once', 'allow_once', { decision: isPatch ? 'approved' : 'approved' });
+      add('codex-approve', 'Allow once', 'allow_once', { decision: 'approved' });
       add('codex-approve-session', 'Allow for this session', 'allow_always', { decision: 'approved_for_session' });
       add('codex-deny', 'Reject and continue', 'reject_once', { decision: { denied: { rejection: 'Declined by user' } } });
       add('codex-abort', 'Cancel this turn', 'reject_once', { decision: 'abort' });
@@ -904,6 +922,7 @@ export class CodexDriver implements AgentDriver {
       }
     }
     if (!this.#turnInFlight && this.#activeTurn === null) return;
+    this.#clearTurnDeadline();
     this.#activeTurn = null;
     this.#turnInFlight = false;
     this.#items.clear();
@@ -915,6 +934,7 @@ export class CodexDriver implements AgentDriver {
   #shutdown(signal: NodeJS.Signals): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#clearTurnDeadline();
     for (const pending of [...this.#pendingApprovals.values()]) pending.cancel();
     this.#transport?.close(signal);
     this.#peer?.fail(new Error('Codex driver stopped'));
@@ -924,6 +944,7 @@ export class CodexDriver implements AgentDriver {
   #onExit(code: number | null, signal: NodeJS.Signals | null): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#clearTurnDeadline();
     for (const pending of [...this.#pendingApprovals.values()]) pending.cancel();
     this.#peer?.fail(new Error('Codex app-server exited'));
     this.#events.onExit?.(code, signal);
@@ -932,6 +953,68 @@ export class CodexDriver implements AgentDriver {
   #requirePeer(): JsonRpcPeer {
     if (this.#peer === null) throw new Error('Codex App Server has not started');
     return this.#peer;
+  }
+
+  #noteTurnActivity(method: string | undefined, value: unknown): void {
+    if (!this.#turnInFlight) return;
+    const params = asObject(value) ?? {};
+    const item = asObject(params.item);
+    const turn = asObject(params.turn);
+    const turnId = asString(params.turnId) ?? asString(item?.turnId) ?? asString(turn?.id);
+    if (turnId !== undefined) {
+      if (this.#activeTurn === null || turnId === this.#activeTurn) this.#touchTurnDeadline();
+      return;
+    }
+    if (method === 'thread/status/changed' || method?.startsWith('turn/') || method?.startsWith('item/')) {
+      this.#touchTurnDeadline();
+    }
+  }
+
+  #beginTurnDeadline(): void {
+    this.#turnDeadlineRemainingMs = this.#turnInactivityTimeoutMs;
+    this.#scheduleTurnDeadline();
+  }
+
+  #touchTurnDeadline(): void {
+    if (!this.#turnInFlight || this.#pendingApprovals.size > 0) return;
+    this.#turnDeadlineRemainingMs = this.#turnInactivityTimeoutMs;
+    this.#scheduleTurnDeadline();
+  }
+
+  #pauseTurnDeadline(): void {
+    if (this.#turnDeadlineTimer === null) return;
+    this.#turnDeadlineRemainingMs = Math.max(0, this.#turnDeadlineExpiresAt - Date.now());
+    clearTimeout(this.#turnDeadlineTimer);
+    this.#turnDeadlineTimer = null;
+  }
+
+  #resumeTurnDeadlineIfReady(): void {
+    if (this.#pendingApprovals.size === 0 && this.#turnInFlight) this.#scheduleTurnDeadline();
+  }
+
+  #scheduleTurnDeadline(): void {
+    if (!this.#turnInFlight || this.#pendingApprovals.size > 0 || this.#closed) return;
+    if (this.#turnDeadlineTimer !== null) clearTimeout(this.#turnDeadlineTimer);
+    const delay = this.#turnDeadlineRemainingMs;
+    this.#turnDeadlineExpiresAt = Date.now() + delay;
+    this.#turnDeadlineTimer = setTimeout(() => {
+      this.#turnDeadlineTimer = null;
+      if (!this.#turnInFlight || this.#pendingApprovals.size > 0) return;
+      const message = `Codex turn inactivity deadline expired after ${this.#turnInactivityTimeoutMs} ms.`;
+      this.#emit({ sessionUpdate: 'notice', notice: { level: 'warning', message } });
+      this.#recordUnmapped('Codex turn deadline expired', {
+        method: 'turn deadline',
+        timeoutMs: this.#turnInactivityTimeoutMs,
+      });
+      this.#finishTurn({ stopReason: null, isError: true, raw: 'turn deadline' });
+    }, delay);
+  }
+
+  #clearTurnDeadline(): void {
+    if (this.#turnDeadlineTimer !== null) clearTimeout(this.#turnDeadlineTimer);
+    this.#turnDeadlineTimer = null;
+    this.#turnDeadlineRemainingMs = 0;
+    this.#turnDeadlineExpiresAt = 0;
   }
 }
 

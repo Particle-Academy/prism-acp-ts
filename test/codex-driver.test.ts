@@ -66,7 +66,7 @@ class FakeTransport implements CodexTransport {
   }
 }
 
-function setup(options: { resumeSessionId?: string } = {}, events: ConstructorParameters<typeof CodexDriver>[1] = {}) {
+function setup(options: { resumeSessionId?: string; turnInactivityTimeoutMs?: number } = {}, events: ConstructorParameters<typeof CodexDriver>[1] = {}) {
   let transport!: FakeTransport;
   const factory: CodexTransportFactory = (_options: CodexTransportOptions, handlers) => {
     transport = new FakeTransport(handlers);
@@ -86,8 +86,178 @@ async function settle(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+async function flushMicrotasks(): Promise<void> {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve();
+}
+
+async function permissionHarness() {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const outputFrames: Record<string, unknown>[] = [];
+  let outputText = '';
+  output.on('data', (chunk: Buffer) => {
+    outputText += chunk.toString();
+    const lines = outputText.split('\n');
+    outputText = lines.pop() ?? '';
+    for (const line of lines) if (line.length > 0) outputFrames.push(JSON.parse(line) as Record<string, unknown>);
+  });
+
+  let transport!: FakeTransport;
+  const factory: CodexTransportFactory = (_options, handlers) => (transport = new FakeTransport(handlers));
+  const { agent } = serve({
+    input,
+    output,
+    driverFactory: (options, events) => new CodexDriver({ ...options, parentEnv: {} }, events, factory),
+  });
+  input.write(encodeLine({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } }));
+  input.write(encodeLine({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/work' } }));
+  await settle();
+  await settle();
+  expect(outputFrames.some((frame) => frame.id === 2)).toBe(true);
+
+  transport.frame({
+    jsonrpc: '2.0',
+    id: 88,
+    method: 'item/commandExecution/requestApproval',
+    params: {
+      itemId: 'approval-item',
+      turnId: 'turn-live',
+      command: ['git', 'status'],
+      availableDecisions: ['accept', 'cancel', { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['git', 'status'] } }],
+    },
+  });
+  await settle();
+  const permissionRequest = outputFrames.find((frame) => frame.method === 'session/request_permission');
+  expect(permissionRequest).toBeDefined();
+  return {
+    input,
+    outputFrames,
+    transport,
+    permissionRequest: permissionRequest as Record<string, unknown>,
+    answer: async (result: unknown) => {
+      input.write(encodeLine({ jsonrpc: '2.0', id: permissionRequest?.id, result }));
+      await settle();
+      return transport.sent.find((frame) => frame.id === 88);
+    },
+    close: () => input.destroy(),
+  };
+}
+
 describe('CodexDriver', () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('sends an accepted ACP permission choice to Codex', async () => {
+    const state = await permissionHarness();
+    const result = await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-accept' } });
+
+    expect(result).toMatchObject({ result: { decision: 'accept' } });
+    state.close();
+  });
+
+  it('preserves the execpolicy amendment choice and argv across the ACP seam', async () => {
+    const state = await permissionHarness();
+    const result = await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-accept-amendment' } });
+
+    expect(result).toMatchObject({
+      result: { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['git', 'status'] } } },
+    });
+    state.close();
+  });
+
+  it('sends cancel when the ACP client cancels a permission request', async () => {
+    const state = await permissionHarness();
+    const result = await state.answer({ outcome: { outcome: 'cancelled' } });
+
+    expect(result).toMatchObject({ result: { decision: 'cancel' } });
+    state.close();
+  });
+
+  it('sends cancel when the ACP client selects an option Codex did not offer', async () => {
+    const state = await permissionHarness();
+    const result = await state.answer({ outcome: { outcome: 'selected', optionId: 'not-offered' } });
+
+    expect(result).toMatchObject({ result: { decision: 'cancel' } });
+    state.close();
+  });
+
+  it('ends an inactive turn at the configured deadline and records the deadline', async () => {
+    vi.useFakeTimers();
+    const state = setup({ turnInactivityTimeoutMs: 50 });
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await flushMicrotasks();
+
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(state.turnEnds).toEqual([{ stopReason: null, isError: true, raw: 'turn deadline' }]);
+    expect(state.updates.some((update) => update.sessionUpdate === 'notice' &&
+      (update.notice as Record<string, unknown> | undefined)?.message?.toString().includes('deadline'))).toBe(true);
+    expect(state.updates.some((update) => META_UNMAPPED_FRAME in (update._meta ?? {}) &&
+      (update._meta?.[META_UNMAPPED_FRAME] as Record<string, unknown> | undefined)?.reason === 'Codex turn deadline expired')).toBe(true);
+    state.driver.kill();
+  });
+
+  it('resets the inactivity deadline when a frame arrives for the active turn', async () => {
+    vi.useFakeTimers();
+    const state = setup({ turnInactivityTimeoutMs: 50 });
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await flushMicrotasks();
+
+    await vi.advanceTimersByTimeAsync(30);
+    state.transport.frame({
+      jsonrpc: '2.0',
+      method: 'item/agentMessage/delta',
+      params: { turnId: 'turn-live', itemId: 'message-live', delta: 'working' },
+    });
+    await vi.advanceTimersByTimeAsync(30);
+    expect(state.turnEnds).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(20);
+    expect(state.turnEnds).toEqual([{ stopReason: null, isError: true, raw: 'turn deadline' }]);
+    state.driver.kill();
+  });
+
+  it('suspends the inactivity deadline while an approval is pending, then resumes it', async () => {
+    vi.useFakeTimers();
+    let resolvePermission!: (value: { outcome: 'selected'; optionId: string }) => void;
+    const onRequestPermission = () => new Promise<{ outcome: 'selected'; optionId: string }>((resolve) => {
+      resolvePermission = resolve;
+    });
+    const state = setup({ turnInactivityTimeoutMs: 50 }, { onRequestPermission });
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await flushMicrotasks();
+    state.transport.frame({
+      jsonrpc: '2.0',
+      id: 74,
+      method: 'item/commandExecution/requestApproval',
+      params: {
+        turnId: 'turn-live',
+        itemId: 'pending-safe',
+        command: ['git', 'status'],
+        availableDecisions: ['accept', 'cancel'],
+      },
+    });
+    await flushMicrotasks();
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(state.turnEnds).toHaveLength(0);
+
+    resolvePermission({ outcome: 'selected', optionId: 'codex-accept' });
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(49);
+    expect(state.turnEnds).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.turnEnds).toEqual([{ stopReason: null, isError: true, raw: 'turn deadline' }]);
+    state.driver.kill();
+  });
 
   it('captures the provider id and exposes it on the first session update', async () => {
     const state = setup();
