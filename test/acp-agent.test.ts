@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AcpAgent, PROTOCOL_VERSION, type AgentDriver, type DriverEvents } from '../src/acp/agent.js';
+import { AcpAgent, PROTOCOL_VERSION, type AcpAgentOptions, type AgentDriver, type DriverEvents } from '../src/acp/agent.js';
 import { JsonRpcPeer } from '../src/jsonrpc.js';
 import type { TurnOutcome } from '../src/claude/driver.js';
 
@@ -53,7 +53,7 @@ class FakeDriver implements AgentDriver {
   }
 }
 
-function harness() {
+function harness(probeSession?: AcpAgentOptions['probeSession']) {
   const sent: Record<string, unknown>[] = [];
   const drivers: FakeDriver[] = [];
   const peer = new JsonRpcPeer({ send: (m) => sent.push(m as Record<string, unknown>) });
@@ -65,6 +65,7 @@ function harness() {
       return driver;
     },
     newSessionId: () => `sess_${++n}`,
+    ...(probeSession === undefined ? {} : { probeSession }),
   });
   return { agent, peer, sent, drivers };
 }
@@ -552,5 +553,67 @@ describe('unknown methods still get an answer', () => {
     const reply = await call(h, 'session/set_mode', { sessionId: 'sess_1', modeId: 'plan' }, 2);
     expect(reply.error).toBeDefined();
     expect(reply.result).toBeUndefined();
+  });
+});
+
+describe('session/load refuses an id that names no conversation', () => {
+  // Without the probe this all happened a turn later: the agent started,
+  // session/load returned success, and the CLI's "No conversation found with
+  // session ID" arrived on the first prompt -- indistinguishable from any
+  // other late failure, and after the client had been told it held a session.
+  const UUID = '11111111-2222-3333-4444-555555555555';
+
+  it('REFUSES an absent id at load, naming why, and starts no agent', async () => {
+    const h = harness(() => ({ existence: 'absent' as const, detail: 'no conversation with that id exists here.' }));
+    const reply = await call(h, 'session/load', { sessionId: UUID, cwd: '/work', mcpServers: [] });
+    expect(reply.error).toMatchObject({
+      message: expect.stringContaining('cannot resume 11111111-2222-3333-4444-555555555555'),
+    });
+    expect(reply.error).toMatchObject({ message: expect.stringContaining('no conversation with that id exists here.') });
+    expect(h.drivers).toHaveLength(0);
+  });
+
+  it('PROCEEDS when the probe cannot tell, because a store it cannot read must not refuse a working resume', async () => {
+    const h = harness(() => ({ existence: 'indeterminate' as const, detail: 'home relocated' }));
+    const reply = await call(h, 'session/load', { sessionId: UUID, cwd: '/work', mcpServers: [] });
+    expect(reply.result).toEqual({});
+    expect(h.drivers[0]?.options.resumeSessionId).toBe(UUID);
+  });
+
+  it('PROCEEDS for a present id', async () => {
+    const h = harness(() => ({ existence: 'present' as const, detail: '' }));
+    const reply = await call(h, 'session/load', { sessionId: UUID, cwd: '/work', mcpServers: [] });
+    expect(reply.result).toEqual({});
+    expect(h.drivers).toHaveLength(1);
+  });
+
+  it('behaves exactly as before when no probe is supplied', async () => {
+    // The probe is optional, so an embedder supplying none keeps the old
+    // contract rather than silently losing the ability to resume.
+    const h = harness();
+    const reply = await call(h, 'session/load', { sessionId: UUID, cwd: '/work', mcpServers: [] });
+    expect(reply.result).toEqual({});
+    expect(h.drivers).toHaveLength(1);
+  });
+
+  it('refuses a MINTED id before it ever consults the probe', async () => {
+    // Order matters: the minted-id refusal names the _meta key to use instead,
+    // which is more actionable than "no such conversation" -- and a minted id
+    // is never in the store anyway, so a probe-first order would replace a
+    // precise message with a vague one.
+    //
+    // `sess_123_456` matches the minted PATTERN without ever having been handed
+    // out, which is the branch that survives a restart -- and it keeps this
+    // test off the already-open path, which fires first and for a different
+    // reason when the session is still live.
+    let consulted = 0;
+    const h = harness(() => {
+      consulted++;
+      return { existence: 'absent' as const, detail: 'should not be reached' };
+    });
+    const reply = await call(h, 'session/load', { sessionId: 'sess_123_456', cwd: '/work', mcpServers: [] });
+    expect(reply.error).toMatchObject({ message: expect.stringContaining('minted by this server') });
+    expect(consulted).toBe(0);
+    expect(h.drivers).toHaveLength(0);
   });
 });

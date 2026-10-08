@@ -146,6 +146,37 @@ running** is refused, by either id. No history is replayed on load, because the
 CLI replays none -- `session/load` returning `{}` with no `session/update`
 notifications is the honest report of that, not an omission.
 
+### Refusing an unknown id at load, not a turn later
+
+Pass `probeSession` and an id naming **no** conversation is refused by
+`session/load` itself, instead of starting an agent that fails on its first
+prompt:
+
+```ts
+import { probeSessionStore } from '@particle-academy/prism-acp';
+
+const probeSession = (sessionId: string) => probeSessionStore(sessionId);
+```
+
+Pass that to `serve` beside `driverFactory` — see [Using it](#using-it).
+
+It costs a directory listing, not a turn. The obvious probe -- resuming with a
+throwaway prompt -- refuses a bad id for free but **answers** a good one, so it
+would spend a real turn on every successful load.
+
+**It can decline to answer, and that matters more than the refusal.** The result
+is `present`, `absent` or `indeterminate`, and only `absent` refuses. The store's
+layout is undocumented, so a store the probe cannot read -- a relocated home, a
+permissions problem, a future CLI version -- reports `indeterminate` and the load
+proceeds exactly as it did before. Calling a real session absent would refuse a
+resume that would have worked, which is worse than the late error this replaces;
+that error is still there as the backstop.
+
+`probeSession` is yours to supply because the answer belongs to the agent being
+driven, not to ACP: `probeSessionStore` reads claude's session store, and a Codex
+driver would resolve the same question through `thread/resume`. Omit it and
+`session/load` behaves as it always did.
+
 ## Rate limits are a gauge, not just a breach event
 
 ACP has no field for a rate limit, so the detail rides in `_meta` under
@@ -213,6 +244,7 @@ serve({
   input: process.stdin,
   output: process.stdout,
   driverFactory: (options, events) => new ClaudeDriver(options, events),
+  probeSession,
 });
 ```
 

@@ -60,8 +60,22 @@ export type DriverFactory = (
   events: DriverEvents,
 ) => AgentDriver;
 
+/**
+ * Whether a session id names a conversation that can be resumed.
+ *
+ * Injected, and for two reasons. Tests must not read the developer's real
+ * session store; and the answer is a property of the AGENT being driven, not of
+ * ACP -- a Codex driver resolves it through `thread/resume`, not through
+ * claude's `~/.claude/projects` layout. Omit it and `session/load` behaves as it
+ * did before: it accepts the id and the agent reports the problem later.
+ */
+export type SessionProbe = (
+  sessionId: string,
+) => { readonly existence: 'present' | 'absent' | 'indeterminate'; readonly detail: string };
+
 export interface AcpAgentOptions {
   readonly driverFactory: DriverFactory;
+  readonly probeSession?: SessionProbe;
   readonly agentInfo?: { readonly name: string; readonly title?: string; readonly version: string };
   /** Generate a session id. Injected so tests can assert on stable ids. */
   readonly newSessionId?: () => string;
@@ -250,6 +264,24 @@ export class AcpAgent {
           `Resume with the CLI's own session id, sent as '${META_CLI_SESSION_ID}' in the _meta of the first ` +
           `session/update of the original session.`,
       );
+    }
+
+    // REFUSE an id that names no conversation, here rather than a turn later.
+    //
+    // Without this the agent starts, `session/load` returns success, and the
+    // CLI's "No conversation found with session ID" arrives when the first
+    // prompt runs -- a real error, but one a client cannot tell from any other
+    // late failure, and one that lands after it has been told it holds a
+    // resumed session. A consumer reported this as the only thing standing
+    // between a bad id and a lost conversation.
+    //
+    // `indeterminate` deliberately PROCEEDS. The probe reads a store whose
+    // layout is undocumented, so a store it cannot read must not be allowed to
+    // refuse a resume that would have worked; the late error is still there as
+    // the backstop it always was. Only a positive `absent` refuses.
+    const probe = this.#options.probeSession?.(sessionId);
+    if (probe?.existence === 'absent') {
+      throw new RpcError(RPC_INVALID_PARAMS, `cannot resume ${sessionId}: ${probe.detail}`);
     }
 
     this.#open(sessionId, cwd, sessionId);

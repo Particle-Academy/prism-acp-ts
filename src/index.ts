@@ -51,7 +51,11 @@ export type {
   AgentDriver,
   DriverEvents,
   DriverFactory,
+  SessionProbe as AcpSessionProbe,
 } from './acp/agent.js';
+
+export { probeSessionStore } from './claude/session-store.js';
+export type { SessionExistence, SessionProbe, SessionStoreOptions } from './claude/session-store.js';
 
 export { serve } from './acp/stdio.js';
 export type { Served, ServeOptions } from './acp/stdio.js';
