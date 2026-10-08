@@ -97,6 +97,12 @@ non-credentials alike. If the child needs an orchestrator session or terminal
 id, a callback URL, or a feature flag, name it in `allowEnv` or it will not
 arrive. This failure is silent: the child can start and appear healthy while
 being unable to identify itself, rather than reporting a missing variable.
+An allowed variable whose parent value is `''` is forwarded as an empty string.
+That can be worse than omitting it: a referenced-but-unset value in an MCP
+config can stop every server in that file. When there is no value to give,
+omit the variable instead of passing its name with a blank value. `childEnv`
+does not filter blanks for you, because an intentionally empty value can be
+meaningful for some variable names and the package will not guess which.
 
 Nothing here mutates `process.env`. A workspace may hold an API key on purpose —
 other consumers beside this one legitimately bill per token — so the child's
@@ -160,6 +166,18 @@ methods and sends them as ACP updates. This deliberately differs between the
 drivers because their measured resume behavior differs. Codex thread ids are
 the provider's own captured ids and are the same ids accepted by its resume
 method; ACP-minted ids are refused.
+
+The human half of the conversation differs too. Against a real Claude child,
+the CLI did not echo the client's prompt as `user_message_chunk`, and loading
+its session replayed zero updates. A Claude client cannot reconstruct the whole
+conversation from ACP alone; record the human turn yourself. Codex's mapping
+does emit text from `userMessage` items as `user_message_chunk` during history
+replay, so a Codex `session/load` will carry that human text. The mapping also
+does this for live items, so a live Codex turn may echo the client's own prompt
+as `user_message_chunk`; this is what our mapping allows, not a claim about
+every Codex frame. Record the human turn yourself for both providers, and treat
+a live `user_message_chunk` as the agent's record of what it received, not as
+new input to append again.
 
 ### Refusing an unknown id at load, not a turn later
 
@@ -303,6 +321,14 @@ serve({
 A client then speaks ACP on those pipes. Several sessions run at once, each with
 its own agent process, its own in-flight turn and its own updates — tagged with
 the session they belong to, because a room of agents shares one stream.
+
+### Commit streamed messages at the turn boundary
+
+`agent_message_chunk` and `agent_thought_chunk` carry no message id. The turn
+boundary is the only delimiter between replies, so commit the accumulated
+message there. Clearing the in-flight message without committing loses the
+reply (including the whole reply in a single-message turn); not clearing it
+appends the next turn to the previous one.
 
 ## Development
 
