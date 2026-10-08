@@ -92,6 +92,12 @@ in the direction that spends money silently. Names are compared
 case-insensitively, because Windows environment names are case-insensitive and
 `anthropic_api_key` reaches a child exactly as the uppercase spelling does.
 
+The allow-list withholds every variable not named in it, credentials and
+non-credentials alike. If the child needs an orchestrator session or terminal
+id, a callback URL, or a feature flag, name it in `allowEnv` or it will not
+arrive. This failure is silent: the child can start and appear healthy while
+being unable to identify itself, rather than reporting a missing variable.
+
 Nothing here mutates `process.env`. A workspace may hold an API key on purpose —
 other consumers beside this one legitimately bill per token — so the child's
 environment is constructed and the ambient one is left alone.

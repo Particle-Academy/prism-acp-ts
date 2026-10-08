@@ -1036,6 +1036,8 @@ export class CodexDriver implements AgentDriver {
   }
 
   #hasOutstandingWork(): boolean {
+    // If this driver adds client-served fs/* or terminal/* calls, their in-flight
+    // ACP requests belong here too; a slow client tool is outstanding work.
     return this.#pendingApprovals.size > 0 || this.#activeItemIds.size > 0;
   }
 }
