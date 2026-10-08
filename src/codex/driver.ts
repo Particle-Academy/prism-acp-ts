@@ -28,6 +28,7 @@ import {
 
 export interface CodexDriverOptions {
   readonly cwd: string;
+  /** Trusted configuration; must not be built from untrusted input. */
   readonly binary?: string;
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   readonly allowEnv?: readonly string[];
@@ -60,7 +61,7 @@ const APPROVAL_METHODS = new Set([
   'execCommandApproval',
 ]);
 const MAX_HISTORY_PAGES = 10_000;
-const DEFAULT_TURN_INACTIVITY_TIMEOUT_MS = 120_000;
+const DEFAULT_TURN_INACTIVITY_TIMEOUT_MS = 600_000;
 
 const KNOWN_NOTIFICATIONS = new Set([
   'thread/started',
@@ -96,6 +97,7 @@ export class CodexDriver implements AgentDriver {
   readonly #pendingApprovals = new Map<string, PendingApproval>();
   readonly #completedTurns = new Set<string>();
   readonly #items = new Map<string, Record<string, unknown>>();
+  readonly #activeItemIds = new Set<string>();
   readonly #messageDeltas = new Set<string>();
   readonly #reasoningDeltas = new Set<string>();
   #itemSequence = 0;
@@ -463,8 +465,11 @@ export class CodexDriver implements AgentDriver {
       case 'item/agentMessage/delta':
         {
           const itemId = asString(object.itemId);
-          if (itemId !== undefined) this.#messageDeltas.add(itemId);
-          else this.#recordUnmapped('item/agentMessage/delta omitted itemId', object);
+          if (itemId !== undefined) {
+            this.#messageDeltas.add(itemId);
+            this.#activeItemIds.add(itemId);
+            this.#pauseTurnDeadline();
+          } else this.#recordUnmapped('item/agentMessage/delta omitted itemId', object);
         }
         if (typeof object.delta !== 'string') {
           this.#recordUnmapped('item/agentMessage/delta omitted string delta', object);
@@ -479,8 +484,11 @@ export class CodexDriver implements AgentDriver {
       case 'item/reasoning/textDelta':
         {
           const itemId = asString(object.itemId);
-          if (itemId !== undefined) this.#reasoningDeltas.add(itemId);
-          else this.#recordUnmapped(`${method} omitted itemId`, object);
+          if (itemId !== undefined) {
+            this.#reasoningDeltas.add(itemId);
+            this.#activeItemIds.add(itemId);
+            this.#pauseTurnDeadline();
+          } else this.#recordUnmapped(`${method} omitted itemId`, object);
         }
         if (typeof object.delta !== 'string') {
           this.#recordUnmapped(`${method} omitted string delta`, object);
@@ -515,6 +523,15 @@ export class CodexDriver implements AgentDriver {
   #mapItem(item: Record<string, unknown>, replay: boolean, completed = false): void {
     const type = asString(item.type) ?? 'unknown';
     const id = asString(item.id) ?? asString(item.itemId) ?? `codex-${type}-${++this.#itemSequence}`;
+    if (!replay) {
+      if (completed) {
+        this.#activeItemIds.delete(id);
+        this.#resumeTurnDeadlineIfReady(true);
+      } else {
+        this.#activeItemIds.add(id);
+        this.#pauseTurnDeadline();
+      }
+    }
     if (completed && !['completed', 'failed', 'declined', 'canceled', 'cancelled', 'exited', 'interrupted'].includes(asString(item.status) ?? '')) {
       this.#recordUnmapped('completed Codex item had an unknown status', item);
     }
@@ -610,11 +627,9 @@ export class CodexDriver implements AgentDriver {
     const approvalKey = String(id);
     if (this.#pendingApprovals.has(approvalKey)) {
       this.#recordUnmapped('duplicate active Codex approval request id', { method, id });
-      this.#sendServerReply({
-        jsonrpc: '2.0',
-        id,
-        result: cancelApprovalResult(method),
-      });
+      // Reuse of an active id is invalid. Cancel and answer the original once;
+      // replying separately here would put two responses on the same request id.
+      this.#pendingApprovals.get(approvalKey)?.cancel();
       return;
     }
 
@@ -789,7 +804,7 @@ export class CodexDriver implements AgentDriver {
   #emitRateLimit(value: unknown): void {
     const read = readCodexRateLimit(value);
     if (!read.ok) {
-      this.#recordUnmapped(read.reason, { method: 'account/rateLimits', params: value });
+      this.#recordUnmapped(read.reason, { method: 'account/rateLimits' });
       return;
     }
     this.#emit(
@@ -926,6 +941,7 @@ export class CodexDriver implements AgentDriver {
     this.#activeTurn = null;
     this.#turnInFlight = false;
     this.#items.clear();
+    this.#activeItemIds.clear();
     this.#messageDeltas.clear();
     this.#reasoningDeltas.clear();
     this.#events.onTurnEnd?.(outcome);
@@ -976,7 +992,7 @@ export class CodexDriver implements AgentDriver {
   }
 
   #touchTurnDeadline(): void {
-    if (!this.#turnInFlight || this.#pendingApprovals.size > 0) return;
+    if (!this.#turnInFlight || this.#hasOutstandingWork()) return;
     this.#turnDeadlineRemainingMs = this.#turnInactivityTimeoutMs;
     this.#scheduleTurnDeadline();
   }
@@ -988,18 +1004,20 @@ export class CodexDriver implements AgentDriver {
     this.#turnDeadlineTimer = null;
   }
 
-  #resumeTurnDeadlineIfReady(): void {
-    if (this.#pendingApprovals.size === 0 && this.#turnInFlight) this.#scheduleTurnDeadline();
+  #resumeTurnDeadlineIfReady(resetRemaining = false): void {
+    if (!this.#turnInFlight || this.#hasOutstandingWork()) return;
+    if (resetRemaining) this.#turnDeadlineRemainingMs = this.#turnInactivityTimeoutMs;
+    this.#scheduleTurnDeadline();
   }
 
   #scheduleTurnDeadline(): void {
-    if (!this.#turnInFlight || this.#pendingApprovals.size > 0 || this.#closed) return;
+    if (!this.#turnInFlight || this.#hasOutstandingWork() || this.#closed) return;
     if (this.#turnDeadlineTimer !== null) clearTimeout(this.#turnDeadlineTimer);
     const delay = this.#turnDeadlineRemainingMs;
     this.#turnDeadlineExpiresAt = Date.now() + delay;
     this.#turnDeadlineTimer = setTimeout(() => {
       this.#turnDeadlineTimer = null;
-      if (!this.#turnInFlight || this.#pendingApprovals.size > 0) return;
+      if (!this.#turnInFlight || this.#hasOutstandingWork()) return;
       const message = `Codex turn inactivity deadline expired after ${this.#turnInactivityTimeoutMs} ms.`;
       this.#emit({ sessionUpdate: 'notice', notice: { level: 'warning', message } });
       this.#recordUnmapped('Codex turn deadline expired', {
@@ -1015,6 +1033,10 @@ export class CodexDriver implements AgentDriver {
     this.#turnDeadlineTimer = null;
     this.#turnDeadlineRemainingMs = 0;
     this.#turnDeadlineExpiresAt = 0;
+  }
+
+  #hasOutstandingWork(): boolean {
+    return this.#pendingApprovals.size > 0 || this.#activeItemIds.size > 0;
   }
 }
 

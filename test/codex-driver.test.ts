@@ -183,6 +183,24 @@ describe('CodexDriver', () => {
     state.close();
   });
 
+  it('cancels an original approval once when Codex reuses its active request id', async () => {
+    const state = await permissionHarness();
+    state.transport.frame({
+      jsonrpc: '2.0',
+      id: 88,
+      method: 'item/commandExecution/requestApproval',
+      params: { itemId: 'duplicate-approval', command: ['git', 'status'], availableDecisions: ['accept', 'cancel'] },
+    });
+    await settle();
+
+    expect(state.transport.sent.filter((frame) => frame.id === 88)).toEqual([
+      expect.objectContaining({ result: { decision: 'cancel' } }),
+    ]);
+    await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-accept' } });
+    expect(state.transport.sent.filter((frame) => frame.id === 88)).toHaveLength(1);
+    state.close();
+  });
+
   it('ends an inactive turn at the configured deadline and records the deadline', async () => {
     vi.useFakeTimers();
     const state = setup({ turnInactivityTimeoutMs: 50 });
@@ -201,6 +219,69 @@ describe('CodexDriver', () => {
     state.driver.kill();
   });
 
+  it('uses the shipped ten-minute default inactivity deadline', async () => {
+    vi.useFakeTimers();
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await flushMicrotasks();
+
+    await vi.advanceTimersByTimeAsync(599_999);
+    expect(state.turnEnds).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.turnEnds).toEqual([{ stopReason: null, isError: true, raw: 'turn deadline' }]);
+    state.driver.kill();
+  });
+
+  it('does not expire while a command execution item is still running', async () => {
+    vi.useFakeTimers();
+    const state = setup({ turnInactivityTimeoutMs: 50 });
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await flushMicrotasks();
+    state.transport.frame({
+      jsonrpc: '2.0',
+      method: 'item/started',
+      params: { turnId: 'turn-live', item: { type: 'commandExecution', id: 'command-running', command: 'npm test' } },
+    });
+
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(state.turnEnds).toHaveLength(0);
+    state.driver.kill();
+  });
+
+  it('resumes a fresh inactivity deadline when a command execution item completes', async () => {
+    vi.useFakeTimers();
+    const state = setup({ turnInactivityTimeoutMs: 50 });
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await flushMicrotasks();
+    state.transport.frame({
+      jsonrpc: '2.0',
+      method: 'item/started',
+      params: { turnId: 'turn-live', item: { type: 'commandExecution', id: 'command-running', command: 'npm test' } },
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    state.transport.frame({
+      jsonrpc: '2.0',
+      method: 'item/completed',
+      params: {
+        turnId: 'turn-live',
+        item: { type: 'commandExecution', id: 'command-running', command: 'npm test', status: 'completed', exitCode: 0 },
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(49);
+    expect(state.turnEnds).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.turnEnds).toEqual([{ stopReason: null, isError: true, raw: 'turn deadline' }]);
+    state.driver.kill();
+  });
+
   it('resets the inactivity deadline when a frame arrives for the active turn', async () => {
     vi.useFakeTimers();
     const state = setup({ turnInactivityTimeoutMs: 50 });
@@ -212,8 +293,8 @@ describe('CodexDriver', () => {
     await vi.advanceTimersByTimeAsync(30);
     state.transport.frame({
       jsonrpc: '2.0',
-      method: 'item/agentMessage/delta',
-      params: { turnId: 'turn-live', itemId: 'message-live', delta: 'working' },
+      method: 'turn/plan/updated',
+      params: { turnId: 'turn-live', plan: [{ step: 'working', status: 'inProgress' }] },
     });
     await vi.advanceTimersByTimeAsync(30);
     expect(state.turnEnds).toHaveLength(0);
@@ -381,6 +462,25 @@ describe('CodexDriver', () => {
     const rate = state.updates.find((update) => update.sessionUpdate === 'notice' && 'particle.academy/rate_limit' in (update._meta ?? {}));
     expect(rate?._meta?.['particle.academy/rate_limit']).toMatchObject({
       primary: { usedPercent: 45, windowDurationMins: 300 },
+    });
+  });
+
+  it('does not echo a refused rate-limit payload into unmapped metadata', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.transport.frame({
+      jsonrpc: '2.0',
+      method: 'account/rateLimits/updated',
+      params: { rateLimits: { primary: { usedPercent: 101, windowDurationMins: 300 } }, privateField: 'must-not-echo' },
+    });
+
+    const unmapped = state.updates.find((update) => META_UNMAPPED_FRAME in (update._meta ?? {}) &&
+      (update._meta?.[META_UNMAPPED_FRAME] as Record<string, unknown> | undefined)?.reason?.toString().includes('usedPercent'));
+    expect(unmapped).toBeDefined();
+    expect(JSON.stringify(unmapped)).not.toContain('must-not-echo');
+    expect((unmapped?._meta?.[META_UNMAPPED_FRAME] as Record<string, unknown> | undefined)?.frame).toEqual({
+      method: 'account/rateLimits',
     });
   });
 
