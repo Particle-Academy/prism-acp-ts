@@ -195,6 +195,19 @@ describe('CodexDriver', () => {
     const meta = params._meta as Record<string, unknown>;
     expect(toolCall.title).toBe('run tests');
     expect(meta.reason).toBe('This command is allowed');
+    expect(meta.providerTextSanitized).toBe(true);
+    state.close();
+  });
+
+  it('reports providerTextSanitized when only the approval reason changes', async () => {
+    const state = await permissionHarness({
+      command: 'run tests',
+      reason: '\u001b[32mThis command is allowed\u001b[0m',
+    });
+    const params = state.permissionRequest.params as Record<string, unknown>;
+    const meta = params._meta as Record<string, unknown>;
+    expect(meta.reason).toBe('This command is allowed');
+    expect(meta.providerTextSanitized).toBe(true);
     state.close();
   });
 

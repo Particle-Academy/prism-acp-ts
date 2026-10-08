@@ -798,9 +798,11 @@ export class CodexDriver implements AgentDriver {
       add('codex-cancel', 'Reject', 'reject_once', fallback);
       this.#recordUnmapped('Codex approval had no recognised available decisions', { method, params });
     }
+    const sanitizedTitle = stripAnsiControlSequences(toolTitle);
+    const sanitizedReason = reason === undefined ? undefined : stripAnsiControlSequences(reason);
     const toolCall: Record<string, unknown> = {
       toolCallId,
-      title: stripAnsiControlSequences(toolTitle).text,
+      title: sanitizedTitle.text,
       status: 'pending',
       ...(method.includes('commandExecution') || method === 'execCommandApproval'
         ? { kind: 'execute' }
@@ -814,7 +816,10 @@ export class CodexDriver implements AgentDriver {
       options,
       _meta: {
         'particle.academy/codex_permission_method': method,
-        ...(reason === undefined ? {} : { reason: stripAnsiControlSequences(reason).text }),
+        ...(sanitizedReason === undefined ? {} : { reason: sanitizedReason.text }),
+        ...(sanitizedTitle.changed || sanitizedReason?.changed === true
+          ? { providerTextSanitized: true }
+          : {}),
       },
     };
     return { request, choices };

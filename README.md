@@ -351,7 +351,9 @@ control sequences before sending those labels. Tool-result `content` and
 `rawInput` are data and stay verbatim: result text may contain meaningful color
 codes for terminal clients, and `rawInput` preserves the provider's exact
 arguments. Clients should not assume control sequences have been removed from
-content or input data.
+content or input data. Permission requests report `providerTextSanitized: true`
+in `_meta` when their title or reason changed; tool-call titles do not yet report
+that flag.
 
 ## Driver capabilities
 
