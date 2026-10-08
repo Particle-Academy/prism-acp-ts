@@ -621,6 +621,9 @@ export class CodexDriver implements AgentDriver {
       return;
     }
 
+    // Deliberately record both lifecycle points: their payloads differ,
+    // because completion adds status and exitCode; unknown types need both.
+    // This is useful evidence precisely because the item type is unknown.
     this.#recordUnmapped(`unmapped Codex item: ${type}`, item);
   }
 
