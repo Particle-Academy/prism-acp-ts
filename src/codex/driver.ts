@@ -1,4 +1,5 @@
 import { childEnv } from '../env.js';
+import { stripAnsiControlSequences } from '../text.js';
 import { JsonRpcPeer } from '../jsonrpc.js';
 import {
   META_CLI_SESSION_ID,
@@ -590,7 +591,7 @@ export class CodexDriver implements AgentDriver {
       this.#emit({
         sessionUpdate: completed ? 'tool_call_update' : 'tool_call',
         toolCallId: id,
-        title: command.length === 0 ? 'Run command' : command,
+        title: command.length === 0 ? 'Run command' : stripAnsiControlSequences(command).text,
         kind: 'execute',
         status: completed ? statusOf(item.status, item.exitCode) : 'pending',
         ...(command.length === 0 ? {} : { rawInput: { command } }),
@@ -624,7 +625,7 @@ export class CodexDriver implements AgentDriver {
       this.#emit({
         sessionUpdate: completed ? 'tool_call_update' : 'tool_call',
         toolCallId: id,
-        title: asString(item.tool) ?? asString(item.name) ?? 'Tool call',
+        title: stripAnsiControlSequences(asString(item.tool) ?? asString(item.name) ?? 'Tool call').text,
         status: completed ? statusOf(item.status) : 'pending',
         ...(item.arguments === undefined ? {} : { rawInput: item.arguments }),
       });
@@ -799,7 +800,7 @@ export class CodexDriver implements AgentDriver {
     }
     const toolCall: Record<string, unknown> = {
       toolCallId,
-      title: toolTitle,
+      title: stripAnsiControlSequences(toolTitle).text,
       status: 'pending',
       ...(method.includes('commandExecution') || method === 'execCommandApproval'
         ? { kind: 'execute' }
@@ -811,7 +812,10 @@ export class CodexDriver implements AgentDriver {
     const request: PermissionRequest = {
       toolCall,
       options,
-      _meta: { 'particle.academy/codex_permission_method': method, ...(reason === undefined ? {} : { reason }) },
+      _meta: {
+        'particle.academy/codex_permission_method': method,
+        ...(reason === undefined ? {} : { reason: stripAnsiControlSequences(reason).text }),
+      },
     };
     return { request, choices };
   }

@@ -157,7 +157,8 @@ export class ClaudeToAcp {
       const update: AcpUpdate = {
         sessionUpdate: 'tool_call',
         toolCallId,
-        title: name,
+        // `name` is the machine lookup key and stays verbatim; `title` is UI chrome.
+        title: stripAnsiControlSequences(name).text,
         name,
         status: 'pending' satisfies ToolStatus,
       };

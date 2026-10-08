@@ -112,7 +112,7 @@ async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
 
-async function permissionHarness() {
+async function permissionHarness(overrides: Record<string, unknown> = {}) {
   const input = new PassThrough();
   const output = new PassThrough();
   const outputFrames: Record<string, unknown>[] = [];
@@ -147,6 +147,7 @@ async function permissionHarness() {
       turnId: 'turn-live',
       command: ['git', 'status'],
       availableDecisions: ['accept', 'cancel', { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['git', 'status'] } }],
+      ...overrides,
     },
   });
   await settle();
@@ -182,6 +183,56 @@ describe('CodexDriver', () => {
 
     expect(result).toMatchObject({ result: { decision: 'accept' } });
     state.close();
+  });
+
+  it('sanitizes the approval title and consent reason shown to the client', async () => {
+    const state = await permissionHarness({
+      command: '\u001b[31mrun tests\u001b[0m',
+      reason: '\u001b[32mThis command is allowed\u001b[0m',
+    });
+    const params = state.permissionRequest.params as Record<string, unknown>;
+    const toolCall = params.toolCall as Record<string, unknown>;
+    const meta = params._meta as Record<string, unknown>;
+    expect(toolCall.title).toBe('run tests');
+    expect(meta.reason).toBe('This command is allowed');
+    state.close();
+  });
+
+  it('sanitizes command execution titles while preserving raw command input', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    const command = '\u001b[31mnode test\u001b[0m';
+    state.transport.frame({
+      jsonrpc: '2.0', method: 'item/started',
+      params: { item: { type: 'commandExecution', id: 'command-title', command } },
+    });
+    expect(state.updates.at(-1)).toMatchObject({
+      title: 'node test',
+      rawInput: { command },
+    });
+    state.driver.kill();
+  });
+
+  it('sanitizes MCP tool titles but keeps the arguments verbatim', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    const arguments_ = { code: '\u001b[31mvalue\u001b[0m' };
+    state.transport.frame({
+      jsonrpc: '2.0', method: 'item/started',
+      params: {
+        item: {
+          type: 'mcpToolCall', id: 'mcp-title',
+          tool: 'mcp__\u001b[31mterminal\u001b[0m__run', arguments: arguments_,
+        },
+      },
+    });
+    expect(state.updates.at(-1)).toMatchObject({
+      title: 'mcp__terminal__run',
+      rawInput: arguments_,
+    });
+    state.driver.kill();
   });
 
   it('preserves the execpolicy amendment choice and argv across the ACP seam', async () => {

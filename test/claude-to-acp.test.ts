@@ -421,6 +421,35 @@ describe('an unrecognised tool gets NO kind rather than "other"', () => {
   });
 });
 
+describe('tool display labels and data', () => {
+  it('sanitizes the tool title but preserves the machine name verbatim', () => {
+    const name = '\u001b[31mBash\u001b[0m';
+    const mapper = new ClaudeToAcp();
+    const [update] = mapper.frame({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'tool-ansi', name, input: {} },
+      },
+    });
+    expect(update).toMatchObject({ title: 'Bash', name });
+  });
+
+  it('preserves terminal escapes in tool-result content', () => {
+    const result = '\u001b[31mcompiler warning\u001b[0m';
+    const [update] = new ClaudeToAcp().frame({
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 'tool-result', content: result }],
+      },
+    });
+    expect(update).toMatchObject({
+      content: [{ content: { text: result } }],
+    });
+  });
+});
+
 describe('a failed tool result is reported as failed', () => {
   it('does not report a failure as completed', () => {
     const mapper = new ClaudeToAcp();

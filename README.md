@@ -346,6 +346,13 @@ A recognized `tool_call` opener includes ACP's `kind`. Streaming tool arguments
 are not on that opener; `rawInput` arrives on `tool_call_update` after the
 arguments finish streaming. The closing `tool_call_update` carries `content`.
 
+Tool titles and approval reasons are UI chrome, so the drivers strip terminal
+control sequences before sending those labels. Tool-result `content` and
+`rawInput` are data and stay verbatim: result text may contain meaningful color
+codes for terminal clients, and `rawInput` preserves the provider's exact
+arguments. Clients should not assume control sequences have been removed from
+content or input data.
+
 ## Driver capabilities
 
 When the embedder identifies the selected driver, `initialize` declares its
