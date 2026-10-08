@@ -22,6 +22,7 @@ export type {
 
 export {
   META_CLI_SESSION_ID,
+  META_EXEC_POLICY_AMENDMENT,
   META_NS,
   META_RATE_LIMIT,
   META_THINKING_SIGNATURE,
@@ -51,6 +52,8 @@ export type {
   AgentDriver,
   DriverEvents,
   DriverFactory,
+  PermissionOutcome,
+  PermissionRequest,
   SessionProbe as AcpSessionProbe,
 } from './acp/agent.js';
 
@@ -62,3 +65,8 @@ export type { Served, ServeOptions } from './acp/stdio.js';
 
 export { cliSessionIdOf, turnOutcomeOf } from './claude/driver.js';
 export type { StopReason, TurnOutcome } from './claude/driver.js';
+
+export { CodexDriver } from './codex/driver.js';
+export type { CodexDriverOptions, CodexTransportFactory } from './codex/driver.js';
+export { codexRateLimitNotice, parseCodexRateLimit, readCodexRateLimit } from './codex/rate-limit.js';
+export type { CodexRateLimit, CodexRateLimitRead, CodexRateLimitWindow } from './codex/rate-limit.js';

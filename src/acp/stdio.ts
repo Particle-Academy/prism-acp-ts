@@ -41,22 +41,31 @@ export function serve(options: ServeOptions): Served {
   const agent = new AcpAgent(peer, options);
 
   const closed = new Promise<void>((resolve) => {
+    let finished = false;
     options.input.on('data', (chunk: Buffer | string) => {
       for (const frame of framer.push(chunk)) deliver(frame);
     });
 
-    options.input.on('end', () => {
+    const closeClient = (flush: boolean, reason: string) => {
+      if (finished) return;
+      finished = true;
       // Flush before closing: a client can send its last message without a
       // trailing newline, and on this transport the last message is the one
       // that matters.
-      for (const frame of framer.end()) deliver(frame);
+      if (flush) for (const frame of framer.end()) deliver(frame);
       // Every session's child process outlives this stream unless it is told
       // otherwise. A server that exited without killing them would leave an
       // agent running with nobody listening.
       agent.closeAll();
-      peer.fail(new Error('client disconnected'));
+      peer.fail(new Error(reason));
       resolve();
-    });
+    };
+
+    options.input.on('end', () => closeClient(true, 'client disconnected'));
+    // Destroyed pipes may emit `close` without `end`. That is a disconnect too:
+    // pending provider approvals must be cancelled before their socket closes.
+    options.input.on('close', () => closeClient(false, 'client disconnected'));
+    options.input.on('error', () => closeClient(false, 'client input failed'));
   });
 
   function deliver(frame: ReturnType<NdjsonFramer['push']>[number]): void {

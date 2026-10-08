@@ -87,16 +87,20 @@ export const META_THINKING_TOKENS_ESTIMATE = metaKey('thinking_tokens_estimate')
 /** Structured rate-limit detail, alongside the human-readable notice. */
 export const META_RATE_LIMIT = metaKey('rate_limit');
 
+/** A command-line approval's persistent execpolicy amendment, tied to its ACP option. */
+export const META_EXEC_POLICY_AMENDMENT = metaKey('execpolicy_amendment');
+
 /** The CLI frame a mapping could not place, kept so nothing is lost unseen. */
 export const META_UNMAPPED_FRAME = metaKey('unmapped_frame');
 
 /**
- * The CLI's OWN session id -- the only string `session/load` can resume with.
+ * The provider's OWN session id -- the identity `session/load` can resume with.
  *
  * This exists because its absence was a hole in the middle of resume. ACP's
- * `sessionId` is minted by this server; the CLI has a different id of its own,
- * a UUID, and `--resume` wants that one. The two were kept correctly separate
- * inside the driver and then **never handed to the client**, so a client that
+ * `sessionId` is minted by this server; providers have their own identities
+ * (Claude's CLI accepts a UUID or title, while Codex uses its App Server thread
+ * id). The two were kept correctly separate inside the driver and then
+ * **never handed to the client**, so a client that
  * stored the id `session/new` returned and passed it back to `session/load`
  * was passing a string the CLI cannot resume.
  *

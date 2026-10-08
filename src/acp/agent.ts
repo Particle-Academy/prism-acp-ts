@@ -41,17 +41,31 @@ export interface AgentDriver {
 
 export interface DriverEvents {
   readonly onUpdate?: (update: AcpUpdate) => void;
+  /** Ask the ACP client to decide a Codex permission request. */
+  readonly onRequestPermission?: (
+    request: PermissionRequest,
+  ) => Promise<PermissionOutcome>;
   readonly onTurnEnd?: (outcome: TurnOutcome) => void;
   readonly onProtocolError?: (problem: string) => void;
   readonly onStderr?: (line: string) => void;
   readonly onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
 
+export interface PermissionRequest {
+  readonly toolCall: Record<string, unknown>;
+  readonly options: readonly Record<string, unknown>[];
+  readonly _meta?: Readonly<Record<string, unknown>>;
+}
+
+export type PermissionOutcome =
+  | { readonly outcome: 'selected'; readonly optionId: string }
+  | { readonly outcome: 'cancelled' };
+
 /**
  * Builds a driver for one session.
  *
- * Injected rather than hardcoded because this surface is meant to front more
- * than one CLI -- Codex's `app-server` is the next one -- and because a server
+ * Injected rather than hardcoded because this surface fronts more than one
+ * CLI, including Codex's `app-server`, and because a server
  * that could only be tested by spawning a real agent would have its session
  * bookkeeping covered by nothing.
  */
@@ -66,8 +80,8 @@ export type DriverFactory = (
  * Injected, and for two reasons. Tests must not read the developer's real
  * session store; and the answer is a property of the AGENT being driven, not of
  * ACP -- a Codex driver resolves it through `thread/resume`, not through
- * claude's `~/.claude/projects` layout. Omit it and `session/load` behaves as it
- * did before: it accepts the id and the agent reports the problem later.
+ * claude's `~/.claude/projects` layout. The store helper is Claude-specific;
+ * Codex users should omit it and let the driver check the App Server identity.
  */
 export type SessionProbe = (
   sessionId: string,
@@ -232,11 +246,11 @@ export class AcpAgent {
       }
     }
 
-    // REFUSE an id this server minted, because `--resume` provably cannot take
-    // it: `session/new` returns an id of OUR making, the CLI has its own UUID,
-    // and only the CLI's works. A client that stored the id it was handed and
-    // passed it back here was the obvious thing to do and could never have
-    // worked.
+    // REFUSE an id this server minted, because the provider's resume mechanism
+    // cannot take it: `session/new` returns an id of OUR making, while the
+    // driver resumes with the provider's own captured id. A client that stored
+    // the id it was handed and passed it back here was the obvious thing to do
+    // and could never have worked.
     //
     // Refused HERE rather than left to the CLI, even though the CLI does error
     // on it (verified: "is not a UUID and does not match any session title",
@@ -260,7 +274,7 @@ export class AcpAgent {
     if (MINTED_SESSION_ID.test(sessionId) || this.#minted.has(sessionId)) {
       throw new RpcError(
         RPC_INVALID_PARAMS,
-        `${sessionId} is an ACP session id minted by this server, which 'claude --resume' cannot accept. ` +
+        `${sessionId} is an ACP session id minted by this server and cannot be resumed by the provider. ` +
           `Resume with the CLI's own session id, sent as '${META_CLI_SESSION_ID}' in the _meta of the first ` +
           `session/update of the original session.`,
       );
@@ -286,9 +300,9 @@ export class AcpAgent {
 
     this.#open(sessionId, cwd, sessionId);
     // The spec's result is an empty object; history arrives as session/update
-    // notifications. We send none, because the CLI replays nothing on --resume
-    // -- claiming otherwise by returning early would be a silent lie about what
-    // a client is about to receive.
+    // notifications. Whether the driver replays transcript history is
+    // provider-specific: Claude replays none; Codex replays through its paged
+    // App Server endpoints.
     return {};
   }
 
@@ -306,6 +320,13 @@ export class AcpAgent {
       {
         onUpdate: (update) => {
           this.#peer.notify('session/update', { sessionId: id, update });
+        },
+        onRequestPermission: async (request) => {
+          const result = await this.#peer.request('session/request_permission', {
+            sessionId: id,
+            ...request,
+          });
+          return isPermissionOutcome(result) ? result : { outcome: 'cancelled' };
         },
         onTurnEnd: (outcome) => {
           const turn = session.turn;
@@ -449,6 +470,13 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+function isPermissionOutcome(value: unknown): value is PermissionOutcome {
+  const object = asObject(value);
+  const outcome = asObject(object?.outcome);
+  if (outcome?.outcome === 'cancelled') return true;
+  return outcome?.outcome === 'selected' && typeof outcome.optionId === 'string';
 }
 
 function messageOf(cause: unknown): string {

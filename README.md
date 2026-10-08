@@ -20,12 +20,13 @@ API key to supply and no adapter program to install.
 ## Status
 
 Early, but a client can talk to it. `initialize`, `session/new`,
-`session/load`, `session/prompt` and `session/cancel` work over a pipe, driving
-the Claude CLI, proven end to end against an authenticated binary. The mapping
-is tested against **captured traffic** rather than a hand-written fixture.
+`session/load`, `session/prompt` and `session/cancel` work over a pipe. Claude
+has been proven end to end against an authenticated binary; Codex is driven
+through its App Server and tested against a fake transport, with the wire
+shapes measured against captured traffic.
 
-Missing: `session/set_mode`, the client-side `fs/*` and `terminal/*` calls an
-agent can make back, and the Codex driver. The surface will change.
+Missing: `session/set_mode` and the client-side `fs/*` and `terminal/*` calls an
+agent can make back. The surface will change.
 
 | piece | state |
 |---|---|
@@ -38,7 +39,7 @@ agent can make back, and the Codex driver. The surface will change.
 | ACP server surface + stdio | built |
 | `session/load` resume | built, and **proven** to remember the first turn |
 | `session/set_mode`, `fs/*`, `terminal/*` | not yet |
-| Codex driver (`app-server`) | not yet |
+| Codex App Server driver | built; paged history and permission requests |
 
 **It maps 7 of ACP's 19 `session/update` kinds**, and that number is asserted by
 a test rather than described here, so raising it means moving it. The twelve it
@@ -115,9 +116,10 @@ implementations of one protocol disagree without anyone noticing. So:
 which id to pass.
 
 **ACP's `sessionId` is not resumable.** `session/new` returns an id this server
-minted; the CLI has its own session id, a UUID, and `claude --resume` accepts
-only that one (or a session title). The two are deliberately separate, and the
-CLI's is published on the **first** `session/update` of every session:
+minted; providers resume with their own session identity. Claude accepts its
+CLI session id (a UUID or session title) through `claude --resume`; Codex uses
+its App Server thread id. The provider's id is published on the **first**
+`session/update` of every session:
 
 ```ts
 import { META_CLI_SESSION_ID } from '@particle-academy/prism-acp';
@@ -142,9 +144,16 @@ but by then `session/load` has already returned `{}` and you believe you have a
 resumed session.
 
 A session whose agent has **exited** is loadable; one whose agent is **still
-running** is refused, by either id. No history is replayed on load, because the
-CLI replays none -- `session/load` returning `{}` with no `session/update`
-notifications is the honest report of that, not an omission.
+running** is refused, by either id.
+
+History on load depends on the provider. **Claude replays none**: its CLI emits
+no transcript on resume, so returning `{}` with no `session/update` is the
+honest report. **Codex does replay history**: the driver resumes with
+`excludeTurns: true`, then fetches turns and items through the paged App Server
+methods and sends them as ACP updates. This deliberately differs between the
+drivers because their measured resume behavior differs. Codex thread ids are
+the provider's own captured ids and are the same ids accepted by its resume
+method; ACP-minted ids are refused.
 
 ### Refusing an unknown id at load, not a turn later
 
@@ -190,9 +199,19 @@ const probeSession = (sessionId: string) => probeSessionStore(sessionId, { env: 
 ```
 
 `probeSession` is yours to supply because the answer belongs to the agent being
-driven, not to ACP: `probeSessionStore` reads claude's session store, and a Codex
-driver would resolve the same question through `thread/resume`. Omit it and
-`session/load` behaves as it always did.
+driven, not to ACP: `probeSessionStore` reads Claude's session store. Codex
+checks its identity by resuming the captured id through `thread/resume`; omit
+`probeSession` when using Codex.
+
+## Codex permissions
+
+Codex App Server approvals become ACP `session/request_permission` requests.
+The driver offers the decisions Codex sent, including the persistent
+execpolicy-amendment choice; its argv is kept on that option under
+`particle.academy/execpolicy_amendment` so a client can preserve the distinction
+between one-time approval and a remembered command. Human decisions have no
+default timeout. Cancelling a session, disconnecting the ACP client, or shutting
+down the driver answers any outstanding Codex approval with `cancel`.
 
 ## Rate limits are a gauge, not just a breach event
 
@@ -251,6 +270,12 @@ you a number became a string just as well as the digits would. That is the whole
 parse and not an interface: an interface over `unknown` is a cast, so a renamed
 provider field would still read as `undefined`, and a gauge renders `undefined`
 as empty. An empty headroom gauge is read by a human as plenty of headroom.
+
+Codex has a separate `CodexRateLimit` parser because App Server windows report
+`usedPercent` from 0 to 100 and `windowDurationMins`; Claude's
+`ClaudeRateLimit` uses fractional `utilization` and named windows. Both convert
+the provider's epoch-second reset timestamp to `resetsAtMs`. Do not feed one
+provider's payload to the other's parser.
 
 ## Using it
 
