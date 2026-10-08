@@ -49,8 +49,8 @@ function finite(value: unknown, min: number): value is number {
 function readWindow(value: unknown, path: string): CodexRateLimitRead | CodexRateLimitWindow | null {
   if (value === null) return null;
   if (!isObject(value)) return refuse(path, 'an object or null', value);
-  if (!finite(value.usedPercent, 0) || value.usedPercent > 100) {
-    return refuse(`${path}.usedPercent`, 'finite number from 0 to 100', value.usedPercent);
+  if (!finite(value.usedPercent, 0)) {
+    return refuse(`${path}.usedPercent`, 'finite number >= 0', value.usedPercent);
   }
   const windowDurationMins = value.windowDurationMins;
   if (typeof windowDurationMins !== 'number' || !Number.isSafeInteger(windowDurationMins) || windowDurationMins < 1) {

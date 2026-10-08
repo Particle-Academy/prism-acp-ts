@@ -472,7 +472,7 @@ describe('CodexDriver', () => {
     state.transport.frame({
       jsonrpc: '2.0',
       method: 'account/rateLimits/updated',
-      params: { rateLimits: { primary: { usedPercent: 101, windowDurationMins: 300 } }, privateField: 'must-not-echo' },
+      params: { rateLimits: { primary: { usedPercent: -1, windowDurationMins: 300 } }, privateField: 'must-not-echo' },
     });
 
     const unmapped = state.updates.find((update) => META_UNMAPPED_FRAME in (update._meta ?? {}) &&
@@ -488,11 +488,23 @@ describe('CodexDriver', () => {
     const read = readCodexRateLimit({
       ordinaryUsageAllowed: true,
       rateLimits: {
-        primary: { usedPercent: 101, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+        primary: { usedPercent: -1, windowDurationMins: 300, resetsAt: 1_800_000_000 },
         secondary: null,
       },
     });
     expect(read).toMatchObject({ ok: false, reason: expect.stringContaining('rateLimits.primary.usedPercent') });
+  });
+
+  it('preserves Codex usage above 100 percent', () => {
+    // Overage is real state; rejecting or capping it would hide the reading a human needs.
+    const read = readCodexRateLimit({
+      rateLimits: {
+        primary: { usedPercent: 120, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+        secondary: null,
+      },
+    });
+
+    expect(read).toMatchObject({ ok: true, limit: { primary: { usedPercent: 120 } } });
   });
 
   it('sends cancel synchronously when the ACP client disconnects with approval pending', async () => {

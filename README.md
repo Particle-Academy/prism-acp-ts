@@ -272,10 +272,14 @@ provider field would still read as `undefined`, and a gauge renders `undefined`
 as empty. An empty headroom gauge is read by a human as plenty of headroom.
 
 Codex has a separate `CodexRateLimit` parser because App Server windows report
-`usedPercent` from 0 to 100 and `windowDurationMins`; Claude's
+`usedPercent` and `windowDurationMins`; Claude's
 `ClaudeRateLimit` uses fractional `utilization` and named windows. Both convert
 the provider's epoch-second reset timestamp to `resetsAtMs`. Do not feed one
 provider's payload to the other's parser.
+
+Both parsers accept usage beyond the allowance (`usedPercent` above 100 or
+`utilization` above 1) without capping it. Overage is real state, and capping
+would invent a reading; clamp only the rendered bar, not the reported value.
 
 ## Using it
 
