@@ -1,4 +1,5 @@
 import { childEnv } from '../env.js';
+import { isValidCliSessionId } from '../session-id.js';
 import { stripAnsiControlSequences } from '../text.js';
 import { JsonRpcPeer } from '../jsonrpc.js';
 import {
@@ -153,6 +154,13 @@ export class CodexDriver implements AgentDriver {
   start(): void {
     if (this.#started) throw new Error('driver already started');
     this.#started = true;
+
+    if (this.#options.resumeSessionId !== undefined && !isValidCliSessionId(this.#options.resumeSessionId)) {
+      this.#events.onProtocolError?.('invalid resumeSessionId: rejected CLI session id shape');
+      this.#closed = true;
+      this.#events.onExit?.(1, null);
+      return;
+    }
 
     if (this.#options.resumeSessionId !== undefined && isMintedAcpId(this.#options.resumeSessionId)) {
       this.#events.onProtocolError?.(
@@ -426,8 +434,8 @@ export class CodexDriver implements AgentDriver {
     }
     switch (method) {
       case 'thread/started': {
-        const id = asString(asObject(object.thread)?.id);
-        if (id !== undefined) this.#setThreadId(id);
+        const thread = asObject(object.thread);
+        if (thread !== undefined && 'id' in thread) this.#setThreadId(thread.id);
         else this.#recordUnmapped('thread/started omitted thread.id', object);
         return;
       }
@@ -907,9 +915,9 @@ export class CodexDriver implements AgentDriver {
     this.#emit({ sessionUpdate, entries });
   }
 
-  #setThreadId(id: string): void {
-    if (id.length === 0) {
-      this.#recordUnmapped('Codex thread id was empty', { thread: { id } });
+  #setThreadId(id: unknown): void {
+    if (!isValidCliSessionId(id)) {
+      this.#events.onProtocolError?.('invalid thread.id: rejected Codex CLI session id shape');
       return;
     }
     if (this.#threadId !== null && this.#threadId !== id) {

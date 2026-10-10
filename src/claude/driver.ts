@@ -13,13 +13,14 @@
  */
 import { type ChildProcess, spawn } from 'node:child_process';
 import { childEnv } from '../env.js';
+import { isValidCliSessionId } from '../session-id.js';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
 import type { DriverCapabilities } from '../acp/agent.js';
 
 /**
  * Claude driver's behavior claim, published by initialize for clients.
- * permissionRequests is expected to become true in 0.7.0; clients should read
+ * permissionRequests is currently false; clients should read
  * this declaration rather than branch on a provider name.
  */
 export const CLAUDE_DRIVER_CAPABILITIES = {
@@ -263,6 +264,12 @@ export class ClaudeDriver {
   start(): void {
     if (this.#child !== null) throw new Error('driver already started');
 
+    if (this.#options.resumeSessionId !== undefined && !isValidCliSessionId(this.#options.resumeSessionId)) {
+      this.#events.onProtocolError?.('invalid resumeSessionId: rejected CLI session id shape');
+      this.#events.onExit?.(1, null);
+      return;
+    }
+
     const { env, withheld } = childEnv(this.#options.parentEnv ?? process.env, {
       allow: [
         // The CLI finds the user's own login through these, so they are allowed
@@ -334,20 +341,31 @@ export class ClaudeDriver {
   }
 
   #emit(frames: ReturnType<NdjsonFramer['push']>): void {
+    const acceptedFrames: typeof frames = [];
     // Raw frames are inspected for turn boundaries and the CLI's session id
     // BEFORE mapping, because neither survives translation: the `result` frame
     // becomes a usage_update and the `init` frame maps to nothing at all.
     for (const frame of frames) {
-      if (!frame.ok) continue;
+      if (!frame.ok) {
+        acceptedFrames.push(frame);
+        continue;
+      }
 
       const cliSessionId = cliSessionIdOf(frame.value);
+      if (isObject(frame.value) && frame.value.type === 'system' && frame.value.subtype === 'init' &&
+          'session_id' in frame.value && !isValidCliSessionId(cliSessionId)) {
+        this.#events.onProtocolError?.('invalid session_id: rejected Claude CLI session id shape');
+        // The mapper independently publishes init ids in _meta; do not pass it a rejected frame.
+        continue;
+      }
       if (cliSessionId !== null) this.cliSessionId = cliSessionId;
+      acceptedFrames.push(frame);
 
       const outcome = turnOutcomeOf(frame.value);
       if (outcome !== null) this.#pendingOutcome = outcome;
     }
 
-    const { updates, problems } = updatesFromFrames(frames, this.#mapper);
+    const { updates, problems } = updatesFromFrames(acceptedFrames, this.#mapper);
     for (const problem of problems) this.#events.onProtocolError?.(problem);
     for (const update of updates) this.#events.onUpdate?.(update);
 
