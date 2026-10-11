@@ -8,7 +8,10 @@ import { META_CLI_SESSION_ID } from '../src/meta.js';
 import { encodeLine } from '../src/ndjson.js';
 import type { AcpUpdate } from '../src/claude/to-acp.js';
 
-vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
+vi.mock('node:child_process', async () => ({
+  ...await vi.importActual<typeof import('node:child_process')>('node:child_process'),
+  spawn: vi.fn(),
+}));
 
 const UUID = '01a12564-30a8-7961-8aa9-6d145dd2e179';
 const INVALID_IDS = [
@@ -52,7 +55,7 @@ class ProviderChild extends EventEmitter {
   }
 }
 
-beforeEach(() => vi.mocked(spawn).mockReset());
+beforeEach(() => { vi.mocked(spawn).mockReset(); });
 
 for (const provider of ['claude', 'codex'] as const) {
   describe(`${provider} session id trust boundary`, () => {
@@ -182,6 +185,21 @@ for (const provider of ['claude', 'codex'] as const) {
     });
 
     if (provider === 'codex') {
+      it('reports an empty thread.id on thread/started through onProtocolError, preserving the captured id', async () => {
+        const state = setup();
+        await state.start();
+        try {
+          expect(state.driver.cliSessionId).toBe(UUID);
+          const updatesBefore = [...state.updates];
+          state.init('');
+          expect(state.problems).toEqual(['invalid thread.id: rejected Codex CLI session id shape']);
+          expect(state.driver.cliSessionId).toBe(UUID);
+          // recordUnmapped emits an ACP notice instead. Reverting to that path
+          // must fail both the callback assertion and the unchanged output.
+          expect(state.updates).toEqual(updatesBefore);
+        } finally { state.driver.kill(); }
+      });
+
       it('preserves the startup failure and shutdown for an empty thread/start id', async () => {
         const state = setup(undefined, '');
         await state.start();
