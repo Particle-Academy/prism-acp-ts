@@ -11,8 +11,12 @@
  * that reason. A driver whose flags could only be checked by spawning something
  * would have its most mistake-prone surface covered by its least reliable test.
  */
-import { type ChildProcess, spawn } from 'node:child_process';
+import { type ChildProcess, spawn, execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { childEnv } from '../env.js';
+import { claudeMcpConfig, readMcpServers, type McpServer } from '../mcp.js';
 import { isValidCliSessionId } from '../session-id.js';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
@@ -26,6 +30,7 @@ import type { DriverCapabilities } from '../acp/agent.js';
 export const CLAUDE_DRIVER_CAPABILITIES = {
   permissionRequests: false,
   transcriptReplay: false,
+  mcpCapabilities: { http: true, sse: true },
 } as const satisfies DriverCapabilities;
 
 /** ACP permission modes map onto the CLI's own `--permission-mode` values. */
@@ -48,6 +53,8 @@ export interface ClaudeDriverOptions {
   readonly allowEnv?: readonly string[];
   /** Resume an existing CLI session instead of starting a new one. */
   readonly resumeSessionId?: string;
+  /** Explicit per-session MCP servers; independent of the agent's environment. */
+  readonly mcpServers?: readonly McpServer[];
   readonly permissionMode?: ClaudePermissionMode;
   /** Tool names the agent may use. Omitted means the CLI's own default. */
   readonly allowedTools?: readonly string[];
@@ -99,7 +106,9 @@ export interface ClaudeDriverEvents {
  *   `agent_message_chunk` and `agent_thought_chunk`. Without it the reply
  *   arrives in one lump and the whole point of a streaming transport is lost.
  */
-export function claudeArgs(options: ClaudeDriverOptions): string[] {
+// ClaudeDriver supplies a private, temporary config file. Custom spawners using
+// this helper must supply their own file path for non-empty mcpServers.
+export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string): string[] {
   const args = [
     '--print',
     '--output-format',
@@ -117,6 +126,17 @@ export function claudeArgs(options: ClaudeDriverOptions): string[] {
   }
   if (options.disallowedTools !== undefined && options.disallowedTools.length > 0) {
     args.push('--disallowed-tools', options.disallowedTools.join(','));
+  }
+  if ((options.mcpServers?.length ?? 0) > 0 && mcpConfigPath === undefined) {
+    throw new Error('claudeArgs requires an MCP config file path when mcpServers is non-empty');
+  }
+  if (mcpConfigPath !== undefined) {
+    // shell:true is needed for Windows npm shims. Only a generated file path
+    // crosses that shell; JSON values and credentials never become argv.
+    if (process.platform === 'win32' && /["%!\r\n\0]/.test(mcpConfigPath)) {
+      throw new Error('MCP config file path cannot be represented safely by the Windows shell');
+    }
+    args.push('--mcp-config', process.platform === 'win32' ? `"${mcpConfigPath}"` : mcpConfigPath);
   }
 
   return args;
@@ -198,6 +218,30 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Protect the directory before a credential is written, including Windows ACLs. */
+function privateMcpDirectory(): string {
+  const directory = mkdtempSync(join(tmpdir(), 'prism-acp-mcp-'));
+  try {
+    if (process.platform === 'win32') {
+      const system32 = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
+      const env = childEnv(process.env).env;
+      const identity = execFileSync(join(system32, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'],
+        { encoding: 'utf8', windowsHide: true, env });
+      const sid = identity.match(/\bS-\d+(?:-\d+)+\b/)?.[0];
+      if (sid === undefined) throw new Error('cannot identify the Windows process identity');
+      // File modes are ignored on Windows. Remove inherited grants and let
+      // only this process identity read/write new files in the directory.
+      execFileSync(join(system32, 'icacls.exe'),
+        [directory, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`],
+        { stdio: 'pipe', windowsHide: true, env });
+    }
+    return directory;
+  } catch {
+    rmdirSync(directory);
+    throw new Error('failed to protect the temporary MCP directory');
+  }
+}
+
 /**
  * Turn framed output into ACP updates, separating what mapped from what failed
  * to frame.
@@ -234,6 +278,9 @@ export class ClaudeDriver {
   #child: ChildProcess | null = null;
   #stderr = '';
   #pendingOutcome: TurnOutcome | null = null;
+  readonly #mcpServers: readonly McpServer[];
+  #mcpConfigDirectory: string | null = null;
+  #mcpConfigPath: string | null = null;
 
   /** Names of credentials withheld from the child, available after start(). */
   withheldCredentials: readonly string[] = [];
@@ -248,7 +295,8 @@ export class ClaudeDriver {
   cliSessionId: string | null = null;
 
   constructor(options: ClaudeDriverOptions, events: ClaudeDriverEvents = {}) {
-    this.#options = options;
+    this.#mcpServers = readMcpServers(options.mcpServers);
+    this.#options = { ...options, mcpServers: this.#mcpServers };
     this.#events = events;
   }
 
@@ -281,16 +329,26 @@ export class ClaudeDriver {
     });
     this.withheldCredentials = withheld;
 
-    const child = spawn(this.#options.binary ?? 'claude', claudeArgs(this.#options), {
-      cwd: this.#options.cwd,
-      env,
-      // On Windows the binary is a `.cmd` shim, which cannot be executed
-      // directly. The shim re-entering whatever `node` is on PATH is a real
-      // hazard for a JS entry point; for the CLI itself the shim IS the
-      // documented entry, so the shell is the right way to reach it.
-      shell: process.platform === 'win32',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    let child: ChildProcess;
+    try {
+      if (this.#mcpServers.length > 0) {
+        this.#mcpConfigDirectory = privateMcpDirectory();
+        this.#mcpConfigPath = join(this.#mcpConfigDirectory, 'mcp.json');
+        writeFileSync(this.#mcpConfigPath, JSON.stringify(claudeMcpConfig(this.#mcpServers)),
+          { mode: 0o600, flag: 'wx' });
+      }
+      child = spawn(this.#options.binary ?? 'claude', claudeArgs(this.#options, this.#mcpConfigPath ?? undefined), {
+        cwd: this.#options.cwd,
+        env,
+        // Windows npm installs expose a `.cmd` shim, which needs a shell.
+        shell: process.platform === 'win32',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch {
+      this.#removeMcpConfig();
+      // A filesystem/spawn error can contain a sensitive path. Keep the report structural.
+      throw new Error('failed to prepare Claude MCP configuration or spawn CLI');
+    }
     this.#child = child;
 
     child.stdout?.on('data', (chunk: Buffer) => this.#onStdout(chunk));
@@ -298,6 +356,7 @@ export class ClaudeDriver {
     child.stderr?.on('data', (chunk: string) => this.#onStderr(chunk));
 
     child.on('error', (cause: Error) => {
+      this.#removeMcpConfig();
       // A spawn failure (ENOENT for a missing binary) arrives here and nowhere
       // else. Reported as a protocol error so a caller cannot mistake "the CLI
       // is not installed" for "the agent said nothing".
@@ -305,6 +364,7 @@ export class ClaudeDriver {
     });
 
     child.on('close', (code, signal) => {
+      this.#removeMcpConfig();
       // Flush first: a frame can be complete without its trailing newline, and
       // the LAST frame of a turn is the `result` that carries the outcome.
       this.#emit(this.#framer.end());
@@ -334,6 +394,22 @@ export class ClaudeDriver {
   /** Everything the CLI has written to stderr so far. */
   get stderr(): string {
     return this.#stderr;
+  }
+
+  #removeMcpConfig(): void {
+    const file = this.#mcpConfigPath;
+    const directory = this.#mcpConfigDirectory;
+    this.#mcpConfigPath = null;
+    this.#mcpConfigDirectory = null;
+    for (const [path, remove] of [[file, unlinkSync], [directory, rmdirSync]] as const) {
+      if (path === null) continue;
+      try { remove(path); }
+      catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') {
+          this.#events.onProtocolError?.('failed to remove temporary Claude MCP configuration');
+        }
+      }
+    }
   }
 
   #onStdout(chunk: Buffer): void {

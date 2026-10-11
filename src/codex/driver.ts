@@ -1,4 +1,5 @@
 import { childEnv } from '../env.js';
+import { codexMcpConfig, readMcpServers, type McpServer } from '../mcp.js';
 import { isValidCliSessionId } from '../session-id.js';
 import { stripAnsiControlSequences } from '../text.js';
 import { JsonRpcPeer } from '../jsonrpc.js';
@@ -36,6 +37,7 @@ export interface CodexDriverOptions {
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   readonly allowEnv?: readonly string[];
   readonly resumeSessionId?: string;
+  readonly mcpServers?: readonly McpServer[];
   readonly turnInactivityTimeoutMs?: number;
 }
 
@@ -73,6 +75,7 @@ const DEFAULT_TURN_INACTIVITY_TIMEOUT_MS = 600_000;
 export const CODEX_DRIVER_CAPABILITIES = {
   permissionRequests: true,
   transcriptReplay: true,
+  mcpCapabilities: { http: true, sse: false },
 } as const satisfies DriverCapabilities;
 
 const KNOWN_NOTIFICATIONS = new Set([
@@ -126,6 +129,7 @@ export class CodexDriver implements AgentDriver {
   #turnDeadlineExpiresAt = 0;
   #turnDeadlineRemainingMs = 0;
   readonly #turnInactivityTimeoutMs: number;
+  readonly #mcpConfig: Record<string, unknown> | undefined;
   #sessionUpdateSent = false;
   #threadId: string | null = null;
 
@@ -138,6 +142,8 @@ export class CodexDriver implements AgentDriver {
     transportFactory: CodexTransportFactory = DEFAULT_TRANSPORT_FACTORY,
   ) {
     this.#options = options;
+    const servers = readMcpServers(options.mcpServers);
+    this.#mcpConfig = servers.length === 0 ? undefined : codexMcpConfig(servers);
     this.#events = events;
     this.#transportFactory = transportFactory;
     this.#turnInactivityTimeoutMs = options.turnInactivityTimeoutMs ?? DEFAULT_TURN_INACTIVITY_TIMEOUT_MS;
@@ -229,6 +235,7 @@ export class CodexDriver implements AgentDriver {
       const result = await peer.request('thread/start', {
         cwd: this.#options.cwd,
         approvalPolicy: 'on-request',
+        ...(this.#mcpConfig === undefined ? {} : { config: this.#mcpConfig }),
       });
       const thread = asObject(asObject(result)?.thread);
       const id = asString(thread?.id);
@@ -239,6 +246,7 @@ export class CodexDriver implements AgentDriver {
         threadId: this.#options.resumeSessionId,
         cwd: this.#options.cwd,
         excludeTurns: true,
+        ...(this.#mcpConfig === undefined ? {} : { config: this.#mcpConfig }),
       });
       const thread = asObject(asObject(result)?.thread);
       const id = asString(thread?.id);

@@ -318,12 +318,13 @@ would invent a reading; clamp only the rendered bar, not the reported value.
 ## Using it
 
 ```ts
-import { serve, ClaudeDriver } from '@particle-academy/prism-acp';
+import { serve, ClaudeDriver, CLAUDE_DRIVER_CAPABILITIES } from '@particle-academy/prism-acp';
 
 serve({
   input: process.stdin,
   output: process.stdout,
   driverFactory: (options, events) => new ClaudeDriver(options, events),
+  driverCapabilities: CLAUDE_DRIVER_CAPABILITIES,
   probeSession,
 });
 ```
@@ -331,6 +332,43 @@ serve({
 A client then speaks ACP on those pipes. Several sessions run at once, each with
 its own agent process, its own in-flight turn and its own updates — tagged with
 the session they belong to, because a room of agents shares one stream.
+
+`session/new` and `session/load` forward the client's `mcpServers` to the
+provider. Pass the factory's options through to the driver as above. Claude
+supports stdio, HTTP and SSE; Codex supports stdio and HTTP and refuses SSE.
+Use `CODEX_DRIVER_CAPABILITIES` with `CodexDriver` to advertise its support.
+The declaration publishes `mcpCapabilities` in ACP's `agentCapabilities`.
+
+For example, a session request can include:
+
+```json
+{
+  "cwd": "/work/project",
+  "mcpServers": [{
+    "type": "http",
+    "name": "workspace",
+    "url": "http://127.0.0.1:43210/mcp",
+    "headers": [{ "name": "Authorization", "value": "Bearer <server-token>" }]
+  }]
+}
+```
+
+Stdio entries use `name`, an absolute `command`, `args`, and an `env` array of
+`{ "name": "VARIABLE", "value": "value" }` pairs. HTTP and SSE entries use
+`type`, `name`, `url`, and a `headers` array of the same pair shape. Malformed
+entries and duplicate names refuse the whole request before spawning a child.
+An omitted or empty list retains the provider's configured MCP defaults.
+
+MCP configuration is trusted input from the ACP client: it can launch programs
+and supply server credentials. Those explicit credentials go only to the named
+MCP server's configuration; the agent's ambient environment still passes through
+`childEnv`. Claude receives a private temporary config file (owner-only POSIX
+permissions, or an ACL granting only the running identity access on Windows),
+removed when its child exits or fails to spawn. If Windows ACL protection fails,
+no credentials are written and no child is spawned. Codex receives per-thread
+JSON config overrides. The
+package does not edit the provider's persistent MCP settings. Provider policies
+and connection failures still determine whether a forwarded server can connect.
 
 ### Commit streamed messages at the turn boundary
 

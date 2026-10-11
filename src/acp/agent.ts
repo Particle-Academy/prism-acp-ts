@@ -25,6 +25,7 @@ import { JsonRpcPeer, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR, RpcError } from '.
 import type { AcpUpdate } from '../claude/to-acp.js';
 import type { StopReason, TurnOutcome } from '../claude/driver.js';
 import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, withMeta } from '../meta.js';
+import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
 
 /** The protocol version this agent speaks. */
 export const PROTOCOL_VERSION = 1;
@@ -70,7 +71,7 @@ export type PermissionOutcome =
  * bookkeeping covered by nothing.
  */
 export type DriverFactory = (
-  options: { readonly cwd: string; readonly resumeSessionId?: string },
+  options: { readonly cwd: string; readonly resumeSessionId?: string; readonly mcpServers?: readonly McpServer[] },
   events: DriverEvents,
 ) => AgentDriver;
 
@@ -98,10 +99,11 @@ export interface AcpAgentOptions {
   readonly onProtocolError?: (sessionId: string, problem: string) => void;
 }
 
-/** The two provider differences clients currently need to know. */
+/** Provider differences clients need to know. */
 export interface DriverCapabilities {
   readonly permissionRequests: boolean;
   readonly transcriptReplay: boolean;
+  readonly mcpCapabilities?: McpCapabilities;
 }
 
 interface Session {
@@ -175,6 +177,9 @@ export class AcpAgent {
       // travels in this protocol. Empty is the honest answer, not a placeholder.
       authMethods: [],
       agentCapabilities: {
+        ...(this.#options.driverCapabilities?.mcpCapabilities === undefined ? {} : {
+          mcpCapabilities: this.#options.driverCapabilities.mcpCapabilities,
+        }),
         // True, and PROVEN rather than wired. A live test stores a number in
         // one turn, resumes, and asks for it back -- an assertion a fresh
         // conversation cannot satisfy. That test exists because a wrong resume
@@ -211,15 +216,17 @@ export class AcpAgent {
 
   #sessionNew(params: unknown): Record<string, unknown> {
     const cwd = requireAbsoluteCwd(params);
+    const mcpServers = this.#mcpServers(params);
     const id = this.#options.newSessionId?.() ?? `sess_${++this.#counter}_${Date.now()}`;
+    this.#open(id, cwd, undefined, mcpServers);
     this.#minted.add(id);
-    this.#open(id, cwd, undefined);
     return { sessionId: id };
   }
 
   #sessionLoad(params: unknown): Record<string, unknown> {
     const object = asObject(params);
     const cwd = requireAbsoluteCwd(params);
+    const mcpServers = this.#mcpServers(params);
     const sessionId = asString(object?.sessionId);
     if (sessionId === undefined) {
       throw new RpcError(RPC_INVALID_PARAMS, 'session/load requires a sessionId');
@@ -313,7 +320,7 @@ export class AcpAgent {
       throw new RpcError(RPC_INVALID_PARAMS, `cannot resume ${sessionId}: ${probe.detail}`);
     }
 
-    this.#open(sessionId, cwd, sessionId);
+    this.#open(sessionId, cwd, sessionId, mcpServers);
     // The spec's result is an empty object; history arrives as session/update
     // notifications. Whether the driver replays transcript history is
     // provider-specific: Claude replays none; Codex replays through its paged
@@ -321,7 +328,14 @@ export class AcpAgent {
     return {};
   }
 
-  #open(id: string, cwd: string, resumeSessionId: string | undefined): Session {
+  #mcpServers(params: unknown): readonly McpServer[] {
+    const servers = readMcpServers(asObject(params)?.mcpServers);
+    const capabilities = this.#options.driverCapabilities?.mcpCapabilities;
+    if (capabilities !== undefined) assertMcpSupport(servers, capabilities);
+    return servers;
+  }
+
+  #open(id: string, cwd: string, resumeSessionId: string | undefined, mcpServers: readonly McpServer[]): Session {
     const session: Session = {
       id,
       cwd,
@@ -331,7 +345,7 @@ export class AcpAgent {
     };
 
     const driver = this.#options.driverFactory(
-      { cwd, ...(resumeSessionId === undefined ? {} : { resumeSessionId }) },
+      { cwd, mcpServers, ...(resumeSessionId === undefined ? {} : { resumeSessionId }) },
       {
         onUpdate: (update) => {
           this.#peer.notify('session/update', { sessionId: id, update });
