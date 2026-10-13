@@ -10,6 +10,7 @@ import {
   META_EXEC_POLICY_AMENDMENT,
   META_RATE_LIMIT,
   META_UNMAPPED_FRAME,
+  META_USAGE,
   withMeta,
 } from '../meta.js';
 import type {
@@ -917,6 +918,15 @@ export class CodexDriver implements AgentDriver {
       used: total.inputTokens + total.outputTokens,
       size: contextWindow,
       _meta: {
+        // The namespaced split (issue #3), with its scope: Codex's figures are the thread's running totals.
+        [META_USAGE]: {
+          scope: 'thread',
+          inputTokens: total.inputTokens,
+          outputTokens: total.outputTokens,
+          cachedInputTokens: total.cachedInputTokens ?? null,
+          reasoningOutputTokens: total.reasoningOutputTokens ?? null,
+        },
+        // The earlier bare keys, kept so a client reading them does not break.
         inputTokens: total.inputTokens,
         outputTokens: total.outputTokens,
         cachedInputTokens: total.cachedInputTokens ?? null,
