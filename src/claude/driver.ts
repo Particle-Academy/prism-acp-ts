@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childEnv } from '../env.js';
 import { claudeMcpConfig, readMcpServers, type McpServer } from '../mcp.js';
+import { assertModel } from '../meta.js';
 import { isValidCliSessionId } from '../session-id.js';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
@@ -56,6 +57,11 @@ export interface ClaudeDriverOptions {
   /** Explicit per-session MCP servers; independent of the agent's environment. */
   readonly mcpServers?: readonly McpServer[];
   readonly permissionMode?: ClaudePermissionMode;
+  /**
+   * The model to run (`--model`): an alias (`sonnet`, `haiku`) or a full id. Omitted means the CLI's own default. The
+   * model actually in use is reported on the init notice as `_meta[particle.academy/model]`.
+   */
+  readonly model?: string;
   /** Tool names the agent may use. Omitted means the CLI's own default. */
   readonly allowedTools?: readonly string[];
   readonly disallowedTools?: readonly string[];
@@ -121,6 +127,7 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string)
 
   if (options.resumeSessionId !== undefined) args.push('--resume', options.resumeSessionId);
   if (options.permissionMode !== undefined) args.push('--permission-mode', options.permissionMode);
+  if (options.model !== undefined) args.push('--model', assertModel(options.model));
   if (options.allowedTools !== undefined && options.allowedTools.length > 0) {
     args.push('--allowed-tools', options.allowedTools.join(','));
   }

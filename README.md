@@ -124,6 +124,23 @@ implementations of one protocol disagree without anyone noticing. So:
   line here can carry a prompt, a file or a credential, and a framing error is
   not a reason to copy it into a log.
 
+## Choosing the model, and learning which one you got
+
+Both drivers take a `model` option: Claude Code's `--model` (an alias such as `sonnet` or a full id), and the
+Codex App Server's `model` on `thread/start` / `thread/resume`. Omitted, each uses its own default. A model that is empty
+or starts with `-` is refused before it reaches the provider.
+
+The model **in use** is reported as the provider names it, on a notice:
+
+```ts
+import { META_MODEL } from '@particle-academy/prism-acp';
+
+const model = update._meta?.[META_MODEL]; // e.g. 'claude-haiku-5-5', 'gpt-6.1-sol'
+```
+
+Claude reports it on its first frame; Codex on the thread's start or resume, and again on `model/rerouted` when it
+switches. A provider that does not name its model carries no key -- never a guessed default.
+
 ## Resuming a session: use the CLI's id, not ACP's
 
 `session/load` works, and `initialize` reports `loadSession: true`. The trap is
