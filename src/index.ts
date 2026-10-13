@@ -39,6 +39,18 @@ export {
   withMeta,
 } from './meta.js';
 
+export { PROMPT_IMAGE_TYPES, PromptRefused, fileAsText, promptBlockKind, promptBlocks } from './prompt.js';
+export type {
+  BlobResource,
+  ImageBlock,
+  PromptBlock,
+  PromptBlockKind,
+  PromptContent,
+  ResourceBlock,
+  TextBlock,
+  TextResource,
+} from './prompt.js';
+
 export { stripAnsiControlSequences } from './text.js';
 export type { SanitizedProviderText } from './text.js';
 

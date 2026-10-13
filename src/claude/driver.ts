@@ -25,6 +25,7 @@ import { ApprovalServer, HOOK_SCRIPT, approvalSettings, permissionRequestFor } f
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
 import type { DriverCapabilities } from '../acp/agent.js';
+import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
 
 /**
  * Claude driver's behavior claim, published by initialize for clients.
@@ -35,6 +36,9 @@ export const CLAUDE_DRIVER_CAPABILITIES = {
   permissionRequests: false,
   transcriptReplay: false,
   mcpCapabilities: { http: true, sse: true },
+  // Text, images and text files: see {@link promptLine} for the documented shape of each. A binary file has no
+  // documented stream-json block, so it is refused rather than sent in an undocumented one.
+  promptBlocks: ['text', 'image', 'resource-text'],
 } as const satisfies DriverCapabilities;
 
 /** ACP permission modes map onto the CLI's own `--permission-mode` values. */
@@ -174,13 +178,27 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
 /**
  * Encode one user turn for `--input-format stream-json`.
  *
- * The CLI expects the same message envelope it emits, not a bare string.
+ * The CLI expects the same message envelope it emits, not a bare string. Its content is the documented user-message
+ * content of the Agent SDK's streaming input (https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode,
+ * "Streaming Input Mode"): `text` blocks, and an image as `{ type: 'image', source: { type: 'base64', media_type,
+ * data } }`. A text file becomes a text block that names it ({@link fileAsText}). Anything else is refused by
+ * {@link promptBlocks} before a byte is written, naming the block.
  */
-export function promptLine(text: string): string {
+export function promptLine(content: PromptContent): string {
+  const blocks = promptBlocks(content, CLAUDE_DRIVER_CAPABILITIES.promptBlocks);
   return encodeLine({
     type: 'user',
-    message: { role: 'user', content: [{ type: 'text', text }] },
+    message: { role: 'user', content: blocks.map(claudeContent) },
   });
+}
+
+function claudeContent(block: PromptBlock): Record<string, unknown> {
+  if (block.type === 'text') return { type: 'text', text: block.text };
+  if (block.type === 'image') {
+    return { type: 'image', source: { type: 'base64', media_type: block.mimeType, data: block.data } };
+  }
+  // promptBlocks admitted only a text resource here.
+  return { type: 'text', text: fileAsText(block.resource as { uri: string; mimeType?: string; text: string }) };
 }
 
 /** ACP's five stop reasons. No sixth, and no "unknown". */
@@ -426,13 +444,15 @@ export class ClaudeDriver {
     });
   }
 
-  /** Send a user turn. */
-  prompt(text: string): void {
+  /** Send a user turn: text, or content blocks. A block it cannot send refuses the whole turn, naming it. */
+  prompt(content: PromptContent): void {
+    // Encoded first, so a refused prompt throws PromptRefused whether or not the CLI is running.
+    const line = promptLine(content);
     const stdin = this.#child?.stdin;
     if (stdin === null || stdin === undefined) {
       throw new Error('driver is not started, or its stdin has closed');
     }
-    stdin.write(promptLine(text));
+    stdin.write(line);
   }
 
   /** Close stdin, which tells the CLI no more turns are coming. */
