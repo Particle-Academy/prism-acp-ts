@@ -5,6 +5,8 @@ import { stripAnsiControlSequences } from '../text.js';
 import { JsonRpcPeer } from '../jsonrpc.js';
 import {
   META_CLI_SESSION_ID,
+  META_MODEL,
+  assertModel,
   META_EXEC_POLICY_AMENDMENT,
   META_RATE_LIMIT,
   META_UNMAPPED_FRAME,
@@ -39,6 +41,12 @@ export interface CodexDriverOptions {
   readonly resumeSessionId?: string;
   readonly mcpServers?: readonly McpServer[];
   readonly turnInactivityTimeoutMs?: number;
+  /**
+   * The model to run (`model` on `thread/start` / `thread/resume`). Omitted means Codex's own default. The model in use --
+   * which the app-server returns on both, and announces again on `model/rerouted` -- is reported as
+   * `_meta[particle.academy/model]`.
+   */
+  readonly model?: string;
 }
 
 export type CodexTransportFactory = (
@@ -79,6 +87,7 @@ export const CODEX_DRIVER_CAPABILITIES = {
 } as const satisfies DriverCapabilities;
 
 const KNOWN_NOTIFICATIONS = new Set([
+  'model/rerouted',
   'thread/started',
   'thread/status/changed',
   'turn/started',
@@ -141,6 +150,7 @@ export class CodexDriver implements AgentDriver {
     events: DriverEvents = {},
     transportFactory: CodexTransportFactory = DEFAULT_TRANSPORT_FACTORY,
   ) {
+    if (options.model !== undefined) assertModel(options.model);
     this.#options = options;
     const servers = readMcpServers(options.mcpServers);
     this.#mcpConfig = servers.length === 0 ? undefined : codexMcpConfig(servers);
@@ -235,17 +245,20 @@ export class CodexDriver implements AgentDriver {
       const result = await peer.request('thread/start', {
         cwd: this.#options.cwd,
         approvalPolicy: 'on-request',
+        ...(this.#options.model === undefined ? {} : { model: this.#options.model }),
         ...(this.#mcpConfig === undefined ? {} : { config: this.#mcpConfig }),
       });
       const thread = asObject(asObject(result)?.thread);
       const id = asString(thread?.id);
       if (id === undefined || id.length === 0) throw new Error('thread/start response did not contain thread.id');
       this.#setThreadId(id);
+      this.#reportModel(asString(asObject(result)?.model));
     } else {
       const result = await peer.request('thread/resume', {
         threadId: this.#options.resumeSessionId,
         cwd: this.#options.cwd,
         excludeTurns: true,
+        ...(this.#options.model === undefined ? {} : { model: this.#options.model }),
         ...(this.#mcpConfig === undefined ? {} : { config: this.#mcpConfig }),
       });
       const thread = asObject(asObject(result)?.thread);
@@ -254,6 +267,7 @@ export class CodexDriver implements AgentDriver {
         throw new Error('thread/resume did not return the requested Codex thread id');
       }
       this.#setThreadId(id);
+      this.#reportModel(asString(asObject(result)?.model));
       await this.#replayHistory();
     }
 
@@ -441,6 +455,13 @@ export class CodexDriver implements AgentDriver {
       return;
     }
     switch (method) {
+      case 'model/rerouted': {
+        // Codex switched model mid-session (`fromModel` -> `toModel`): the client's model is now the new one.
+        const to = asString(object.toModel);
+        if (to === undefined || to.length === 0) this.#recordUnmapped('model/rerouted omitted toModel', object);
+        else this.#reportModel(to);
+        return;
+      }
       case 'thread/started': {
         const thread = asObject(object.thread);
         if (thread !== undefined && 'id' in thread) this.#setThreadId(thread.id);
@@ -942,6 +963,12 @@ export class CodexDriver implements AgentDriver {
         { [META_CLI_SESSION_ID]: id },
       ),
     );
+  }
+
+  /** The model in use, as Codex named it; nothing when it did not. */
+  #reportModel(model: string | undefined): void {
+    if (model === undefined || model.length === 0) return;
+    this.#emit(withMeta({ sessionUpdate: 'notice', notice: { level: 'debug', message: 'model' } }, { [META_MODEL]: model }));
   }
 
   #recordUnmapped(reason: string, frame: unknown): void {

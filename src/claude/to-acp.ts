@@ -23,6 +23,7 @@
  */
 import {
   META_CLI_SESSION_ID,
+  META_MODEL,
   META_PERMISSION_DENIED,
   META_RATE_LIMIT,
   META_THINKING_SIGNATURE,
@@ -356,10 +357,12 @@ export class ClaudeToAcp {
         const cliSessionId = asString(input.session_id);
         if (cliSessionId === undefined) return this.#unknown(input);
 
+        // The model in use, when the CLI names it (measured: `--model haiku` -> `model: 'claude-haiku-5-5'`).
+        const model = asString(input.model);
         return [
           withMeta(
             { sessionUpdate: 'notice', notice: { level: 'debug', message: 'session started' } },
-            { [META_CLI_SESSION_ID]: cliSessionId },
+            { [META_CLI_SESSION_ID]: cliSessionId, ...(model === undefined || model.length === 0 ? {} : { [META_MODEL]: model }) },
           ),
         ];
       }

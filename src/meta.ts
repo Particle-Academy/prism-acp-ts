@@ -121,6 +121,26 @@ export const META_UNMAPPED_FRAME = metaKey('unmapped_frame');
 export const META_CLI_SESSION_ID = metaKey('cli_session_id');
 
 /**
+ * The model the session runs on, AS THE PROVIDER REPORTED IT (issue #5).
+ *
+ * Claude Code reports it on its first `system`/`init` frame (`model`), Codex on the `thread/start` / `thread/resume`
+ * response and again on `model/rerouted` when it switches. It rides on a notice, as the CLI session id does. A provider
+ * that did not say carries no key -- never a guessed default.
+ */
+export const META_MODEL = metaKey('model');
+
+/**
+ * A model a client asked for, refused before it reaches a provider's command line or request: empty, or shaped like a
+ * flag (`--dangerously-skip-permissions` passed as a "model" would be read by the CLI as the flag).
+ */
+export function assertModel(model: string): string {
+  if (model.trim().length === 0 || model.startsWith('-')) {
+    throw new Error(`refusing model ${JSON.stringify(model)}: a model is a non-empty name that does not start with "-"`);
+  }
+  return model;
+}
+
+/**
  * Attach `_meta` entries to an ACP object without disturbing its own fields.
  *
  * Returns a new object; the input is not mutated. Existing `_meta` is merged
