@@ -26,6 +26,7 @@ import type { AcpUpdate } from '../claude/to-acp.js';
 import type { StopReason, TurnOutcome } from '../claude/driver.js';
 import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, withMeta } from '../meta.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
+import { PromptRefused, promptBlockKind, promptBlocks, type PromptBlockKind, type PromptContent } from '../prompt.js';
 
 /** The protocol version this agent speaks. */
 export const PROTOCOL_VERSION = 1;
@@ -33,7 +34,12 @@ export const PROTOCOL_VERSION = 1;
 /** What a driver must offer the agent surface, whichever CLI it drives. */
 export interface AgentDriver {
   start(): void;
-  prompt(text: string): void;
+  /**
+   * One user turn. A prompt of text blocks only arrives as their text, joined -- the shape every driver has always
+   * taken. Content blocks arrive only when the driver declares their kinds in `promptBlocks`; a driver may still throw
+   * {@link PromptRefused} for a block it cannot send, and the client is told which.
+   */
+  prompt(content: PromptContent): void;
   endInput(): void;
   kill(signal?: NodeJS.Signals): void;
   readonly cliSessionId: string | null;
@@ -104,6 +110,8 @@ export interface DriverCapabilities {
   readonly permissionRequests: boolean;
   readonly transcriptReplay: boolean;
   readonly mcpCapabilities?: McpCapabilities;
+  /** The prompt block kinds the driver sends. Absent means text only. */
+  readonly promptBlocks?: readonly PromptBlockKind[];
 }
 
 interface Session {
@@ -189,11 +197,11 @@ export class AcpAgent {
         // reported absent, because a client plans around the answer.
         loadSession: true,
         promptCapabilities: {
-          // Text only, for now. Reported as false rather than omitted, because
-          // for these two the client needs to know we will not accept them.
-          image: false,
+          // From the driver's own declaration. Reported false rather than
+          // omitted, because the client needs to know we will refuse it.
+          image: this.#accepts().includes('image'),
           audio: false,
-          embeddedContext: false,
+          embeddedContext: this.#accepts().some((kind) => kind === 'resource-text' || kind === 'resource-blob'),
         },
       },
     };
@@ -407,20 +415,21 @@ export class AcpAgent {
       throw new RpcError(RPC_INVALID_PARAMS, `session ${sessionId} already has a turn in flight`);
     }
 
-    const text = promptText(object?.prompt);
-    if (text === undefined) {
-      throw new RpcError(RPC_INVALID_PARAMS, 'session/prompt requires a prompt of content blocks');
-    }
+    const content = this.#promptContent(object?.prompt);
 
+    let refused: PromptRefused | null = null;
     const outcome = await new Promise<TurnOutcome>((resolve) => {
       session.turn = { settle: resolve, cancelled: false };
       try {
-        session.driver.prompt(text);
+        session.driver.prompt(content);
       } catch (cause) {
         session.turn = null;
+        if (cause instanceof PromptRefused) refused = cause;
         resolve({ stopReason: null, isError: true, raw: messageOf(cause) });
       }
     });
+    // A block the driver would not send is the client's request to fix, not a turn that failed.
+    if (refused !== null) throw new RpcError(RPC_INVALID_PARAMS, (refused as PromptRefused).message);
 
     // ACP's five stop reasons all describe a turn that FINISHED. None of them
     // describes a crash, so a failed turn is reported as an ERROR rather than
@@ -434,6 +443,32 @@ export class AcpAgent {
     }
 
     return { stopReason: outcome.stopReason satisfies StopReason };
+  }
+
+  /** The prompt block kinds this agent's driver declared; text only when it declared none. */
+  #accepts(): readonly PromptBlockKind[] {
+    return this.#options.driverCapabilities?.promptBlocks ?? ['text'];
+  }
+
+  /**
+   * session/prompt's blocks, checked against the driver's declaration. Text blocks alone are joined into the text every
+   * driver takes; anything else goes through as blocks. A block the driver does not take refuses the WHOLE prompt,
+   * naming it -- it used to be dropped while the rest was sent, so an image beside a sentence vanished without a word.
+   */
+  #promptContent(prompt: unknown): PromptContent {
+    // An empty array is not a prompt. Refusing is better than sending an empty
+    // turn the agent will answer with something unrelated.
+    if (!Array.isArray(prompt) || prompt.length === 0) {
+      throw new RpcError(RPC_INVALID_PARAMS, 'session/prompt requires a prompt of content blocks');
+    }
+    try {
+      const blocks = promptBlocks(prompt, this.#accepts());
+      return blocks.every((block) => promptBlockKind(block) === 'text')
+        ? blocks.map((block) => (block as { text: string }).text).join('\n')
+        : blocks;
+    } catch (cause) {
+      throw new RpcError(RPC_INVALID_PARAMS, messageOf(cause));
+    }
   }
 
   #sessionCancel(params: unknown): void {
@@ -478,19 +513,6 @@ function isAbsolute(path: string): boolean {
   return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path);
 }
 
-/** Flatten ACP content blocks into the text a CLI prompt wants. */
-function promptText(prompt: unknown): string | undefined {
-  if (!Array.isArray(prompt)) return undefined;
-  const parts: string[] = [];
-  for (const block of prompt) {
-    const object = asObject(block);
-    if (object?.type === 'text' && typeof object.text === 'string') parts.push(object.text);
-  }
-  // An empty array is not a prompt, and neither is an array of blocks we cannot
-  // render. Refusing is better than sending an empty turn the agent will answer
-  // with something unrelated.
-  return parts.length === 0 ? undefined : parts.join('\n');
-}
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
