@@ -124,6 +124,21 @@ implementations of one protocol disagree without anyone noticing. So:
   line here can carry a prompt, a file or a credential, and a framing error is
   not a reason to copy it into a log.
 
+## Asking a person before Claude runs a tool
+
+CodexDriver raises `onRequestPermission` when Codex wants approval. ClaudeDriver does too, for the tools you name:
+
+```ts
+new ClaudeDriver({ cwd, permissionPrompts: { tools: ['Bash', 'WebFetch'] } }, {
+  onRequestPermission: async (request) => askThePerson(request), // { outcome: 'selected', optionId: 'allow_once' } runs it
+});
+```
+
+Each matching call waits for the answer: **Allow once** runs it, anything else (Deny, a cancel, an unknown option, no
+handler) denies it, and the denial reason reaches the model. It is a PreToolUse command hook supplied for this one
+invocation with `--settings`, talking to the driver over a private socket with a token that travels only in the
+environment; the hook is marked `onFailure: "block"`, so a broken channel blocks the call rather than passing it.
+
 ## Choosing the model, and learning which one you got
 
 Both drivers take a `model` option: Claude Code's `--model` (an alias such as `sonnet` or a full id), and the

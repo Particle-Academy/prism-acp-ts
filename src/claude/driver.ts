@@ -19,6 +19,9 @@ import { childEnv } from '../env.js';
 import { claudeMcpConfig, readMcpServers, type McpServer } from '../mcp.js';
 import { assertModel } from '../meta.js';
 import { isValidCliSessionId } from '../session-id.js';
+import { randomBytes } from 'node:crypto';
+import type { PermissionOutcome, PermissionRequest } from '../acp/agent.js';
+import { ApprovalServer, HOOK_SCRIPT, approvalSettings, permissionRequestFor } from './approvals.js';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
 import type { DriverCapabilities } from '../acp/agent.js';
@@ -62,6 +65,13 @@ export interface ClaudeDriverOptions {
    * model actually in use is reported on the init notice as `_meta[particle.academy/model]`.
    */
   readonly model?: string;
+  /**
+   * Ask a person before these tools run (issue #1): each matching call raises `onRequestPermission`, the same request
+   * CodexDriver raises, and runs only on an explicit "allow once". Supplied as a PreToolUse hook for this invocation
+   * (`--settings`), over a private socket; anything but an explicit allow denies. Tool names are single identifiers
+   * (`Bash`, `WebFetch`, `Write`, ...).
+   */
+  readonly permissionPrompts?: { readonly tools: readonly string[] };
   /** Tool names the agent may use. Omitted means the CLI's own default. */
   readonly allowedTools?: readonly string[];
   readonly disallowedTools?: readonly string[];
@@ -95,6 +105,11 @@ export interface ClaudeDriverEvents {
    * prompt only when the agent shut down.
    */
   readonly onTurnEnd?: (outcome: TurnOutcome) => void;
+  /**
+   * A tool call waits for a person (only with `permissionPrompts`). Resolve with the client's choice; anything but
+   * `{ outcome: 'selected', optionId: 'allow_once' }` denies the call.
+   */
+  readonly onRequestPermission?: (request: PermissionRequest) => Promise<PermissionOutcome>;
 }
 
 /**
@@ -114,7 +129,7 @@ export interface ClaudeDriverEvents {
  */
 // ClaudeDriver supplies a private, temporary config file. Custom spawners using
 // this helper must supply their own file path for non-empty mcpServers.
-export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string): string[] {
+export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string, settingsPath?: string): string[] {
   const args = [
     '--print',
     '--output-format',
@@ -144,6 +159,13 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string)
       throw new Error('MCP config file path cannot be represented safely by the Windows shell');
     }
     args.push('--mcp-config', process.platform === 'win32' ? `"${mcpConfigPath}"` : mcpConfigPath);
+  }
+  if (settingsPath !== undefined) {
+    // Same rule as the MCP config: only a generated file path crosses the Windows shell.
+    if (process.platform === 'win32' && /["%!\r\n\0]/.test(settingsPath)) {
+      throw new Error('settings file path cannot be represented safely by the Windows shell');
+    }
+    args.push('--settings', process.platform === 'win32' ? `"${settingsPath}"` : settingsPath);
   }
 
   return args;
@@ -288,6 +310,10 @@ export class ClaudeDriver {
   readonly #mcpServers: readonly McpServer[];
   #mcpConfigDirectory: string | null = null;
   #mcpConfigPath: string | null = null;
+  /** The permission-prompt hook's private files and its channel (issue #1); null when not asked for. */
+  #approvalDirectory: string | null = null;
+  #approvalFiles: string[] = [];
+  #approvals: ApprovalServer | null = null;
 
   /** Names of credentials withheld from the child, available after start(). */
   withheldCredentials: readonly string[] = [];
@@ -344,7 +370,25 @@ export class ClaudeDriver {
         writeFileSync(this.#mcpConfigPath, JSON.stringify(claudeMcpConfig(this.#mcpServers)),
           { mode: 0o600, flag: 'wx' });
       }
-      child = spawn(this.#options.binary ?? 'claude', claudeArgs(this.#options, this.#mcpConfigPath ?? undefined), {
+      let settingsPath: string | undefined;
+      if (this.#options.permissionPrompts !== undefined) {
+        const directory = privateMcpDirectory();
+        this.#approvalDirectory = directory;
+        const hookPath = join(directory, 'approve.cjs');
+        settingsPath = join(directory, 'settings.json');
+        writeFileSync(hookPath, HOOK_SCRIPT, { mode: 0o600, flag: 'wx' });
+        this.#approvalFiles.push(hookPath);
+        writeFileSync(settingsPath, JSON.stringify(approvalSettings(process.execPath, hookPath, this.#options.permissionPrompts.tools)), { mode: 0o600, flag: 'wx' });
+        this.#approvalFiles.push(settingsPath);
+        const socket = process.platform === 'win32' ? `\\\\.\\pipe\\prism-acp-${randomBytes(12).toString('hex')}` : join(directory, 'approve.sock');
+        const ask = this.#events.onRequestPermission;
+        this.#approvals = new ApprovalServer(socket, (input) => (ask ? ask(permissionRequestFor(input)) : Promise.resolve({ outcome: 'cancelled' as const })));
+        const channel = this.#approvals.listen();
+        // The token travels in the environment, never in argv.
+        env.PRISM_ACP_APPROVAL_SOCKET = channel.socket;
+        env.PRISM_ACP_APPROVAL_TOKEN = channel.token;
+      }
+      child = spawn(this.#options.binary ?? 'claude', claudeArgs(this.#options, this.#mcpConfigPath ?? undefined, settingsPath), {
         cwd: this.#options.cwd,
         env,
         // Windows npm installs expose a `.cmd` shim, which needs a shell.
@@ -353,6 +397,7 @@ export class ClaudeDriver {
       });
     } catch {
       this.#removeMcpConfig();
+      this.#removeApprovals();
       // A filesystem/spawn error can contain a sensitive path. Keep the report structural.
       throw new Error('failed to prepare Claude MCP configuration or spawn CLI');
     }
@@ -364,6 +409,7 @@ export class ClaudeDriver {
 
     child.on('error', (cause: Error) => {
       this.#removeMcpConfig();
+      this.#removeApprovals();
       // A spawn failure (ENOENT for a missing binary) arrives here and nowhere
       // else. Reported as a protocol error so a caller cannot mistake "the CLI
       // is not installed" for "the agent said nothing".
@@ -372,6 +418,7 @@ export class ClaudeDriver {
 
     child.on('close', (code, signal) => {
       this.#removeMcpConfig();
+      this.#removeApprovals();
       // Flush first: a frame can be complete without its trailing newline, and
       // the LAST frame of a turn is the `result` that carries the outcome.
       this.#emit(this.#framer.end());
@@ -401,6 +448,27 @@ export class ClaudeDriver {
   /** Everything the CLI has written to stderr so far. */
   get stderr(): string {
     return this.#stderr;
+  }
+
+  /** The permission-prompt channel closed and its private files removed (issue #1). */
+  #removeApprovals(): void {
+    this.#approvals?.close();
+    this.#approvals = null;
+    const files = this.#approvalFiles;
+    const directory = this.#approvalDirectory;
+    this.#approvalFiles = [];
+    this.#approvalDirectory = null;
+    for (const file of files) {
+      try { unlinkSync(file); } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') this.#events.onProtocolError?.('failed to remove a temporary Claude permission-prompt file');
+      }
+    }
+    if (directory !== null) {
+      // The posix socket file lives here too; the server's close() removes it.
+      try { rmdirSync(directory); } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') this.#events.onProtocolError?.('failed to remove the temporary Claude permission-prompt directory');
+      }
+    }
   }
 
   #removeMcpConfig(): void {
