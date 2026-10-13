@@ -130,6 +130,17 @@ export const META_CLI_SESSION_ID = metaKey('cli_session_id');
 export const META_MODEL = metaKey('model');
 
 /**
+ * The token split behind a `usage_update`, with its SCOPE (issue #3): Claude's figures cover the TURN the result frame
+ * closed; Codex's are the THREAD's running totals. Fields a provider did not send are `null`, never zero.
+ *
+ *   Claude: { scope: 'turn', inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens }
+ *   Codex:  { scope: 'thread', inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens }
+ *
+ * (Codex also keeps its earlier bare `_meta.inputTokens` / `outputTokens` / ... keys.)
+ */
+export const META_USAGE = metaKey('usage');
+
+/**
  * A model a client asked for, refused before it reaches a provider's command line or request: empty, or shaped like a
  * flag (`--dangerously-skip-permissions` passed as a "model" would be read by the CLI as the flag).
  */

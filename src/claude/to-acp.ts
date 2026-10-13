@@ -29,6 +29,7 @@ import {
   META_THINKING_SIGNATURE,
   META_THINKING_TOKENS_ESTIMATE,
   META_UNMAPPED_FRAME,
+  META_USAGE,
   withMeta,
 } from '../meta.js';
 import { stripAnsiControlSequences } from '../text.js';
@@ -382,7 +383,19 @@ export class ClaudeToAcp {
 
   #resultFrame(input: Record<string, unknown>): AcpUpdate[] {
     const usage = isObject(input.usage) ? input.usage : {};
-    const used = numberOf(usage.input_tokens) + numberOf(usage.output_tokens);
+    // ALL the input the context holds -- fresh, read from cache, written to cache -- plus the output. `input_tokens`
+    // alone excludes the cached input: measured, a one-word turn reported 2 in / 4 out with 18,999 read from cache and
+    // 16,522 written, so the old sum said 6 for a context of ~35.5k (issue #3).
+    const cacheRead = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : null;
+    const cacheCreation = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : null;
+    const used = numberOf(usage.input_tokens) + (cacheRead ?? 0) + (cacheCreation ?? 0) + numberOf(usage.output_tokens);
+    const split = {
+      scope: 'turn' as const,
+      inputTokens: numberOf(usage.input_tokens),
+      outputTokens: numberOf(usage.output_tokens),
+      cacheReadInputTokens: cacheRead,
+      cacheCreationInputTokens: cacheCreation,
+    };
     const size = contextWindowOf(input.modelUsage);
 
     // ACP requires BOTH `used` and `size` on usage_update. Without a context
@@ -396,7 +409,7 @@ export class ClaudeToAcp {
       ];
     }
 
-    const update: AcpUpdate = { sessionUpdate: 'usage_update', used, size };
+    const update: AcpUpdate = withMeta({ sessionUpdate: 'usage_update', used, size }, { [META_USAGE]: split });
     const cost = input.total_cost_usd;
     return [
       typeof cost === 'number'
