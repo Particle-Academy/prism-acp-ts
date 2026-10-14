@@ -102,3 +102,11 @@ describe('withMeta', () => {
     expect(out._meta.k).toBe(2);
   });
 });
+
+describe('the background-task keys a client reads', () => {
+  it('names them exactly, because Genie matches on the string', async () => {
+    const index = await import('../src/index.js');
+    expect(index.META_BACKGROUND_TASKS).toBe(`${META_NS}/background_tasks`);
+    expect(index.META_TASK).toBe(`${META_NS}/task`);
+  });
+});

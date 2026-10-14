@@ -425,6 +425,38 @@ content or input data. Permission requests report `providerTextSanitized: true`
 in `_meta` when their title or reason changed; tool-call titles do not yet report
 that flag.
 
+### Background tasks (Claude)
+
+Claude Code reports the shells it runs with `run_in_background`, its Monitor
+watches and its subagents on the stream. ACP has no field for them (its
+`subagent_update` publishes no payload shape), so each frame becomes one
+`notice` at level `debug` with the detail in `_meta`:
+
+```ts
+import { META_BACKGROUND_TASKS, META_TASK } from '@particle-academy/prism-acp';
+
+// message 'background tasks' -- the FULL live set; replace your cached set with it
+update._meta?.[META_BACKGROUND_TASKS];
+// [{ taskId, runId?, taskType, subagentType?, description, parentTaskId?, ambient? }]
+
+// message 'task started' | 'task progress' | 'task updated' | 'task ended'
+update._meta?.[META_TASK];
+// { event: 'started' | 'progress' | 'updated' | 'ended', taskId, runId?, toolUseId?,
+//   description?, taskType?, subagentType?, isBackgrounded?, spawnDepth?, parentTaskId?,
+//   ambient?, patch?, status?, reason?, outputFile?, summary?, usage?, lastToolName? }
+```
+
+`META_BACKGROUND_TASKS` is `particle.academy/background_tasks` and arrives
+whenever the set changes, including as `[]` when nothing is running. Claude Code
+sends nothing at startup (and needs 2.1.203 or later), so reset the set to empty
+when the agent process starts. `patch` is the `task_updated` change
+(`{ status?, description?, endTime?, totalPausedMs?, error?, isBackgrounded? }`)
+to merge into the task you hold by `taskId`; `usage` is
+`{ totalTokens, toolUses, durationMs }`. Exclude `ambient` tasks from activity
+indicators. Descriptions, summaries and errors have terminal control sequences
+stripped, with `providerTextSanitized: true` when anything was removed; a frame
+with no `task_id` is recorded as unmapped rather than sent.
+
 ## Driver capabilities
 
 When the embedder identifies the selected driver, `initialize` declares its
