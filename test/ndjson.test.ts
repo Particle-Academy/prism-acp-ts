@@ -75,7 +75,7 @@ describe('decision 2 — the byte cap is the same number everywhere', () => {
     // completion, a producer emitting an endless line with no newline grows the
     // buffer without bound and the cap is never reached -- correct, and useless.
     const framer = new NdjsonFramer();
-    const half = 'x'.repeat(600_000);
+    const half = 'x'.repeat(MAX_LINE_BYTES / 2 + 100_000);
     expect(framer.push(half)).toEqual([]);
     const frames = framer.push(half);
     expect(frames).toHaveLength(1);
@@ -83,10 +83,12 @@ describe('decision 2 — the byte cap is the same number everywhere', () => {
   });
 
   it('measures the cap in BYTES, not UTF-16 code units', () => {
-    // 400_000 ideographs are 400_000 units but 1_200_000 bytes. A port
+    // Ideographs are 3 bytes each: this line is UNDER the cap in UTF-16 units and OVER it in bytes. A port
     // measuring `.length` would accept this and then disagree with a port
     // measuring bytes -- the exact split this pinning exists to prevent.
-    const frame = parseLine(JSON.stringify({ a: '漢'.repeat(400_000) }));
+    const units = Math.floor(MAX_LINE_BYTES / 3) + 10;
+    expect(units).toBeLessThan(MAX_LINE_BYTES);
+    const frame = parseLine(JSON.stringify({ a: '漢'.repeat(units) }));
     expect(frame?.ok).toBe(false);
   });
 });
