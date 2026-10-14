@@ -87,7 +87,7 @@ const UNIMPLEMENTED: Readonly<Record<string, string>> = {
   subagent_update:
     'the CLI DOES emit system/task_started, task_updated and task_notification with full ' +
     'detail, but ACP publishes no payload shape for subagent_update, so mapping it would ' +
-    'mean inventing field names',
+    'mean inventing field names; they ride as debug notices under META_TASK instead',
   session_message: 'no CLI counterpart observed in any capture so far',
   session_message_chunk: 'no CLI counterpart observed in any capture so far',
 };
@@ -219,23 +219,20 @@ describe('widening the capture found frames nobody had seen', () => {
     return mapper;
   }
 
-  it('records the three task frames rather than dropping them', () => {
+  it('maps the three task frames instead of recording them as unmapped', () => {
     // A subagent turn produced system/task_started, task_updated and
     // task_notification -- three subtypes that did not appear in either earlier
-    // capture, and which the mapper has no case for.
-    //
-    // They are in `unmapped` with their contents intact, which is the decision
-    // to keep the FRAME rather than a count earning its place: the question
-    // "what did we not handle" has an answer, and the answer is what raised
-    // the coverage conversation from seven kinds to eight candidates.
+    // capture. They used to sit in `unmapped`, which kept them but showed a
+    // client nothing: no background task an agent ran was visible. They now
+    // ride as debug notices with `_meta` (META_TASK), so none is left behind.
     const subtypes = new Set(
       mapperFor('claude-subagent-turn.ndjson').unmapped.map(
         (f) => (f as { subtype?: string }).subtype,
       ),
     );
-    expect(subtypes).toContain('task_started');
-    expect(subtypes).toContain('task_updated');
-    expect(subtypes).toContain('task_notification');
+    expect(subtypes).not.toContain('task_started');
+    expect(subtypes).not.toContain('task_updated');
+    expect(subtypes).not.toContain('task_notification');
   });
 
   it('kept enough detail in them to implement subagent_update later', () => {
@@ -243,9 +240,12 @@ describe('widening the capture found frames nobody had seen', () => {
     // payload shape for it -- not that the CLI is quiet. This asserts the CLI's
     // side is rich enough, so a future implementation is blocked on the spec
     // rather than on another capture.
-    const started = mapperFor('claude-subagent-turn.ndjson').unmapped.find(
-      (f) => (f as { subtype?: string }).subtype === 'task_started',
-    ) as Record<string, unknown> | undefined;
+    const path = fileURLToPath(new URL('./fixtures/claude-subagent-turn.ndjson', import.meta.url));
+    const started = readFileSync(path, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .find((f) => f.subtype === 'task_started');
 
     expect(started).toBeDefined();
     for (const field of ['description', 'subagent_type', 'spawn_depth', 'task_type']) {

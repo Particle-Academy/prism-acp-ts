@@ -4,9 +4,11 @@ import { describe, expect, it } from 'vitest';
 import { ClaudeToAcp, type AcpUpdate } from '../src/claude/to-acp.js';
 import { NdjsonFramer } from '../src/ndjson.js';
 import {
+  META_BACKGROUND_TASKS,
   META_CLI_SESSION_ID,
   META_PERMISSION_DENIED,
   META_RATE_LIMIT,
+  META_TASK,
   META_THINKING_SIGNATURE,
   META_THINKING_TOKENS_ESTIMATE,
 } from '../src/meta.js';
@@ -460,5 +462,306 @@ describe('a failed tool result is reported as failed', () => {
       },
     });
     expect(updates[0]).toMatchObject({ toolCallId: 't1', status: 'failed' });
+  });
+});
+
+/**
+ * Background tasks: `run_in_background` shells, Monitor watches, subagents.
+ *
+ * The frames below are the DOCUMENTED shapes from the Claude Agent SDK
+ * TypeScript reference (SDKBackgroundTasksChangedMessage, SDKTaskStartedMessage,
+ * SDKTaskUpdatedMessage, SDKTaskProgressMessage, SDKTaskNotificationMessage),
+ * not a live capture -- except where a test says it reads the captured
+ * subagent turn. Before this mapping every one of them fell to `#unknown`, so
+ * a client could not see a single background task an agent had running.
+ */
+describe('background task mapping', () => {
+  const metaOf = (u: AcpUpdate | undefined) => (u?._meta ?? {}) as Record<string, unknown>;
+
+  it('maps background_tasks_changed to one debug notice carrying the full live set', () => {
+    const mapper = new ClaudeToAcp();
+    const updates = mapper.frame({
+      type: 'system',
+      subtype: 'background_tasks_changed',
+      tasks: [
+        { task_id: 'b1', run_id: 'r1', task_type: 'local_bash', description: 'npm run watch' },
+        {
+          task_id: 'a1',
+          task_type: 'local_agent',
+          subagent_type: 'general-purpose',
+          description: 'Survey the repo',
+          parent_task_id: 'a0',
+          ambient: false,
+        },
+      ],
+      uuid: 'u',
+      session_id: 's',
+    });
+
+    expect(updates).toEqual([
+      {
+        sessionUpdate: 'notice',
+        notice: { level: 'debug', message: 'background tasks' },
+        _meta: {
+          [META_BACKGROUND_TASKS]: [
+            { taskId: 'b1', runId: 'r1', taskType: 'local_bash', description: 'npm run watch' },
+            {
+              taskId: 'a1',
+              taskType: 'local_agent',
+              subagentType: 'general-purpose',
+              description: 'Survey the repo',
+              parentTaskId: 'a0',
+              ambient: false,
+            },
+          ],
+        },
+      },
+    ]);
+    expect(mapper.unmapped).toEqual([]);
+  });
+
+  it('emits an EMPTY set, because "nothing running" is a claim a client must hear', () => {
+    const mapper = new ClaudeToAcp();
+    const [update] = mapper.frame({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
+    expect(metaOf(update)[META_BACKGROUND_TASKS]).toEqual([]);
+    expect(mapper.unmapped).toEqual([]);
+  });
+
+  it('records a background_tasks_changed whose tasks is not an array', () => {
+    const mapper = new ClaudeToAcp();
+    const frame = { type: 'system', subtype: 'background_tasks_changed', tasks: 'b1' };
+    expect(mapper.frame(frame)).toEqual([]);
+    expect(mapper.unmapped).toEqual([frame]);
+  });
+
+  it('keeps the well-formed tasks and records the frame when an entry has no task_id', () => {
+    // Withholding the whole set for one bad entry would show the person
+    // nothing running; dropping the entry silently would hide it. Both are lost
+    // sight, so the set goes out and the frame is recorded.
+    const mapper = new ClaudeToAcp();
+    const frame = {
+      type: 'system',
+      subtype: 'background_tasks_changed',
+      tasks: [{ task_type: 'local_bash', description: 'no id' }, { task_id: 'b2', task_type: 'local_bash', description: 'ok' }],
+    };
+    const [update] = mapper.frame(frame);
+    expect(metaOf(update)[META_BACKGROUND_TASKS]).toEqual([
+      { taskId: 'b2', taskType: 'local_bash', description: 'ok' },
+    ]);
+    expect(mapper.unmapped).toEqual([frame]);
+  });
+
+  it('maps task_started to a "task started" notice', () => {
+    const updates = new ClaudeToAcp().frame({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'b1',
+      run_id: 'r1',
+      tool_use_id: 'toolu_1',
+      description: 'tail -f build.log',
+      task_type: 'local_bash',
+      is_backgrounded: true,
+      parent_task_id: 'a0',
+      ambient: false,
+      uuid: 'u',
+      session_id: 's',
+    });
+    expect(updates).toEqual([
+      {
+        sessionUpdate: 'notice',
+        notice: { level: 'debug', message: 'task started' },
+        _meta: {
+          [META_TASK]: {
+            event: 'started',
+            taskId: 'b1',
+            runId: 'r1',
+            toolUseId: 'toolu_1',
+            description: 'tail -f build.log',
+            taskType: 'local_bash',
+            isBackgrounded: true,
+            parentTaskId: 'a0',
+            ambient: false,
+          },
+        },
+      },
+    ]);
+  });
+
+  it('maps task_updated with its patch camelCased', () => {
+    const [update] = new ClaudeToAcp().frame({
+      type: 'system',
+      subtype: 'task_updated',
+      task_id: 'b1',
+      run_id: 'r1',
+      patch: {
+        status: 'failed',
+        description: 'tail -f build.log',
+        end_time: 1791250867102,
+        total_paused_ms: 0,
+        error: 'exit 1',
+        is_backgrounded: true,
+      },
+    });
+    expect(update).toEqual({
+      sessionUpdate: 'notice',
+      notice: { level: 'debug', message: 'task updated' },
+      _meta: {
+        [META_TASK]: {
+          event: 'updated',
+          taskId: 'b1',
+          runId: 'r1',
+          patch: {
+            status: 'failed',
+            description: 'tail -f build.log',
+            endTime: 1791250867102,
+            totalPausedMs: 0,
+            error: 'exit 1',
+            isBackgrounded: true,
+          },
+        },
+      },
+    });
+  });
+
+  it('maps task_notification to a "task ended" notice', () => {
+    const [update] = new ClaudeToAcp().frame({
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'b1',
+      run_id: 'r1',
+      tool_use_id: 'toolu_1',
+      status: 'stopped',
+      reason: 'worker_restart',
+      output_file: '/tmp/tasks/b1.output',
+      summary: 'stopped by restart',
+      ambient: false,
+      usage: { total_tokens: 10, tool_uses: 1, duration_ms: 250 },
+    });
+    expect(update).toEqual({
+      sessionUpdate: 'notice',
+      notice: { level: 'debug', message: 'task ended' },
+      _meta: {
+        [META_TASK]: {
+          event: 'ended',
+          taskId: 'b1',
+          runId: 'r1',
+          toolUseId: 'toolu_1',
+          status: 'stopped',
+          reason: 'worker_restart',
+          outputFile: '/tmp/tasks/b1.output',
+          summary: 'stopped by restart',
+          ambient: false,
+          usage: { totalTokens: 10, toolUses: 1, durationMs: 250 },
+        },
+      },
+    });
+  });
+
+  it('maps task_progress to a "task progress" notice', () => {
+    const [update] = new ClaudeToAcp().frame({
+      type: 'system',
+      subtype: 'task_progress',
+      task_id: 'a1',
+      description: 'Survey the repo',
+      subagent_type: 'general-purpose',
+      usage: { total_tokens: 900, tool_uses: 3, duration_ms: 4000 },
+      last_tool_name: 'Grep',
+      summary: 'Reading src/',
+    });
+    expect(update).toEqual({
+      sessionUpdate: 'notice',
+      notice: { level: 'debug', message: 'task progress' },
+      _meta: {
+        [META_TASK]: {
+          event: 'progress',
+          taskId: 'a1',
+          description: 'Survey the repo',
+          subagentType: 'general-purpose',
+          usage: { totalTokens: 900, toolUses: 3, durationMs: 4000 },
+          lastToolName: 'Grep',
+          summary: 'Reading src/',
+        },
+      },
+    });
+  });
+
+  it.each(['task_started', 'task_updated', 'task_progress', 'task_notification'])(
+    'records a %s frame with no task_id rather than inventing one',
+    (subtype) => {
+      const mapper = new ClaudeToAcp();
+      const frame = { type: 'system', subtype, description: 'x', status: 'completed', patch: {} };
+      expect(mapper.frame(frame)).toEqual([]);
+      expect(mapper.unmapped).toEqual([frame]);
+    },
+  );
+
+  it('sanitizes provider text a person reads, and marks that it did', () => {
+    const mapper = new ClaudeToAcp();
+    const [started] = mapper.frame({
+      type: 'system', subtype: 'task_started', task_id: 'b1', description: '\u001b[31mbuild\u001b[0m',
+    });
+    const [updated] = mapper.frame({
+      type: 'system', subtype: 'task_updated', task_id: 'b1',
+      patch: { description: '\u001b[2mbuild\u001b[0m', error: '\u001b[1mboom\u001b[0m' },
+    });
+    const [ended] = mapper.frame({
+      type: 'system', subtype: 'task_notification', task_id: 'b1', status: 'failed',
+      output_file: '/tmp/b1.output', summary: '\u001b]0;title\u0007done',
+    });
+    const [listed] = mapper.frame({
+      type: 'system', subtype: 'background_tasks_changed',
+      tasks: [{ task_id: 'b1', task_type: 'local_bash', description: '\u001b[31mbuild\u001b[0m' }],
+    });
+
+    expect(metaOf(started)[META_TASK]).toMatchObject({ description: 'build', providerTextSanitized: true });
+    expect(metaOf(updated)[META_TASK]).toMatchObject({
+      patch: { description: 'build', error: 'boom' },
+      providerTextSanitized: true,
+    });
+    expect(metaOf(ended)[META_TASK]).toMatchObject({ summary: 'done', providerTextSanitized: true });
+    expect(metaOf(listed)[META_BACKGROUND_TASKS]).toEqual([
+      { taskId: 'b1', taskType: 'local_bash', description: 'build', providerTextSanitized: true },
+    ]);
+    for (const u of [started, updated, ended, listed]) {
+      expect(JSON.stringify(u)).not.toMatch(/\\u001b|\\u0007/);
+    }
+  });
+
+  it('does not mark clean provider text as sanitized', () => {
+    const [update] = new ClaudeToAcp().frame({
+      type: 'system', subtype: 'task_started', task_id: 'b1', description: 'build',
+    });
+    expect(metaOf(update)[META_TASK]).not.toHaveProperty('providerTextSanitized');
+  });
+
+  it('maps the CAPTURED subagent turn\'s task frames, leaving none unmapped', () => {
+    // The one real capture we have of these frames (a foreground subagent).
+    const bytes = readFileSync(
+      fileURLToPath(new URL('./fixtures/claude-subagent-turn.ndjson', import.meta.url)),
+    );
+    const framer = new NdjsonFramer();
+    const mapper = new ClaudeToAcp();
+    const updates: AcpUpdate[] = [];
+    for (const frame of [...framer.push(bytes), ...framer.end()]) {
+      if (frame.ok) updates.push(...mapper.frame(frame.value));
+    }
+
+    const events = updates
+      .map((u) => metaOf(u)[META_TASK] as { event?: string } | undefined)
+      .filter((t) => t !== undefined)
+      .map((t) => t.event);
+    expect(events).toEqual(['started', 'updated', 'ended']);
+    const started = updates.map((u) => metaOf(u)[META_TASK]).find((t) => t !== undefined);
+    expect(started).toMatchObject({
+      taskId: 'REDACTED',
+      toolUseId: 'REDACTED',
+      description: 'Reply with pear',
+      taskType: 'local_agent',
+      subagentType: 'general-purpose',
+      isBackgrounded: false,
+      spawnDepth: 1,
+    });
+    const subtypes = mapper.unmapped.map((f) => (f as { subtype?: string }).subtype);
+    expect(subtypes.filter((s) => s?.startsWith('task_'))).toEqual([]);
   });
 });

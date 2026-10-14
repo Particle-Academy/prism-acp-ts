@@ -96,6 +96,23 @@ export const META_DRIVER_CAPABILITIES = metaKey('driver_capabilities');
 /** A command-line approval's persistent execpolicy amendment, tied to its ACP option. */
 export const META_EXEC_POLICY_AMENDMENT = metaKey('execpolicy_amendment');
 
+/**
+ * The FULL live set of an agent's background tasks -- `run_in_background` shells, Monitor watches, subagents.
+ *
+ * From Claude Code's `system`/`background_tasks_changed` (Claude Code >= 2.1.203), camelCased:
+ * `{ taskId, runId?, taskType, subagentType?, description, parentTaskId?, ambient?, providerTextSanitized? }[]`.
+ * REPLACE any cached set with each payload; an empty array means nothing is running. Nothing is sent at startup, so a
+ * client resets to empty when the agent process starts.
+ */
+export const META_BACKGROUND_TASKS = metaKey('background_tasks');
+
+/**
+ * One task's lifecycle event, from Claude Code's `task_started` / `task_progress` / `task_updated` /
+ * `task_notification` frames, camelCased with `event: 'started' | 'progress' | 'updated' | 'ended'`.
+ * `taskId` is always present; key a task by `taskId` (and `runId` when given -- a resumed task gets a new run).
+ */
+export const META_TASK = metaKey('task');
+
 /** The CLI frame a mapping could not place, kept so nothing is lost unseen. */
 export const META_UNMAPPED_FRAME = metaKey('unmapped_frame');
 

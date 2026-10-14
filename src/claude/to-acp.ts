@@ -8,6 +8,12 @@
  * be a transcription plus a reading of an adapter's schema, never observed
  * bytes, so the mapping was written from a capture instead.
  *
+ * One exception, said out loud: `background_tasks_changed` and `task_progress`
+ * are mapped from the shapes DOCUMENTED in the Claude Agent SDK TypeScript
+ * reference, because no capture contains them yet. The other three task frames
+ * (`task_started`, `task_updated`, `task_notification`) are in the captured
+ * subagent turn as well as the reference.
+ *
  * The ACP field names and enum values come from the specification --
  * `sessionUpdate` discriminators, `tool_call` fields, the ten `kind` literals,
  * the four `status` literals. They are not inferred.
@@ -22,10 +28,12 @@
  * reasoning, or the arguments to a command about to run.
  */
 import {
+  META_BACKGROUND_TASKS,
   META_CLI_SESSION_ID,
   META_MODEL,
   META_PERMISSION_DENIED,
   META_RATE_LIMIT,
+  META_TASK,
   META_THINKING_SIGNATURE,
   META_THINKING_TOKENS_ESTIMATE,
   META_UNMAPPED_FRAME,
@@ -368,6 +376,15 @@ export class ClaudeToAcp {
         ];
       }
 
+      case 'background_tasks_changed':
+        return this.#backgroundTasks(input);
+
+      case 'task_started':
+      case 'task_progress':
+      case 'task_updated':
+      case 'task_notification':
+        return this.#task(input, input.subtype);
+
       case 'status':
       case 'api_retry':
         // Not mapped, but RECORDED. api_retry especially: it is how an
@@ -379,6 +396,78 @@ export class ClaudeToAcp {
       default:
         return this.#unknown(input);
     }
+  }
+
+  /**
+   * The full live set of background tasks (Claude Code >= 2.1.203).
+   *
+   * Shapes from the Claude Agent SDK reference (SDKBackgroundTasksChangedMessage).
+   * Before this case the frame fell to `#unknown`, so a client could see none
+   * of the shells, Monitor watches and subagents an agent had running.
+   *
+   * An empty array is emitted: "nothing is running" is a claim, and a client
+   * that replaces its cached set with each payload needs it to clear.
+   */
+  #backgroundTasks(input: Record<string, unknown>): AcpUpdate[] {
+    if (!Array.isArray(input.tasks)) return this.#unknown(input);
+
+    const tasks: Record<string, unknown>[] = [];
+    let malformed = false;
+    for (const entry of input.tasks) {
+      const taskId = isObject(entry) ? nonEmptyString(entry.task_id) : undefined;
+      if (!isObject(entry) || taskId === undefined) {
+        malformed = true;
+        continue;
+      }
+      tasks.push({ taskId, ...copyFields(entry, BACKGROUND_TASK_FIELDS) });
+    }
+    // A bad entry must not withhold the rest of the set (that would read as
+    // "nothing running"), and must not vanish either: the frame is recorded.
+    if (malformed) this.unmapped.push(input);
+
+    return [
+      withMeta(
+        { sessionUpdate: 'notice', notice: { level: 'debug', message: 'background tasks' } },
+        { [META_BACKGROUND_TASKS]: tasks },
+      ),
+    ];
+  }
+
+  /**
+   * One task's lifecycle event: task_started / task_progress / task_updated /
+   * task_notification. Shapes from the Claude Agent SDK reference; the
+   * started/updated/notification trio is also in the captured subagent turn.
+   *
+   * ACP's `subagent_update` has no published payload shape, so these ride as
+   * debug notices with the detail under META_TASK rather than inventing one.
+   */
+  #task(input: Record<string, unknown>, subtype: keyof typeof TASK_EVENTS): AcpUpdate[] {
+    const taskId = nonEmptyString(input.task_id);
+    if (taskId === undefined) return this.#unknown(input);
+
+    const { event, message } = TASK_EVENTS[subtype];
+    const task: Record<string, unknown> = { event, taskId, ...copyFields(input, TASK_FIELDS) };
+    let sanitized = task.providerTextSanitized === true;
+
+    if (isObject(input.patch)) {
+      const patch = copyFields(input.patch, TASK_PATCH_FIELDS);
+      if (patch.providerTextSanitized === true) {
+        delete patch.providerTextSanitized;
+        sanitized = true;
+      }
+      task.patch = patch;
+    }
+    if (isObject(input.usage)) task.usage = copyFields(input.usage, TASK_USAGE_FIELDS);
+
+    // Preserve the fact of sanitization without echoing removed provider bytes.
+    if (sanitized) task.providerTextSanitized = true;
+
+    return [
+      withMeta(
+        { sessionUpdate: 'notice', notice: { level: 'debug', message } },
+        { [META_TASK]: task },
+      ),
+    ];
   }
 
   #resultFrame(input: Record<string, unknown>): AcpUpdate[] {
@@ -473,6 +562,88 @@ export class ClaudeToAcp {
     this.unmapped.push(frame);
     return [];
   }
+}
+
+/**
+ * How a provider field becomes a client field: its camelCase name and its type.
+ * `text` is a string a person reads, so it is sanitized; `string` is an id or
+ * enum and stays verbatim, as a tool's machine `name` does.
+ */
+type FieldSpec = readonly [from: string, to: string, type: 'string' | 'text' | 'number' | 'boolean'];
+
+const BACKGROUND_TASK_FIELDS: readonly FieldSpec[] = [
+  ['run_id', 'runId', 'string'],
+  ['task_type', 'taskType', 'string'],
+  ['subagent_type', 'subagentType', 'string'],
+  ['description', 'description', 'text'],
+  ['parent_task_id', 'parentTaskId', 'string'],
+  ['ambient', 'ambient', 'boolean'],
+];
+
+const TASK_FIELDS: readonly FieldSpec[] = [
+  ['run_id', 'runId', 'string'],
+  ['tool_use_id', 'toolUseId', 'string'],
+  ['description', 'description', 'text'],
+  ['task_type', 'taskType', 'string'],
+  ['subagent_type', 'subagentType', 'string'],
+  ['is_backgrounded', 'isBackgrounded', 'boolean'],
+  ['spawn_depth', 'spawnDepth', 'number'],
+  ['parent_task_id', 'parentTaskId', 'string'],
+  ['ambient', 'ambient', 'boolean'],
+  ['status', 'status', 'string'],
+  ['reason', 'reason', 'string'],
+  ['output_file', 'outputFile', 'string'],
+  ['summary', 'summary', 'text'],
+  ['last_tool_name', 'lastToolName', 'string'],
+];
+
+const TASK_PATCH_FIELDS: readonly FieldSpec[] = [
+  ['status', 'status', 'string'],
+  ['description', 'description', 'text'],
+  ['end_time', 'endTime', 'number'],
+  ['total_paused_ms', 'totalPausedMs', 'number'],
+  ['error', 'error', 'text'],
+  ['is_backgrounded', 'isBackgrounded', 'boolean'],
+];
+
+const TASK_USAGE_FIELDS: readonly FieldSpec[] = [
+  ['total_tokens', 'totalTokens', 'number'],
+  ['tool_uses', 'toolUses', 'number'],
+  ['duration_ms', 'durationMs', 'number'],
+];
+
+const TASK_EVENTS = {
+  task_started: { event: 'started', message: 'task started' },
+  task_progress: { event: 'progress', message: 'task progress' },
+  task_updated: { event: 'updated', message: 'task updated' },
+  task_notification: { event: 'ended', message: 'task ended' },
+} as const;
+
+/**
+ * Copy the fields that are present AND of the documented type. A field of the
+ * wrong type is left out rather than coerced. Sets `providerTextSanitized` when
+ * any `text` field had control sequences removed.
+ */
+function copyFields(source: Record<string, unknown>, specs: readonly FieldSpec[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  let sanitized = false;
+  for (const [from, to, type] of specs) {
+    const value = source[from];
+    if (type === 'text') {
+      if (typeof value !== 'string') continue;
+      const clean = stripAnsiControlSequences(value);
+      out[to] = clean.text;
+      sanitized ||= clean.changed;
+    } else if (typeof value === type) {
+      out[to] = value;
+    }
+  }
+  if (sanitized) out.providerTextSanitized = true;
+  return out;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
