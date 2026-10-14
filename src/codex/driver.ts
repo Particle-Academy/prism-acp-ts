@@ -259,7 +259,7 @@ export class CodexDriver implements AgentDriver {
     try {
       rmSync(dir, { recursive: true, force: true });
     } catch {
-      this.#events.onProtocolError?.('failed to remove the temporary Codex prompt-image directory');
+      this.#events.onProtocolError?.('failed to remove the temporary Codex prompt-image directory', { recoverable: true });
     }
   }
 
@@ -279,7 +279,7 @@ export class CodexDriver implements AgentDriver {
     const handlers: CodexTransportHandlers = {
       onFrame: (frame) => this.#receive(frame),
       onStderr: (line) => this.#events.onStderr?.(line),
-      onProblem: (problem) => this.#events.onProtocolError?.(problem),
+      onProblem: (problem, detail) => this.#events.onProtocolError?.(problem, detail),
       onExit: (code, signal) => this.#onExit(code, signal),
     };
     const transport = this.#transportFactory(

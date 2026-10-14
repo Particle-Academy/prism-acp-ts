@@ -18,7 +18,7 @@ export interface ServeOptions extends AcpAgentOptions {
   readonly input: Readable;
   readonly output: Writable;
   /** A frame that arrived but was not usable. */
-  readonly onProtocolError?: (sessionId: string, problem: string) => void;
+  readonly onProtocolError?: (sessionId: string, problem: string, detail?: import('./agent.js').ProblemDetail) => void;
 }
 
 export interface Served {

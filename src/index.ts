@@ -80,6 +80,7 @@ export type {
   AcpAgentOptions,
   AgentDriver,
   DriverEvents,
+  ProblemDetail,
   DriverFactory,
   DriverCapabilities,
   PermissionOutcome,

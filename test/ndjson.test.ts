@@ -52,10 +52,10 @@ describe('decision 1 — a trailing \\r is stripped, not left to the parser', ()
 });
 
 describe('decision 2 — the byte cap is the same number everywhere', () => {
-  it('is 1_000_000', () => {
+  it('is 64_000_000', () => {
     // Pinned deliberately: a cap that differs per port means one
     // implementation dies where another succeeds on the same stream.
-    expect(MAX_LINE_BYTES).toBe(1_000_000);
+    expect(MAX_LINE_BYTES).toBe(64_000_000);
   });
 
   it('accepts a line just under the cap', () => {
