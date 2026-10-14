@@ -26,21 +26,22 @@ describe('system/init lists the agent’s commands', () => {
     const update = commandsUpdate(init);
     expect(update).toBeDefined();
     const cmds = (update as unknown as { availableCommands: Cmd[] }).availableCommands;
-    const skills = init['skills'] as string[];
+    const terminalOnly = init['terminal_slash_commands'] as string[];
+    const skills = (init['skills'] as string[]).filter((s) => !terminalOnly.includes(s));
     const slash = (init['slash_commands'] as string[]).map((c) => c.replace(/^\//, ''));
-    // COUNTED: exactly the slash commands plus the skills (the capture has no overlap).
+    // COUNTED: exactly the slash commands plus the skills no terminal-only command shadows.
     expect(cmds).toHaveLength(slash.length + skills.length);
     expect(cmds.map((c) => c.name)).toEqual([...slash, ...skills]);
     expect(cmds.every((c) => !c.name.startsWith('/'))).toBe(true);
     // Terminal-only commands are not offered: they do nothing outside the interactive TUI.
-    const terminalOnly = init['terminal_slash_commands'] as string[];
     expect(cmds.filter((c) => terminalOnly.includes(c.name))).toHaveLength(0);
   });
 
   it('says where each one comes from: a command or a skill', () => {
     const cmds = (commandsUpdate(init) as unknown as { availableCommands: Cmd[] }).availableCommands;
     const source = (c: Cmd) => c._meta?.[META_COMMAND_SOURCE];
-    expect(cmds.filter((c) => source(c) === 'skill')).toHaveLength((init['skills'] as string[]).length);
+    const terminalOnly = init['terminal_slash_commands'] as string[];
+    expect(cmds.filter((c) => source(c) === 'skill')).toHaveLength((init['skills'] as string[]).filter((s) => !terminalOnly.includes(s)).length);
     expect(cmds.filter((c) => source(c) === 'command')).toHaveLength((init['slash_commands'] as string[]).length);
     expect(cmds.find((c) => c.name === 'help')?.description).toBe('Command');
     expect(cmds.find((c) => c.name === 'genie')?.description).toBe('Skill');
@@ -69,6 +70,14 @@ describe('system/init lists the agent’s commands', () => {
     const empty = commandsUpdate({ type: 'system', subtype: 'init', session_id: 's', slash_commands: [], skills: [] });
     expect((empty as unknown as { availableCommands: Cmd[] }).availableCommands).toEqual([]);
     expect(commandsUpdate({ type: 'system', subtype: 'init', session_id: 's' })).toBeUndefined();
+  });
+
+  it('a skill that shares its name with a terminal-only command is not offered (which one runs is not documented)', () => {
+    // The real capture has exactly this: a `doctor` skill and the terminal-only `/doctor`.
+    expect((init['skills'] as string[])).toContain('doctor');
+    expect((init['terminal_slash_commands'] as string[])).toContain('doctor');
+    const update = commandsUpdate({ type: 'system', subtype: 'init', session_id: 's', slash_commands: [], skills: ['doctor', 'genie'], terminal_slash_commands: ['doctor'] });
+    expect((update as unknown as { availableCommands: Cmd[] }).availableCommands.map((c) => c.name)).toEqual(['genie']);
   });
 
   it('a name listed as both a command and a skill is offered once', () => {

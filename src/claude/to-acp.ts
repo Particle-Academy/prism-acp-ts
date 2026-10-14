@@ -652,7 +652,8 @@ function copyFields(source: Record<string, unknown>, specs: readonly FieldSpec[]
  * The `available_commands_update` an `init` frame implies: its `slash_commands` (sent with a leading `/`, offered
  * without one, as ACP names are) then its `skills`, each once, with the plugins and subagents in `_meta`.
  *
- * `terminal_slash_commands` are left out: they act on the interactive TUI and do nothing in print mode. An `init` that
+ * `terminal_slash_commands` are left out, and so is any skill that shares a name with one: they act on the interactive
+ * TUI, and which of the two a shared name runs in print mode is not documented. An `init` that
  * carries neither list yields `undefined`: "never told" is not "offers none". Empty lists yield `[]`.
  */
 function commandsFromInit(input: Record<string, unknown>): AcpUpdate | undefined {
@@ -660,11 +661,19 @@ function commandsFromInit(input: Record<string, unknown>): AcpUpdate | undefined
   const skills = Array.isArray(input.skills) ? input.skills : undefined;
   if (slash === undefined && skills === undefined) return undefined;
 
+  // A name the TUI keeps for itself (`terminal_slash_commands`) is not offered even when a skill shares it: Claude's
+  // own capture lists both a `doctor` skill and the terminal-only `/doctor`, and which one `/doctor` runs in print mode is
+  // not documented. Offering it would be a guess.
+  const terminalOnly = new Set(
+    (Array.isArray(input.terminal_slash_commands) ? input.terminal_slash_commands : [])
+      .map((c) => nonEmptyString(c)?.replace(/^\//, ''))
+      .filter((c): c is string => c !== undefined),
+  );
   const seen = new Set<string>();
   const availableCommands: Array<Record<string, unknown>> = [];
   const add = (raw: unknown, source: 'command' | 'skill') => {
     const name = nonEmptyString(raw)?.replace(/^\//, '');
-    if (name === undefined || name.length === 0 || seen.has(name)) return;
+    if (name === undefined || name.length === 0 || seen.has(name) || terminalOnly.has(name)) return;
     seen.add(name);
     availableCommands.push({
       name,
