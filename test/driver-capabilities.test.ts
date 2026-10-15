@@ -80,16 +80,16 @@ describe('Claude driver capability declaration', () => {
   });
 });
 
-describe('Claude turn cancel is declared unsupported (issue #16)', () => {
-  // The Agent SDK docs name an `interrupt` control request that a client may drive directly, and document the
-  // `{ type: "control_request", request_id, request }` envelope -- but not the body that names the interrupt. The
-  // driver does not build on that undocumented body, so it declares cancel false and offers no cancel(): a client
-  // reads this and labels Stop as ending the agent, which is what session/cancel then does for it.
-  it('reports cancel: false', () => {
-    expect(CLAUDE_DRIVER_CAPABILITIES.cancel).toBe(false);
+describe('Claude turn cancel (issue #16)', () => {
+  // Built on a measurement, not on the docs alone: the Agent SDK docs document the `interrupt` control request type
+  // and its `control_request` envelope, but not the `{ subtype: 'interrupt' }` body. That body was measured against
+  // the owner's Claude Code on 2026-10-15 (scripts/probe-claude-interrupt.mjs): accepted, turn aborted, process alive,
+  // next prompt ran.
+  it('reports cancel: true', () => {
+    expect(CLAUDE_DRIVER_CAPABILITIES.cancel).toBe(true);
   });
 
-  it('offers no cancel() that could be mistaken for one that works', () => {
-    expect('cancel' in ClaudeDriver.prototype).toBe(false);
+  it('offers the cancel() it declares', () => {
+    expect(typeof ClaudeDriver.prototype.cancel).toBe('function');
   });
 });
