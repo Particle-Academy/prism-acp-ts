@@ -364,6 +364,129 @@ describe('session/cancel', () => {
     await h.peer.receive({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'x' } });
     expect(h.sent).toEqual([]);
   });
+
+  it('leaves an IDLE session alone: with no turn to cancel there is nothing to stop', async () => {
+    const h = harness();
+    await call(h, 'session/new', { cwd: '/work', mcpServers: [] });
+    await h.peer.receive({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'sess_1' } });
+    expect(h.drivers[0]?.killed).toBe(false);
+
+    const promise = h.peer.receive({
+      jsonrpc: '2.0', id: 2, method: 'session/prompt', params: { sessionId: 'sess_1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    h.drivers[0]?.finish();
+    await promise;
+    expect(h.sent.find((m) => m.id === 2)?.result).toEqual({ stopReason: 'end_turn' });
+  });
+});
+
+/**
+ * A driver that can interrupt a turn (issue #16): `cancel()` asks the agent to stop the turn, and the turn ends --
+ * later, through onTurnEnd -- the way the real Codex driver's does once `turn/completed` reports `interrupted`.
+ */
+class CancellableFakeDriver extends FakeDriver {
+  cancels = 0;
+  kills = 0;
+  cancelFailure: Error | null = null;
+
+  async cancel(): Promise<void> {
+    this.cancels += 1;
+    if (this.cancelFailure !== null) throw this.cancelFailure;
+  }
+
+  override kill(): void {
+    this.kills += 1;
+    super.kill();
+  }
+}
+
+function cancellableHarness() {
+  const sent: Record<string, unknown>[] = [];
+  const drivers: CancellableFakeDriver[] = [];
+  const peer = new JsonRpcPeer({ send: (m) => sent.push(m as Record<string, unknown>) });
+  let n = 0;
+  const agent = new AcpAgent(peer, {
+    driverFactory: (options, events) => {
+      const driver = new CancellableFakeDriver(options, events);
+      drivers.push(driver);
+      return driver;
+    },
+    newSessionId: () => `sess_${++n}`,
+  });
+  return { agent, peer, sent, drivers };
+}
+
+describe('session/cancel with a driver that can cancel a turn', () => {
+  async function promptIn(h: ReturnType<typeof cancellableHarness>, id: number, text: string) {
+    return h.peer.receive({
+      jsonrpc: '2.0', id, method: 'session/prompt', params: { sessionId: 'sess_1', prompt: [{ type: 'text', text }] },
+    });
+  }
+  const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  it('CANCELS the turn through the driver and keeps the session alive for the next prompt', async () => {
+    const h = cancellableHarness();
+    await call(h, 'session/new', { cwd: '/work', mcpServers: [] });
+    const first = promptIn(h, 2, 'long task');
+
+    await h.peer.receive({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'sess_1' } });
+    await tick();
+    const driver = h.drivers[0]!;
+    expect(driver.cancels).toBe(1);
+    expect(driver.kills).toBe(0);
+
+    // The turn ends when the AGENT says it ended.
+    driver.finish({ stopReason: 'cancelled', raw: 'interrupted' });
+    await first;
+    expect(h.sent.find((m) => m.id === 2)?.result).toEqual({ stopReason: 'cancelled' });
+
+    const second = promptIn(h, 3, 'next');
+    expect(driver.prompts).toEqual(['long task', 'next']);
+    driver.finish();
+    await second;
+    expect(h.sent.find((m) => m.id === 3)?.result).toEqual({ stopReason: 'end_turn' });
+    expect(driver.kills).toBe(0);
+    expect(h.agent.sessionIds).toEqual(['sess_1']);
+  });
+
+  it('answers cancelled even when the turn finished in the race with the interrupt, as ACP requires', async () => {
+    const h = cancellableHarness();
+    await call(h, 'session/new', { cwd: '/work', mcpServers: [] });
+    const first = promptIn(h, 2, 'task');
+    await h.peer.receive({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'sess_1' } });
+    h.drivers[0]!.finish({ stopReason: 'end_turn' });
+    await first;
+    expect(h.sent.find((m) => m.id === 2)?.result).toEqual({ stopReason: 'cancelled' });
+  });
+
+  it('falls back to stopping the agent when the interrupt fails, so Stop always stops', async () => {
+    const h = cancellableHarness();
+    await call(h, 'session/new', { cwd: '/work', mcpServers: [] });
+    h.drivers[0]!.cancelFailure = new Error('turn/interrupt refused');
+    const first = promptIn(h, 2, 'task');
+    await h.peer.receive({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'sess_1' } });
+    await tick();
+    await first;
+    expect(h.sent.find((m) => m.id === 2)?.result).toEqual({ stopReason: 'cancelled' });
+    expect(h.drivers[0]!.kills).toBe(1);
+  });
+
+  it('does not call the driver with no turn in flight', async () => {
+    const h = cancellableHarness();
+    await call(h, 'session/new', { cwd: '/work', mcpServers: [] });
+    await h.peer.receive({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'sess_1' } });
+    await tick();
+    expect(h.drivers[0]!.cancels).toBe(0);
+    expect(h.drivers[0]!.kills).toBe(0);
+  });
+
+  it('control: closing the server still kills a driver that can cancel', async () => {
+    const h = cancellableHarness();
+    await call(h, 'session/new', { cwd: '/work', mcpServers: [] });
+    h.agent.closeAll();
+    expect(h.drivers[0]!.kills).toBe(1);
+    expect(h.drivers[0]!.cancels).toBe(0);
+  });
 });
 
 describe('session/load', () => {

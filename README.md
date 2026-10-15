@@ -457,12 +457,54 @@ indicators. Descriptions, summaries and errors have terminal control sequences
 stripped, with `providerTextSanitized: true` when anything was removed; a frame
 with no `task_id` is recorded as unmapped rather than sent.
 
+## Stopping a turn: `session/cancel`
+
+`session/cancel` ends the **turn**, not the session, wherever the driver can
+interrupt one. A driver that can implements `cancel()`, and declares
+`cancel: true` in its capabilities:
+
+- **Codex** sends app-server `turn/interrupt` with `{ threadId, turnId }`. The
+  [documented](https://learn.chatgpt.com/docs/app-server) success is `{}`, and
+  the turn then completes with status `interrupted`, which ends the prompt with
+  `stopReason: "cancelled"`. The app-server and its thread stay up, and the
+  next `session/prompt` runs as a new turn. A cancel that arrives before
+  `turn/start` has named the turn is sent as soon as it does; a prompt still
+  queued behind startup is dropped and never reaches Codex.
+- **Claude** writes `{ "type": "control_request", "request_id": …,
+  "request": { "subtype": "interrupt" } }` to the CLI's stream-json stdin.
+  - **Documented:** the [Agent SDK docs](https://code.claude.com/docs/en/agent-sdk/typescript)
+    say a client may drive the CLI's control protocol directly with the
+    `interrupt` control request. They also document the `control_request`
+    envelope.
+  - **Measured, not documented:** the docs don't give the request body. It was
+    measured on 2026-10-15 on the owner's Claude Code with
+    `npm run probe:claude-interrupt` (after `npm run build`):
+    - the request was accepted;
+    - the turn ended 11 ms later with an `error_during_execution` result
+      (`terminal_reason: "aborted_streaming"`, `is_error: true`), which the
+      driver reports as `stopReason: "cancelled"`, not an error;
+    - the process stayed alive, and the next prompt ran normally.
+  - An aborted result the driver did not ask for stays an error. Re-run the
+    probe when the CLI changes.
+  - **`cancel_queued` is not set.** Measured without it, a message queued on
+    stdin at the moment of the interrupt still ran. Through ACP there is never
+    such a message, because a session runs one turn at a time. The flag's
+    effect on this CLI hasn't been measured.
+
+Once a client has cancelled, the prompt is answered `cancelled` even if the turn
+finished or failed in the race with the interrupt, as ACP requires. If the
+interrupt itself is refused, the agent is stopped instead, so Stop always stops.
+A driver an embedder writes without `cancel()` gets that same stop.
+A cancel with no turn in flight does nothing. Closing the connection still stops
+every agent.
+
 ## Driver capabilities
 
 When the embedder identifies the selected driver, `initialize` declares its
 measured behavior in `_meta` under
-`particle.academy/driver_capabilities`. The object has exactly
-`permissionRequests` and `transcriptReplay`. If the key is absent, capabilities
+`particle.academy/driver_capabilities`. The object carries
+`permissionRequests`, `transcriptReplay`, `mcpCapabilities`, `promptBlocks` and
+`cancel` (whether `session/cancel` keeps the session; label Stop from it). If the key is absent, capabilities
 were not declared; absence does not mean `false`. Claude reports
 `permissionRequests: false` today, and that is expected to change when its
 permission bridge lands. Read this declaration at runtime rather than caching
@@ -480,7 +522,9 @@ npm run build
 `npm run test:live` opts into real Claude and Codex children and uses the
 authenticated CLI subscriptions. The Codex case checks for the home directory
 at `CODEX_HOME` or `~/.codex`; if it is missing, Vitest reports a skip naming
-the path. It does not inspect a credential filename.
+the path. It does not inspect a credential filename. It includes a live Codex
+turn cancel: `turn/interrupt` accepted, the turn's raw status `interrupted`, the
+app-server neither closed nor exited, and the next prompt reaching `end_turn`.
 
 ## License
 
