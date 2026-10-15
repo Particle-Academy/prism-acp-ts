@@ -147,6 +147,22 @@ export const META_CLI_SESSION_ID = metaKey('cli_session_id');
 export const META_MODEL = metaKey('model');
 
 /**
+ * Where one entry of `available_commands_update` comes from: `'command'` (a slash command) or `'skill'`. It rides on
+ * each `AvailableCommand`'s own `_meta`. Claude Code lists both on its `system`/`init` frame (`slash_commands`, `skills`);
+ * a client runs either by sending `/<name>` as the prompt.
+ */
+export const META_COMMAND_SOURCE = metaKey('command_source');
+
+/**
+ * The plugins the agent loaded, on the `available_commands_update` from Claude's `init`:
+ * `{ name, source?, version? }[]`. The plugin's local path is never sent.
+ */
+export const META_PLUGINS = metaKey('plugins');
+
+/** The subagents the agent can delegate to, on the same update: the names from Claude's `init` (`agents`). */
+export const META_SUBAGENTS = metaKey('subagents');
+
+/**
  * The token split behind a `usage_update`, with its SCOPE (issue #3): Claude's figures cover the TURN the result frame
  * closed; Codex's are the THREAD's running totals. Fields a provider did not send are `null`, never zero.
  *

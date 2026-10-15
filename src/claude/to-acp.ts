@@ -30,8 +30,11 @@
 import {
   META_BACKGROUND_TASKS,
   META_CLI_SESSION_ID,
+  META_COMMAND_SOURCE,
   META_MODEL,
   META_PERMISSION_DENIED,
+  META_PLUGINS,
+  META_SUBAGENTS,
   META_RATE_LIMIT,
   META_TASK,
   META_THINKING_SIGNATURE,
@@ -368,11 +371,14 @@ export class ClaudeToAcp {
 
         // The model in use, when the CLI names it (measured: `--model haiku` -> `model: 'claude-haiku-5-5'`).
         const model = asString(input.model);
+        const commands = commandsFromInit(input);
         return [
           withMeta(
             { sessionUpdate: 'notice', notice: { level: 'debug', message: 'session started' } },
             { [META_CLI_SESSION_ID]: cliSessionId, ...(model === undefined || model.length === 0 ? {} : { [META_MODEL]: model }) },
           ),
+          // After the notice, so the resume id stays the first thing a client learns.
+          ...(commands === undefined ? [] : [commands]),
         ];
       }
 
@@ -640,6 +646,59 @@ function copyFields(source: Record<string, unknown>, specs: readonly FieldSpec[]
   }
   if (sanitized) out.providerTextSanitized = true;
   return out;
+}
+
+/**
+ * The `available_commands_update` an `init` frame implies: its `slash_commands` (sent with a leading `/`, offered
+ * without one, as ACP names are) then its `skills`, each once, with the plugins and subagents in `_meta`.
+ *
+ * `terminal_slash_commands` are left out, and so is any skill that shares a name with one: they act on the interactive
+ * TUI, and which of the two a shared name runs in print mode is not documented. An `init` that
+ * carries neither list yields `undefined`: "never told" is not "offers none". Empty lists yield `[]`.
+ */
+function commandsFromInit(input: Record<string, unknown>): AcpUpdate | undefined {
+  const slash = Array.isArray(input.slash_commands) ? input.slash_commands : undefined;
+  const skills = Array.isArray(input.skills) ? input.skills : undefined;
+  if (slash === undefined && skills === undefined) return undefined;
+
+  // A name the TUI keeps for itself (`terminal_slash_commands`) is not offered even when a skill shares it: Claude's
+  // own capture lists both a `doctor` skill and the terminal-only `/doctor`, and which one `/doctor` runs in print mode is
+  // not documented. Offering it would be a guess.
+  const terminalOnly = new Set(
+    (Array.isArray(input.terminal_slash_commands) ? input.terminal_slash_commands : [])
+      .map((c) => nonEmptyString(c)?.replace(/^\//, ''))
+      .filter((c): c is string => c !== undefined),
+  );
+  const seen = new Set<string>();
+  const availableCommands: Array<Record<string, unknown>> = [];
+  const add = (raw: unknown, source: 'command' | 'skill') => {
+    const name = nonEmptyString(raw)?.replace(/^\//, '');
+    if (name === undefined || name.length === 0 || seen.has(name) || terminalOnly.has(name)) return;
+    seen.add(name);
+    availableCommands.push({
+      name,
+      description: source === 'skill' ? 'Skill' : 'Command',
+      _meta: { [META_COMMAND_SOURCE]: source },
+    });
+  };
+  for (const c of slash ?? []) add(c, 'command');
+  for (const s of skills ?? []) add(s, 'skill');
+
+  const plugins = (Array.isArray(input.plugins) ? input.plugins : []).filter(isObject).flatMap((p) => {
+    const name = nonEmptyString(p.name);
+    if (name === undefined) return [];
+    const source = nonEmptyString(p.source);
+    const version = nonEmptyString(p.version);
+    return [{ name, ...(source === undefined ? {} : { source }), ...(version === undefined ? {} : { version }) }];
+  });
+  const subagents = (Array.isArray(input.agents) ? input.agents : []).filter(
+    (a): a is string => typeof a === 'string' && a.length > 0,
+  );
+
+  return withMeta(
+    { sessionUpdate: 'available_commands_update', availableCommands },
+    { [META_PLUGINS]: plugins, [META_SUBAGENTS]: subagents },
+  );
 }
 
 function nonEmptyString(value: unknown): string | undefined {
