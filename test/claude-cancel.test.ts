@@ -6,7 +6,7 @@
  * The stand-in replays what the owner's real Claude Code did when measured on 2026-10-15
  * (scripts/probe-claude-interrupt.mjs): the `{ type: 'control_request', request_id, request: { subtype: 'interrupt' } }`
  * request was accepted, the interrupted turn ended with the result frame in
- * fixtures/claude-interrupted-result.ndjson (error_during_execution / aborted_streaming, is_error true) 11 ms later,
+ * fixtures/claude-interrupted-result.json (error_during_execution / aborted_streaming, is_error true) 11 ms later,
  * the process stayed alive, and the next prompt ran to end_turn.
  *
  * POSIX only: the stand-in is a shebang script, which is how the driver can run it with claudeArgs() appended. CI and
@@ -23,7 +23,7 @@ import { serve } from '../src/acp/stdio.js';
 import { encodeLine } from '../src/ndjson.js';
 
 const MEASURED_RESULT = readFileSync(
-  fileURLToPath(new URL('./fixtures/claude-interrupted-result.ndjson', import.meta.url)),
+  fileURLToPath(new URL('./fixtures/claude-interrupted-result.json', import.meta.url)),
   'utf8',
 ).trim();
 
