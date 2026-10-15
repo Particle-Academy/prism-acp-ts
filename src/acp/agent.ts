@@ -40,6 +40,16 @@ export interface AgentDriver {
    * {@link PromptRefused} for a block it cannot send, and the client is told which.
    */
   prompt(content: PromptContent): void;
+  /**
+   * Interrupt the turn in flight, leaving the agent process and its session alive (issue #16). The turn still ends
+   * through `onTurnEnd` -- with `stopReason: 'cancelled'` once the agent confirms -- and the next prompt runs as
+   * normal. Resolves once the agent has accepted the interrupt; rejects if it refused. With no turn running it is a
+   * no-op.
+   *
+   * Optional, and absent on a driver whose agent offers no documented way to interrupt a turn: there,
+   * `session/cancel` stops the agent instead. Declare which in {@link DriverCapabilities.cancel}.
+   */
+  cancel?(): Promise<void>;
   endInput(): void;
   kill(signal?: NodeJS.Signals): void;
   readonly cliSessionId: string | null;
@@ -112,6 +122,11 @@ export interface DriverCapabilities {
   readonly mcpCapabilities?: McpCapabilities;
   /** The prompt block kinds the driver sends. Absent means text only. */
   readonly promptBlocks?: readonly PromptBlockKind[];
+  /**
+   * Whether `session/cancel` ends only the TURN, keeping the agent and its session (true), or has to stop the agent to
+   * stop the turn (false). A client labels Stop from this. Absent means the embedder did not say.
+   */
+  readonly cancel?: boolean;
 }
 
 interface Session {
@@ -369,7 +384,9 @@ export class AcpAgent {
         onTurnEnd: (outcome) => {
           const turn = session.turn;
           session.turn = null;
-          turn?.settle(outcome);
+          // ACP: once the client has cancelled, the prompt is answered `cancelled` -- including when the turn
+          // finished or failed in the race with the interrupt. The agent's own reason is kept in `raw`.
+          turn?.settle(turn.cancelled ? { stopReason: 'cancelled', isError: false, raw: outcome.raw } : outcome);
         },
         onStderr: (line) => this.#options.onStderr?.(id, line),
         onProtocolError: (problem) => this.#options.onProtocolError?.(id, problem),
@@ -477,16 +494,33 @@ export class AcpAgent {
     const session = this.#sessions.get(sessionId);
     if (session === undefined) return;
 
-    if (session.turn !== null) {
-      session.turn.cancelled = true;
-      const turn = session.turn;
-      session.turn = null;
-      // `cancelled` is a real ACP stop reason, so a cancelled turn RESOLVES
-      // rather than erroring. The client asked for this outcome; it is not a
-      // failure.
-      turn.settle({ stopReason: 'cancelled', isError: false, raw: 'cancelled' });
-    }
+    // Nothing in flight, nothing to stop. Cancel ends a TURN; it used to kill an idle session's agent as well.
+    const turn = session.turn;
+    if (turn === null || session.exited) return;
+    turn.cancelled = true;
 
+    const cancel = session.driver.cancel?.bind(session.driver);
+    if (cancel === undefined) {
+      this.#stopForCancel(session, turn);
+      return;
+    }
+    // The driver interrupts the turn and the agent ends it; onTurnEnd answers the prompt `cancelled`. The process and
+    // the session stay, so the next prompt runs as normal.
+    cancel().catch((cause: unknown) => {
+      // An interrupt the agent refused must still stop what the client asked to stop: fall back to stopping the
+      // agent, as a driver without cancel does.
+      this.#options.onProtocolError?.(session.id, `turn cancel failed, stopping the agent: ${messageOf(cause)}`);
+      if (session.turn === turn) this.#stopForCancel(session, turn);
+    });
+  }
+
+  /** Stop a turn by stopping its agent: the only cancel a driver without `cancel()` has. */
+  #stopForCancel(session: Session, turn: NonNullable<Session['turn']>): void {
+    session.turn = null;
+    // `cancelled` is a real ACP stop reason, so a cancelled turn RESOLVES
+    // rather than erroring. The client asked for this outcome; it is not a
+    // failure.
+    turn.settle({ stopReason: 'cancelled', isError: false, raw: 'cancelled' });
     session.driver.kill();
     session.exited = true;
   }

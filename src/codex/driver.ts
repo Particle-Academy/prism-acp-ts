@@ -91,6 +91,8 @@ export const CODEX_DRIVER_CAPABILITIES = {
   mcpCapabilities: { http: true, sse: false },
   // Text, images and text files, as App Server input items (see #inputItems). A binary file has no documented item.
   promptBlocks: ['text', 'image', 'resource-text'],
+  // session/cancel interrupts the turn with app-server `turn/interrupt` and keeps the app-server and thread (#16).
+  cancel: true,
 } as const satisfies DriverCapabilities;
 
 /** The file extension of each image type a prompt may carry, for the localImage file Codex reads. */
@@ -162,6 +164,8 @@ export class CodexDriver implements AgentDriver {
   readonly #mcpConfig: Record<string, unknown> | undefined;
   #sessionUpdateSent = false;
   #threadId: string | null = null;
+  /** A cancel that arrived before turn/start named its turn; sent the moment the id is known. */
+  #pendingCancel: { promise: Promise<void>; resolve: () => void; reject: (cause: Error) => void } | null = null;
 
   withheldCredentials: readonly string[] = [];
   cliSessionId: string | null = null;
@@ -260,6 +264,61 @@ export class CodexDriver implements AgentDriver {
       rmSync(dir, { recursive: true, force: true });
     } catch {
       this.#events.onProtocolError?.('failed to remove the temporary Codex prompt-image directory');
+    }
+  }
+
+  /**
+   * Interrupt the turn in flight and keep the app-server and its thread (issue #16).
+   *
+   * The documented request is `turn/interrupt` with `{ threadId, turnId }`: "request cancellation of an in-flight turn;
+   * success is {} and the turn ends with status: \"interrupted\"" (https://learn.chatgpt.com/docs/app-server, the API
+   * overview and "Interrupt a turn"). This resolves on that `{}`; the turn itself ends when `turn/completed` arrives,
+   * which already maps `interrupted` to a `cancelled` turn end. Rejects, naming the request, if Codex refuses it.
+   *
+   * - No turn running: nothing is sent.
+   * - The prompt is still queued behind startup: it never reaches Codex, and the turn ends cancelled here.
+   * - turn/start has not yet named the turn: the interrupt is sent as soon as it does.
+   */
+  cancel(): Promise<void> {
+    if (this.#closed || !this.#turnInFlight) return Promise.resolve();
+    if (this.#queuedPrompt !== null) {
+      this.#queuedPrompt = null;
+      this.#finishTurn({ stopReason: 'cancelled', isError: false, raw: 'cancelled before start' });
+      return Promise.resolve();
+    }
+    if (this.#activeTurn !== null) return this.#interrupt(this.#activeTurn);
+    // A second cancel while the first still waits for the turn id joins it rather than sending twice.
+    if (this.#pendingCancel !== null) return this.#pendingCancel.promise;
+    let settle!: { resolve: () => void; reject: (cause: Error) => void };
+    const promise = new Promise<void>((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    this.#pendingCancel = { promise, ...settle };
+    return promise;
+  }
+
+  /** The turn now has an id: send a cancel that was waiting for it. */
+  #sendPendingCancel(turnId: string): void {
+    const pending = this.#pendingCancel;
+    if (pending === null) return;
+    this.#pendingCancel = null;
+    this.#interrupt(turnId).then(pending.resolve, pending.reject);
+  }
+
+  /** The turn ended (or the app-server went away) before a waiting cancel could be sent: nothing left to interrupt. */
+  #releasePendingCancel(): void {
+    const pending = this.#pendingCancel;
+    this.#pendingCancel = null;
+    pending?.resolve();
+  }
+
+  async #interrupt(turnId: string): Promise<void> {
+    const threadId = this.#threadId;
+    if (threadId === null) return;
+    try {
+      await this.#requirePeer().request('turn/interrupt', { threadId, turnId });
+    } catch (cause) {
+      throw new Error(safeError('Codex turn/interrupt failed', cause));
     }
   }
 
@@ -456,6 +515,7 @@ export class CodexDriver implements AgentDriver {
         if (id !== undefined && !this.#completedTurns.has(id)) {
           this.#activeTurn = id;
           this.#touchTurnDeadline();
+          this.#sendPendingCancel(id);
         }
       })
       .catch((cause: unknown) => {
@@ -541,6 +601,7 @@ export class CodexDriver implements AgentDriver {
         if (id !== undefined) {
           this.#activeTurn = id;
           this.#turnInFlight = true;
+          this.#sendPendingCancel(id);
         } else this.#recordUnmapped('turn/started omitted turn.id', object);
         return;
       }
@@ -1073,6 +1134,7 @@ export class CodexDriver implements AgentDriver {
     }
     if (!this.#turnInFlight && this.#activeTurn === null) return;
     this.#clearTurnDeadline();
+    this.#releasePendingCancel();
     this.#activeTurn = null;
     this.#turnInFlight = false;
     this.#items.clear();
@@ -1086,6 +1148,7 @@ export class CodexDriver implements AgentDriver {
     if (this.#closed) return;
     this.#closed = true;
     this.#clearTurnDeadline();
+    this.#releasePendingCancel();
     this.#removeImages();
     for (const pending of [...this.#pendingApprovals.values()]) pending.cancel();
     this.#transport?.close(signal);
@@ -1097,6 +1160,7 @@ export class CodexDriver implements AgentDriver {
     if (this.#closed) return;
     this.#closed = true;
     this.#clearTurnDeadline();
+    this.#releasePendingCancel();
     this.#removeImages();
     for (const pending of [...this.#pendingApprovals.values()]) pending.cancel();
     this.#peer?.fail(new Error('Codex app-server exited'));

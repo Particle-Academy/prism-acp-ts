@@ -457,12 +457,40 @@ indicators. Descriptions, summaries and errors have terminal control sequences
 stripped, with `providerTextSanitized: true` when anything was removed; a frame
 with no `task_id` is recorded as unmapped rather than sent.
 
+## Stopping a turn: `session/cancel`
+
+`session/cancel` ends the **turn**, not the session, wherever the driver can
+interrupt one. A driver that can implements `cancel()`, and declares
+`cancel: true` in its capabilities:
+
+- **Codex** sends app-server `turn/interrupt` with `{ threadId, turnId }`. The
+  [documented](https://learn.chatgpt.com/docs/app-server) success is `{}`, and
+  the turn then completes with status `interrupted`, which ends the prompt with
+  `stopReason: "cancelled"`. The app-server and its thread stay up, and the
+  next `session/prompt` runs as a new turn. A cancel that arrives before
+  `turn/start` has named the turn is sent as soon as it does; a prompt still
+  queued behind startup is dropped and never reaches Codex.
+- **Claude** declares `cancel: false` and has no `cancel()`. Its docs name an
+  `interrupt` control request that a client can send directly, and document the
+  `control_request` envelope, but not the request body that names the
+  interrupt. This package does not build on undocumented CLI behaviour, so for
+  Claude `session/cancel` still stops the CLI. `npm run probe:claude-interrupt`
+  (after `npm run build`) measures what the real CLI does with the body the
+  Agent SDK is understood to send, and prints a report.
+
+Once a client has cancelled, the prompt is answered `cancelled` even if the turn
+finished or failed in the race with the interrupt, as ACP requires. If the
+interrupt itself is refused, the agent is stopped instead, so Stop always stops.
+A cancel with no turn in flight does nothing. Closing the connection still stops
+every agent.
+
 ## Driver capabilities
 
 When the embedder identifies the selected driver, `initialize` declares its
 measured behavior in `_meta` under
-`particle.academy/driver_capabilities`. The object has exactly
-`permissionRequests` and `transcriptReplay`. If the key is absent, capabilities
+`particle.academy/driver_capabilities`. The object carries
+`permissionRequests`, `transcriptReplay`, `mcpCapabilities`, `promptBlocks` and
+`cancel` (whether `session/cancel` keeps the session; label Stop from it). If the key is absent, capabilities
 were not declared; absence does not mean `false`. Claude reports
 `permissionRequests: false` today, and that is expected to change when its
 permission bridge lands. Read this declaration at runtime rather than caching
@@ -480,7 +508,9 @@ npm run build
 `npm run test:live` opts into real Claude and Codex children and uses the
 authenticated CLI subscriptions. The Codex case checks for the home directory
 at `CODEX_HOME` or `~/.codex`; if it is missing, Vitest reports a skip naming
-the path. It does not inspect a credential filename.
+the path. It does not inspect a credential filename. It includes a live Codex
+turn cancel: `turn/interrupt` accepted, the turn's raw status `interrupted`, the
+app-server neither closed nor exited, and the next prompt reaching `end_turn`.
 
 ## License
 

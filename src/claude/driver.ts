@@ -39,6 +39,12 @@ export const CLAUDE_DRIVER_CAPABILITIES = {
   // Text, images and text files: see {@link promptLine} for the documented shape of each. A binary file has no
   // documented stream-json block, so it is refused rather than sent in an undocumented one.
   promptBlocks: ['text', 'image', 'resource-text'],
+  // No turn cancel (issue #16), so session/cancel stops the CLI. The Agent SDK docs name an `interrupt` control request
+  // a client may send directly and document its `{ type: 'control_request', request_id, request }` envelope
+  // (https://code.claude.com/docs/en/agent-sdk/typescript, SDKControlInterruptResponse and SDKControlInitializeResponse),
+  // but not the `request` body that names the interrupt. Building on an undocumented body is what this package does
+  // not do; the shape to verify is measured by scripts/probe-claude-interrupt.mjs.
+  cancel: false,
 } as const satisfies DriverCapabilities;
 
 /** ACP permission modes map onto the CLI's own `--permission-mode` values. */

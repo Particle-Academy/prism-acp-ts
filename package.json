@@ -25,7 +25,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:live": "PRISM_ACP_LIVE=1 vitest run test/live-env.test.ts test/live-codex.test.ts"
+    "test:live": "PRISM_ACP_LIVE=1 vitest run test/live-env.test.ts test/live-codex.test.ts test/live-cancel.test.ts",
+    "probe:claude-interrupt": "node scripts/probe-claude-interrupt.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
