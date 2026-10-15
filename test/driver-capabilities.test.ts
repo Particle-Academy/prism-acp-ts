@@ -2,7 +2,7 @@ import { PassThrough } from 'node:stream';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { CLAUDE_DRIVER_CAPABILITIES, updatesFromFrames } from '../src/claude/driver.js';
+import { CLAUDE_DRIVER_CAPABILITIES, ClaudeDriver, updatesFromFrames } from '../src/claude/driver.js';
 import { ClaudeToAcp } from '../src/claude/to-acp.js';
 import type { DriverFactory } from '../src/acp/agent.js';
 import { serve } from '../src/acp/stdio.js';
@@ -77,5 +77,19 @@ describe('Claude driver capability declaration', () => {
     expect(updates.filter((update) => update.sessionUpdate === 'tool_call_update')).toHaveLength(1);
     input.destroy();
     await served.closed;
+  });
+});
+
+describe('Claude turn cancel is declared unsupported (issue #16)', () => {
+  // The Agent SDK docs name an `interrupt` control request that a client may drive directly, and document the
+  // `{ type: "control_request", request_id, request }` envelope -- but not the body that names the interrupt. The
+  // driver does not build on that undocumented body, so it declares cancel false and offers no cancel(): a client
+  // reads this and labels Stop as ending the agent, which is what session/cancel then does for it.
+  it('reports cancel: false', () => {
+    expect(CLAUDE_DRIVER_CAPABILITIES.cancel).toBe(false);
+  });
+
+  it('offers no cancel() that could be mistaken for one that works', () => {
+    expect('cancel' in ClaudeDriver.prototype).toBe(false);
   });
 });

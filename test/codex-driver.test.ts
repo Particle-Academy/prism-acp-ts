@@ -14,6 +14,10 @@ import { readCodexRateLimit } from '../src/codex/rate-limit.js';
 
 class FakeTransport implements CodexTransport {
   readonly sent: Record<string, unknown>[] = [];
+  /** How many times the driver closed (killed) the app-server. A turn cancel must leave this at 0. */
+  closes = 0;
+  /** When set, turn/interrupt is answered with this JSON-RPC error instead of the documented `{}`. */
+  interruptError: { code: number; message: string } | null = null;
   #handlers: CodexTransportHandlers;
   #turnPage = 0;
   #historyItems: readonly Record<string, unknown>[];
@@ -72,11 +76,20 @@ class FakeTransport implements CodexTransport {
       case 'turn/start':
         result = { turn: { id: 'turn-live' } };
         break;
+      case 'turn/interrupt':
+        if (this.interruptError !== null) {
+          const error = this.interruptError;
+          queueMicrotask(() => this.#handlers.onFrame({ jsonrpc: '2.0', id: frame.id, error }));
+          return;
+        }
+        break;
     }
     queueMicrotask(() => this.#handlers.onFrame({ jsonrpc: '2.0', id: frame.id, result }));
   }
 
-  close(): void {}
+  close(): void {
+    this.closes += 1;
+  }
 
   frame(value: unknown): void {
     this.#handlers.onFrame(value);
@@ -704,5 +717,177 @@ describe('CodexDriver', () => {
       result: { decision: 'cancel' },
     });
     expect(agent.sessionIds).toEqual([]);
+  });
+});
+
+/**
+ * Turn cancel (issue #16). The documented request is app-server `turn/interrupt` with `{ threadId, turnId }`; its
+ * success is `{}` and "the turn finishes with status: \"interrupted\"" (https://learn.chatgpt.com/docs/app-server,
+ * "Interrupt a turn"). The process and the thread must survive it: Stop ends a turn, not a session.
+ */
+describe('CodexDriver turn cancel', () => {
+  const interrupts = (transport: FakeTransport) => transport.sent.filter((frame) => frame.method === 'turn/interrupt');
+  const turnStarts = (transport: FakeTransport) => transport.sent.filter((frame) => frame.method === 'turn/start');
+
+  it('declares cancel, so a client can label Stop as ending the turn', () => {
+    expect(CODEX_DRIVER_CAPABILITIES.cancel).toBe(true);
+  });
+
+  it('sends the documented turn/interrupt frame, ends the turn cancelled, and keeps the app-server alive', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await settle();
+
+    await state.driver.cancel();
+
+    expect(interrupts(state.transport)).toEqual([
+      {
+        jsonrpc: '2.0',
+        id: expect.any(Number),
+        method: 'turn/interrupt',
+        params: { threadId: 'thread-captured', turnId: 'turn-live' },
+      },
+    ]);
+    // The interrupt is a REQUEST to stop; the turn ends when Codex says it did.
+    expect(state.turnEnds).toEqual([]);
+    state.transport.frame({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: { turn: { id: 'turn-live', status: 'interrupted' } },
+    });
+    expect(state.turnEnds).toEqual([{ stopReason: 'cancelled', isError: false, raw: 'interrupted' }]);
+    expect(state.transport.closes).toBe(0);
+
+    // The session is still promptable: the next prompt starts a NEW turn on the same thread.
+    state.driver.prompt('again');
+    await settle();
+    expect(turnStarts(state.transport)).toHaveLength(2);
+    expect(turnStarts(state.transport)[1]?.params).toMatchObject({ threadId: 'thread-captured' });
+    expect(state.transport.closes).toBe(0);
+    state.driver.kill();
+  });
+
+  it('waits for the turn id when cancel arrives before turn/start has answered', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    // turn/start has been sent but not answered: there is no turn id to interrupt yet.
+    const cancelled = state.driver.cancel();
+    expect(interrupts(state.transport)).toEqual([]);
+    await settle();
+    await cancelled;
+
+    expect(interrupts(state.transport)).toHaveLength(1);
+    expect(interrupts(state.transport)[0]?.params).toEqual({ threadId: 'thread-captured', turnId: 'turn-live' });
+    expect(state.transport.closes).toBe(0);
+    state.driver.kill();
+  });
+
+  it('ends a prompt still queued behind startup as cancelled without ever starting it', async () => {
+    const state = setup();
+    state.driver.start();
+    // Before ready: the prompt is queued, nothing has reached Codex.
+    state.driver.prompt('go');
+    await state.driver.cancel();
+    await state.driver.ready;
+    await settle();
+
+    expect(turnStarts(state.transport)).toEqual([]);
+    expect(interrupts(state.transport)).toEqual([]);
+    expect(state.turnEnds).toEqual([{ stopReason: 'cancelled', isError: false, raw: 'cancelled before start' }]);
+    expect(state.transport.closes).toBe(0);
+
+    state.driver.prompt('next');
+    await settle();
+    expect(turnStarts(state.transport)).toHaveLength(1);
+    state.driver.kill();
+  });
+
+  it('is a no-op with no turn running: nothing on the wire, nothing killed', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    const before = state.transport.sent.length;
+
+    await state.driver.cancel();
+
+    expect(state.transport.sent.length).toBe(before);
+    expect(state.turnEnds).toEqual([]);
+    expect(state.transport.closes).toBe(0);
+    state.driver.kill();
+  });
+
+  it('rejects when Codex refuses the interrupt, and the turn is left to finish on its own terms', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await settle();
+    state.transport.interruptError = { code: -32600, message: 'no active turn' };
+
+    await expect(state.driver.cancel()).rejects.toThrow(/turn\/interrupt/);
+    expect(state.turnEnds).toEqual([]);
+    expect(state.transport.closes).toBe(0);
+    state.driver.kill();
+  });
+
+  it('session/cancel over the ACP wire interrupts the turn instead of killing the app-server', async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const outputFrames: Record<string, unknown>[] = [];
+    let outputText = '';
+    output.on('data', (chunk: Buffer) => {
+      outputText += chunk.toString();
+      const lines = outputText.split('\n');
+      outputText = lines.pop() ?? '';
+      for (const line of lines) if (line.length > 0) outputFrames.push(JSON.parse(line) as Record<string, unknown>);
+    });
+    let transport!: FakeTransport;
+    const factory: CodexTransportFactory = (_options, handlers) => (transport = new FakeTransport(handlers));
+    const { agent } = serve({
+      input,
+      output,
+      driverCapabilities: CODEX_DRIVER_CAPABILITIES,
+      driverFactory: (options, events) => new CodexDriver({ ...options, parentEnv: {} }, events, factory),
+    });
+    input.write(encodeLine({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } }));
+    input.write(encodeLine({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/work' } }));
+    await settle();
+    await settle();
+    const sessionId = (outputFrames.find((frame) => frame.id === 2)?.result as Record<string, unknown>).sessionId;
+
+    input.write(encodeLine({
+      jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'go' }] },
+    }));
+    await settle();
+    input.write(encodeLine({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } }));
+    await settle();
+
+    expect(interrupts(transport)).toHaveLength(1);
+    expect(transport.closes).toBe(0);
+    transport.frame({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { id: 'turn-live', status: 'interrupted' } } });
+    await settle();
+    expect(outputFrames.find((frame) => frame.id === 3)?.result).toEqual({ stopReason: 'cancelled' });
+
+    // Same session, same process, a new turn.
+    input.write(encodeLine({
+      jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'again' }] },
+    }));
+    await settle();
+    expect(turnStarts(transport)).toHaveLength(2);
+    transport.frame({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { id: 'turn-live-2', status: 'completed' } } });
+    await settle();
+    expect(outputFrames.find((frame) => frame.id === 4)?.result).toEqual({ stopReason: 'end_turn' });
+    expect(transport.closes).toBe(0);
+    expect(agent.sessionIds).toEqual([sessionId]);
+
+    // Control: closing the connection still kills the app-server.
+    const inputClosed = new Promise<void>((resolve) => input.once('close', () => resolve()));
+    input.destroy();
+    await inputClosed;
+    expect(transport.closes).toBe(1);
   });
 });
