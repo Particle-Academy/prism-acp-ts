@@ -16,9 +16,13 @@
  *    coincidence waiting to end -- so the `\r` is removed before parsing and
  *    the behaviour is the same everywhere by construction.
  *
- * 2. `MAX_LINE_BYTES` is 1_000_000, the same number in every port. A cap that
+ * 2. `MAX_LINE_BYTES` is 64_000_000, the same number in every port. A cap that
  *    differs per language means one implementation dies where another succeeds,
- *    on the same stream, which is worse than either limit.
+ *    on the same stream, which is worse than either limit. The cap bounds a
+ *    RUNAWAY line (a producer that never writes a newline); it is not a size
+ *    budget for ordinary frames. It was 1_000_000 until a live Claude session
+ *    sent a 1,036,723-byte frame -- a tool result carrying an image the agent had
+ *    just read -- and the frame was dropped (Genie 2, 2026-10-14).
  *
  * 3. An oversized or unparseable line reports its SIZE, never its CONTENT. A
  *    line on this transport can carry a prompt, a file, or a credential, and a
@@ -30,7 +34,7 @@
  */
 
 /** The same number in every port. See decision 2 above. */
-export const MAX_LINE_BYTES = 1_000_000;
+export const MAX_LINE_BYTES = 64_000_000;
 
 export type Frame =
   | { readonly ok: true; readonly value: unknown }

@@ -20,7 +20,8 @@ import { claudeMcpConfig, readMcpServers, type McpServer } from '../mcp.js';
 import { assertModel } from '../meta.js';
 import { isValidCliSessionId } from '../session-id.js';
 import { randomBytes } from 'node:crypto';
-import type { PermissionOutcome, PermissionRequest } from '../acp/agent.js';
+import type { PermissionOutcome, PermissionRequest, ProblemDetail } from '../acp/agent.js';
+export type { ProblemDetail } from '../acp/agent.js';
 import { ApprovalServer, HOOK_SCRIPT, approvalSettings, permissionRequestFor } from './approvals.js';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
@@ -98,7 +99,7 @@ export interface ClaudeDriverEvents {
    */
   readonly onStderr?: (line: string) => void;
   /** A frame that arrived but could not be framed or parsed. */
-  readonly onProtocolError?: (problem: string) => void;
+  readonly onProtocolError?: (problem: string, detail?: ProblemDetail) => void;
   readonly onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
   /**
    * One turn finished.
@@ -480,13 +481,13 @@ export class ClaudeDriver {
     this.#approvalDirectory = null;
     for (const file of files) {
       try { unlinkSync(file); } catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') this.#events.onProtocolError?.('failed to remove a temporary Claude permission-prompt file');
+        if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') this.#events.onProtocolError?.('failed to remove a temporary Claude permission-prompt file', { recoverable: true });
       }
     }
     if (directory !== null) {
       // The posix socket file lives here too; the server's close() removes it.
       try { rmdirSync(directory); } catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') this.#events.onProtocolError?.('failed to remove the temporary Claude permission-prompt directory');
+        if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') this.#events.onProtocolError?.('failed to remove the temporary Claude permission-prompt directory', { recoverable: true });
       }
     }
   }
@@ -501,7 +502,7 @@ export class ClaudeDriver {
       try { remove(path); }
       catch (cause) {
         if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') {
-          this.#events.onProtocolError?.('failed to remove temporary Claude MCP configuration');
+          this.#events.onProtocolError?.('failed to remove temporary Claude MCP configuration', { recoverable: true });
         }
       }
     }
@@ -537,7 +538,8 @@ export class ClaudeDriver {
     }
 
     const { updates, problems } = updatesFromFrames(acceptedFrames, this.#mapper);
-    for (const problem of problems) this.#events.onProtocolError?.(problem);
+    // A frame that could not be read is ONE lost frame; the stream after it is mapped as normal.
+    for (const problem of problems) this.#events.onProtocolError?.(problem, { recoverable: true });
     for (const update of updates) this.#events.onUpdate?.(update);
 
     // Fired AFTER the updates, so a caller resolving a turn on this signal has

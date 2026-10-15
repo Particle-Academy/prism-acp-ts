@@ -4,7 +4,7 @@ import { NdjsonFramer, encodeLine } from '../ndjson.js';
 export interface CodexTransportHandlers {
   readonly onFrame: (frame: unknown) => void;
   readonly onStderr: (line: string) => void;
-  readonly onProblem: (problem: string) => void;
+  readonly onProblem: (problem: string, detail?: import('../acp/agent.js').ProblemDetail) => void;
   readonly onExit: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
 
@@ -53,7 +53,7 @@ export class StdioCodexTransport implements CodexTransport {
     child.stdout?.on('data', (chunk: Buffer) => {
       for (const frame of this.#framer.push(chunk)) {
         if (frame.ok) this.#handlers.onFrame(frame.value);
-        else this.#handlers.onProblem(frame.error.message);
+        else this.#handlers.onProblem(frame.error.message, { recoverable: true });
       }
     });
     child.stderr?.setEncoding('utf8');
@@ -63,7 +63,7 @@ export class StdioCodexTransport implements CodexTransport {
       this.#closed = true;
       for (const frame of this.#framer.end()) {
         if (frame.ok) this.#handlers.onFrame(frame.value);
-        else this.#handlers.onProblem(frame.error.message);
+        else this.#handlers.onProblem(frame.error.message, { recoverable: true });
       }
       this.#handlers.onExit(code, signal);
     });

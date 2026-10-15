@@ -46,6 +46,15 @@ export interface AgentDriver {
   readonly withheldCredentials: readonly string[];
 }
 
+/**
+ * What a problem report means for the session. `recoverable: true` = ONE thing was lost (a frame that could not be
+ * read, a temporary file that could not be removed) and the session goes on; a client should show it, not call the
+ * session dead. Absent = no such claim: the problem may be fatal (a failed spawn, a refused handshake).
+ */
+export interface ProblemDetail {
+  readonly recoverable: boolean;
+}
+
 export interface DriverEvents {
   readonly onUpdate?: (update: AcpUpdate) => void;
   /** Ask the ACP client to decide a Codex permission request. */
@@ -53,7 +62,7 @@ export interface DriverEvents {
     request: PermissionRequest,
   ) => Promise<PermissionOutcome>;
   readonly onTurnEnd?: (outcome: TurnOutcome) => void;
-  readonly onProtocolError?: (problem: string) => void;
+  readonly onProtocolError?: (problem: string, detail?: ProblemDetail) => void;
   readonly onStderr?: (line: string) => void;
   readonly onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
@@ -102,7 +111,7 @@ export interface AcpAgentOptions {
   /** Generate a session id. Injected so tests can assert on stable ids. */
   readonly newSessionId?: () => string;
   readonly onStderr?: (sessionId: string, line: string) => void;
-  readonly onProtocolError?: (sessionId: string, problem: string) => void;
+  readonly onProtocolError?: (sessionId: string, problem: string, detail?: ProblemDetail) => void;
 }
 
 /** Provider differences clients need to know. */
@@ -372,7 +381,7 @@ export class AcpAgent {
           turn?.settle(outcome);
         },
         onStderr: (line) => this.#options.onStderr?.(id, line),
-        onProtocolError: (problem) => this.#options.onProtocolError?.(id, problem),
+        onProtocolError: (problem, detail) => this.#options.onProtocolError?.(id, problem, detail),
         onExit: (code) => {
           session.exited = true;
           // A turn still in flight when the process dies must be settled, or
