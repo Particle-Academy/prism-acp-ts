@@ -46,8 +46,8 @@ export interface AgentDriver {
    * normal. Resolves once the agent has accepted the interrupt; rejects if it refused. With no turn running it is a
    * no-op.
    *
-   * Optional, and absent on a driver whose agent offers no documented way to interrupt a turn: there,
-   * `session/cancel` stops the agent instead. Declare which in {@link DriverCapabilities.cancel}.
+   * Optional, and absent on a driver whose agent has no known way to interrupt a turn: there, `session/cancel` stops
+   * the agent instead. Declare which in {@link DriverCapabilities.cancel}. Both shipped drivers implement it.
    */
   cancel?(): Promise<void>;
   endInput(): void;

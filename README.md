@@ -470,17 +470,31 @@ interrupt one. A driver that can implements `cancel()`, and declares
   next `session/prompt` runs as a new turn. A cancel that arrives before
   `turn/start` has named the turn is sent as soon as it does; a prompt still
   queued behind startup is dropped and never reaches Codex.
-- **Claude** declares `cancel: false` and has no `cancel()`. Its docs name an
-  `interrupt` control request that a client can send directly, and document the
-  `control_request` envelope, but not the request body that names the
-  interrupt. This package does not build on undocumented CLI behaviour, so for
-  Claude `session/cancel` still stops the CLI. `npm run probe:claude-interrupt`
-  (after `npm run build`) measures what the real CLI does with the body the
-  Agent SDK is understood to send, and prints a report.
+- **Claude** writes `{ "type": "control_request", "request_id": …,
+  "request": { "subtype": "interrupt" } }` to the CLI's stream-json stdin.
+  - **Documented:** the [Agent SDK docs](https://code.claude.com/docs/en/agent-sdk/typescript)
+    say a client may drive the CLI's control protocol directly with the
+    `interrupt` control request. They also document the `control_request`
+    envelope.
+  - **Measured, not documented:** the docs don't give the request body. It was
+    measured on 2026-10-15 on the owner's Claude Code with
+    `npm run probe:claude-interrupt` (after `npm run build`):
+    - the request was accepted;
+    - the turn ended 11 ms later with an `error_during_execution` result
+      (`terminal_reason: "aborted_streaming"`, `is_error: true`), which the
+      driver reports as `stopReason: "cancelled"`, not an error;
+    - the process stayed alive, and the next prompt ran normally.
+  - An aborted result the driver did not ask for stays an error. Re-run the
+    probe when the CLI changes.
+  - **`cancel_queued` is not set.** Measured without it, a message queued on
+    stdin at the moment of the interrupt still ran. Through ACP there is never
+    such a message, because a session runs one turn at a time. The flag's
+    effect on this CLI hasn't been measured.
 
 Once a client has cancelled, the prompt is answered `cancelled` even if the turn
 finished or failed in the race with the interrupt, as ACP requires. If the
 interrupt itself is refused, the agent is stopped instead, so Stop always stops.
+A driver an embedder writes without `cancel()` gets that same stop.
 A cancel with no turn in flight does nothing. Closing the connection still stops
 every agent.
 

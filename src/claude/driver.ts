@@ -39,12 +39,9 @@ export const CLAUDE_DRIVER_CAPABILITIES = {
   // Text, images and text files: see {@link promptLine} for the documented shape of each. A binary file has no
   // documented stream-json block, so it is refused rather than sent in an undocumented one.
   promptBlocks: ['text', 'image', 'resource-text'],
-  // No turn cancel (issue #16), so session/cancel stops the CLI. The Agent SDK docs name an `interrupt` control request
-  // a client may send directly and document its `{ type: 'control_request', request_id, request }` envelope
-  // (https://code.claude.com/docs/en/agent-sdk/typescript, SDKControlInterruptResponse and SDKControlInitializeResponse),
-  // but not the `request` body that names the interrupt. Building on an undocumented body is what this package does
-  // not do; the shape to verify is measured by scripts/probe-claude-interrupt.mjs.
-  cancel: false,
+  // Turn cancel (issue #16): session/cancel interrupts the turn and keeps the CLI. See {@link ClaudeDriver.cancel} for
+  // what is documented and what was measured.
+  cancel: true,
 } as const satisfies DriverCapabilities;
 
 /** ACP permission modes map onto the CLI's own `--permission-mode` values. */
@@ -262,6 +259,26 @@ export function turnOutcomeOf(frame: unknown): TurnOutcome | null {
  * from the stream rather than invented, because the two ids are not the same
  * thing: ACP's sessionId is ours to choose, the CLI's is the CLI's.
  */
+/**
+ * The result terminal reasons that mean the agent loop was ABORTED. Documented values of `SDKResultMessage.terminal_reason`
+ * (https://code.claude.com/docs/en/agent-sdk/typescript). `aborted_streaming` is the one measured after an interrupt
+ * (2026-10-15); `aborted_tools` is its documented counterpart for an interrupt that lands while a tool runs.
+ */
+const ABORTED_TERMINAL_REASONS: ReadonlySet<string> = new Set(['aborted_streaming', 'aborted_tools']);
+
+/**
+ * The outcome of a turn THIS driver interrupted: the CLI reports it as an error result
+ * (`error_during_execution`, `is_error: true`, `stop_reason: null`, `terminal_reason: 'aborted_streaming'` -- the frame
+ * measured), and it is a cancelled turn, not a failed one. Null for anything else, including an abort nobody asked for,
+ * which stays an error.
+ */
+function interruptedOutcomeOf(frame: unknown): TurnOutcome | null {
+  if (!isObject(frame) || frame.type !== 'result') return null;
+  const reason = frame.terminal_reason;
+  if (typeof reason !== 'string' || !ABORTED_TERMINAL_REASONS.has(reason)) return null;
+  return { stopReason: 'cancelled', isError: false, raw: reason };
+}
+
 export function cliSessionIdOf(frame: unknown): string | null {
   if (!isObject(frame) || frame.type !== 'system' || frame.subtype !== 'init') return null;
   return typeof frame.session_id === 'string' ? frame.session_id : null;
@@ -331,6 +348,11 @@ export class ClaudeDriver {
   #child: ChildProcess | null = null;
   #stderr = '';
   #pendingOutcome: TurnOutcome | null = null;
+  /** Prompts written whose `result` has not arrived yet. */
+  #turnsInFlight = 0;
+  /** An interrupt was sent and the turn it targets has not ended yet. */
+  #interruptPending = false;
+  #controlSequence = 0;
   readonly #mcpServers: readonly McpServer[];
   #mcpConfigDirectory: string | null = null;
   #mcpConfigPath: string | null = null;
@@ -459,6 +481,46 @@ export class ClaudeDriver {
       throw new Error('driver is not started, or its stdin has closed');
     }
     stdin.write(line);
+    this.#turnsInFlight += 1;
+  }
+
+  /**
+   * Interrupt the turn in flight and keep the CLI and its session (issue #16).
+   *
+   * What is DOCUMENTED (https://code.claude.com/docs/en/agent-sdk/typescript): the CLI has a control protocol a client
+   * may drive directly, with an `interrupt` control request ("A client that drives the CLI's control protocol directly,
+   * rather than through `interrupt()`, can set `cancel_queued: true` on the `interrupt` control request",
+   * SDKControlInterruptResponse), and its envelope is `{ type: "control_request", request_id, request }`
+   * (SDKControlInitializeResponse).
+   *
+   * What is NOT in Anthropic's docs: the `request` body, `{ subtype: 'interrupt' }`. It is built on a MEASUREMENT --
+   * scripts/probe-claude-interrupt.mjs, run 2026-10-15 on the owner's Claude Code: the request was accepted; the turn
+   * ended 11 ms later with `{ subtype: 'error_during_execution', stop_reason: null, terminal_reason:
+   * 'aborted_streaming', is_error: true }`, which is mapped here to a cancelled turn; the process stayed alive; the next
+   * prompt ran to end_turn. Re-run the probe when the CLI changes.
+   *
+   * `cancel_queued` is deliberately NOT set. Measured without it, a message queued on stdin at the moment of the
+   * interrupt still ran afterwards. Through ACP there is never such a message -- one turn at a time per session -- so
+   * the flag would change nothing for session/cancel, and its effect on this CLI has not been measured.
+   *
+   * Resolves once the request is written; the turn ends through onTurnEnd. Nothing waits on the CLI's
+   * control_response, whose shape was not captured. No turn running: nothing is sent.
+   */
+  cancel(): Promise<void> {
+    const stdin = this.#child?.stdin;
+    if (this.#turnsInFlight === 0 || stdin === null || stdin === undefined || stdin.destroyed) {
+      return Promise.resolve();
+    }
+    this.#interruptPending = true;
+    this.#controlSequence += 1;
+    const request = encodeLine({
+      type: 'control_request',
+      request_id: `prism-acp-interrupt-${this.#controlSequence}`,
+      request: { subtype: 'interrupt' },
+    });
+    return new Promise<void>((resolve, reject) => {
+      stdin.write(request, (cause) => (cause ? reject(new Error('failed to write the Claude interrupt request')) : resolve()));
+    });
   }
 
   /** Close stdin, which tells the CLI no more turns are coming. */
@@ -536,10 +598,18 @@ export class ClaudeDriver {
         continue;
       }
       if (cliSessionId !== null) this.cliSessionId = cliSessionId;
+      // The CLI's answer to this driver's own control request. Nothing waits on it (see cancel()), and it is not
+      // agent output, so it is neither mapped nor filed as unmapped.
+      if (isObject(frame.value) && frame.value.type === 'control_response') continue;
       acceptedFrames.push(frame);
 
       const outcome = turnOutcomeOf(frame.value);
-      if (outcome !== null) this.#pendingOutcome = outcome;
+      if (outcome !== null) {
+        this.#turnsInFlight = Math.max(0, this.#turnsInFlight - 1);
+        const interrupted = this.#interruptPending ? interruptedOutcomeOf(frame.value) : null;
+        this.#interruptPending = false;
+        this.#pendingOutcome = interrupted ?? outcome;
+      }
     }
 
     const { updates, problems } = updatesFromFrames(acceptedFrames, this.#mapper);

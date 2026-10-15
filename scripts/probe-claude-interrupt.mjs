@@ -2,12 +2,13 @@
 /**
  * MEASURE what the real Claude CLI does with an interrupt sent over `--input-format stream-json` (issue #16).
  *
- * Not a test and not a feature: ClaudeDriver declares `cancel: false`, because the Agent SDK docs name an `interrupt`
- * control request a client may drive directly, and document its `{ type: "control_request", request_id, request }`
- * envelope, but do not document the `request` body that names it
+ * ClaudeDriver.cancel() is BUILT on this measurement. The Agent SDK docs name an `interrupt` control request a client
+ * may drive directly, and document its `{ type: "control_request", request_id, request }` envelope, but do not
+ * document the `request` body that names it
  * (https://code.claude.com/docs/en/agent-sdk/typescript -- SDKControlInterruptResponse, SDKControlInitializeResponse).
- * This sends the body the Agent SDK is understood to send, `{ subtype: "interrupt" }`, and REPORTS what happens, so
- * a decision to support Claude cancel can rest on a measurement plus a documentation answer rather than on a guess.
+ * This sends that body, `{ subtype: "interrupt" }`, and REPORTS what happens. First run 2026-10-15 on the owner's
+ * Claude Code: accepted; error_during_execution / aborted_streaming result 11 ms later; process alive; the queued
+ * message and the next prompt both ran. Re-run it when the CLI changes, and compare.
  *
  * It records:
  *   - the `capabilities` the CLI advertises on system/init (interrupt_receipt_v1, interrupt_cancel_queued_v1);
