@@ -103,6 +103,30 @@ describe('Claude: used is the last call, not the turn', () => {
     expect(updates.filter((u) => u.sessionUpdate === 'usage_update')).toHaveLength(1);
   });
 
+  it('across TWO turns of one process, the second reports its own last call, not a lifetime total', () => {
+    // One long-running Claude Code process in stream-json input mode: its result usage keeps adding up across every
+    // query the process has served, so a meter built on it climbed turn after turn (tynn, from the owner's observation).
+    const first = { input_tokens: 4, cache_read_input_tokens: 20_000, cache_creation_input_tokens: 1_000, output_tokens: 100 };
+    const second = { input_tokens: 6, cache_read_input_tokens: 21_100, cache_creation_input_tokens: 400, output_tokens: 90 };
+    const lifetime = {
+      input_tokens: 10, cache_read_input_tokens: 41_100, cache_creation_input_tokens: 1_400, output_tokens: 190,
+    };
+    const updates = run([call('msg_1', first), result(first), call('msg_2', second), result(lifetime)])
+      .filter((u) => u.sessionUpdate === 'usage_update');
+
+    expect(updates.map((u) => u.used)).toEqual([
+      4 + 20_000 + 1_000 + 100,
+      6 + 21_100 + 400 + 90,
+    ]);
+    // The lifetime figure is still there for cost, in _meta, where it cannot be mistaken for context fill.
+    expect((updates[1]!._meta as Record<string, unknown>)[META_USAGE]).toMatchObject({ cacheReadInputTokens: 41_100 });
+  });
+
+  it('a first turn reports the same value under either computation (the control)', () => {
+    const only = { input_tokens: 4, cache_read_input_tokens: 20_000, cache_creation_input_tokens: 1_000, output_tokens: 100 };
+    expect(usageOf(run([call('msg_1', only), result(only)]))!.used).toBe(4 + 20_000 + 1_000 + 100);
+  });
+
   it('on a captured subagent turn, reports the last MAIN call: 36,312, not the turn total of 70,143', () => {
     expect(usageOf(fixture('claude-subagent-turn.ndjson'))!.used).toBe(2 + 2_472 + 33_663 + 175);
   });
