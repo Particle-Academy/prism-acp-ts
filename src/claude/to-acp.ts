@@ -99,12 +99,48 @@ export class ClaudeToAcp {
    */
   readonly unmapped: unknown[] = [];
 
+  /**
+   * The last MAIN-THREAD API call of the turn so far, which is what the context holds.
+   *
+   * The `result` frame's usage totals every call in the turn, so a turn of many tool calls counted the same context once
+   * per call (Genie showed "6364.9k / 1000.0k"). A subagent's calls (`parent_tool_use_id` set) are left out: they fill
+   * the subagent's own context, not this conversation's. Cleared at each `result`, so one turn's figure is never
+   * reported for the next.
+   */
+  #lastCall: { inputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; outputTokens: number } | null = null;
+
+  /** The message id of {@link #lastCall}, so a call already seen on the stream is not overwritten by its replay. */
+  #lastCallId: unknown = null;
+
+  /** Note one call's usage. Later frames for the same call (its `message_delta`) carry the final output count. */
+  #noteCall(parent: unknown, usage: unknown): void {
+    if ((parent !== null && parent !== undefined) || !isObject(usage)) return;
+    if (typeof usage.input_tokens !== 'number' && typeof usage.output_tokens !== 'number') return;
+
+    this.#lastCall = {
+      inputTokens: numberOf(usage.input_tokens),
+      cacheReadInputTokens: numberOf(usage.cache_read_input_tokens),
+      cacheCreationInputTokens: numberOf(usage.cache_creation_input_tokens),
+      outputTokens: numberOf(usage.output_tokens),
+    };
+  }
+
   /** Translate one CLI frame into zero or more ACP updates. */
   frame(input: unknown): AcpUpdate[] {
     if (!isObject(input)) return this.#unknown(input);
 
     switch (input.type) {
       case 'stream_event':
+        if (isObject(input.event)) {
+          if (input.event.type === 'message_start' && isObject(input.event.message)) {
+            this.#noteCall(input.parent_tool_use_id, input.event.message.usage);
+            if (input.parent_tool_use_id === null || input.parent_tool_use_id === undefined) {
+              this.#lastCallId = input.event.message.id;
+            }
+          } else if (input.event.type === 'message_delta') {
+            this.#noteCall(input.parent_tool_use_id, input.event.usage);
+          }
+        }
         return this.#streamEvent(input.event);
       case 'user':
         return this.#userFrame(input);
@@ -115,10 +151,17 @@ export class ClaudeToAcp {
       case 'rate_limit_event':
         return this.#rateLimit(input);
       case 'assistant':
-        // Deliberately ignored, and this is the one case where ignoring is
-        // right: with --include-partial-messages the complete assistant message
-        // is a REPLAY of deltas already emitted. Mapping both would duplicate
-        // every word of every reply.
+        // Its CONTENT is deliberately ignored: with --include-partial-messages
+        // the complete assistant message is a REPLAY of deltas already emitted,
+        // and mapping both would duplicate every word of every reply. Its USAGE
+        // is the one per-call figure a turn without streaming has. The output
+        // count on it can be a mid-stream snapshot, so a `message_delta` for the
+        // same call, when there is one, arrives after it and replaces it.
+        if (isObject(input.message) && (input.parent_tool_use_id === null || input.parent_tool_use_id === undefined)
+          && this.#lastCallId !== input.message.id) {
+          this.#noteCall(input.parent_tool_use_id, input.message.usage);
+          this.#lastCallId = input.message.id;
+        }
         return [];
       default:
         return this.#unknown(input);
@@ -478,12 +521,11 @@ export class ClaudeToAcp {
 
   #resultFrame(input: Record<string, unknown>): AcpUpdate[] {
     const usage = isObject(input.usage) ? input.usage : {};
-    // ALL the input the context holds -- fresh, read from cache, written to cache -- plus the output. `input_tokens`
-    // alone excludes the cached input: measured, a one-word turn reported 2 in / 4 out with 18,999 read from cache and
-    // 16,522 written, so the old sum said 6 for a context of ~35.5k (issue #3).
+    // The TURN's totals, kept in _meta for cost. Not `used`: they count the context once per call in the turn. `used`
+    // counts ALL the input of the last call -- fresh, read from cache, written to cache -- plus its output, because
+    // `input_tokens` alone excludes the cached input (issue #3: a one-word turn's 6 for a context of ~35.5k).
     const cacheRead = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : null;
     const cacheCreation = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : null;
-    const used = numberOf(usage.input_tokens) + (cacheRead ?? 0) + (cacheCreation ?? 0) + numberOf(usage.output_tokens);
     const split = {
       scope: 'turn' as const,
       inputTokens: numberOf(usage.input_tokens),
@@ -492,6 +534,9 @@ export class ClaudeToAcp {
       cacheCreationInputTokens: cacheCreation,
     };
     const size = contextWindowOf(input.modelUsage);
+    const lastCall = this.#lastCall;
+    this.#lastCall = null;
+    this.#lastCallId = null;
 
     // ACP requires BOTH `used` and `size` on usage_update. Without a context
     // window there is no honest update to send, so none is sent and the figures
@@ -504,7 +549,19 @@ export class ClaudeToAcp {
       ];
     }
 
-    const update: AcpUpdate = withMeta({ sessionUpdate: 'usage_update', used, size }, { [META_USAGE]: split });
+    // `used` is how full the context is: the last main-thread call. Without one there is nothing measured to report,
+    // so the turn's figures ride in _meta and no usage_update is sent -- the turn total is not a stand-in, it is the
+    // number that read 6364.9k against a 1000k window.
+    if (lastCall === null) {
+      return [
+        withMeta({ sessionUpdate: 'notice', notice: { level: 'debug', message: 'turn complete' } }, {
+          [META_UNMAPPED_FRAME]: { reason: 'usage_update needs a per-call usage; the turn reported none', usage },
+        }),
+      ];
+    }
+
+    const used = lastCall.inputTokens + lastCall.cacheReadInputTokens + lastCall.cacheCreationInputTokens + lastCall.outputTokens;
+    const update: AcpUpdate = withMeta({ sessionUpdate: 'usage_update', used, size }, { [META_USAGE]: { ...split, lastCall } });
     const cost = input.total_cost_usd;
     return [
       typeof cost === 'number'

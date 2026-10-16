@@ -1032,9 +1032,18 @@ export class CodexDriver implements AgentDriver {
       this.#recordUnmapped('thread/tokenUsage/updated modelContextWindow expected a positive safe integer', value);
       return;
     }
+    // `used` is how full the context is, which is the LAST request's total -- Codex's own definition
+    // (codex-rs/tui/src/token_usage.rs: for `last_token_usage`, total_tokens "is the latest active context size; for
+    // `total_token_usage`, this is the accumulated session total"). The thread total re-counts the context on every
+    // request and outgrows the window; it stays in _meta, where it is right for cost.
+    const last = asObject(usage?.last);
+    if (last === undefined || !isNonNegativeInt(last.totalTokens)) {
+      this.#recordUnmapped('thread/tokenUsage/updated last.totalTokens expected a non-negative integer', value);
+      return;
+    }
     this.#emit({
       sessionUpdate: 'usage_update',
-      used: total.inputTokens + total.outputTokens,
+      used: last.totalTokens,
       size: contextWindow,
       _meta: {
         // The namespaced split (issue #3), with its scope: Codex's figures are the thread's running totals.

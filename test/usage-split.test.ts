@@ -20,21 +20,33 @@ const result = (usage: Record<string, unknown>) => ({
     modelUsage: { 'claude-haiku-5-5': { contextWindow: 1_000_000 } },
 });
 
+/** A single-call turn: the call's own usage, then the result frame that closes the turn. */
+function turn(usage: Record<string, unknown>) {
+    const mapper = new ClaudeToAcp();
+    return [
+        ...mapper.frame({ type: 'assistant', parent_tool_use_id: null, message: { id: 'msg_1', content: [], usage } }),
+        ...mapper.frame(result(usage)),
+    ];
+}
+
 describe('Claude', () => {
     it('used counts every input token the context holds, plus output; the split rides in _meta with scope turn', () => {
-        const usage = new ClaudeToAcp().frame(result(MEASURED)).find((u) => u.sessionUpdate === 'usage_update')!;
+        // One call, so its usage and the turn's agree: a one-word turn is exactly that.
+        const usage = turn(MEASURED).find((u) => u.sessionUpdate === 'usage_update')!;
         expect(usage.used).toBe(2 + 18999 + 16522 + 4);
         expect(usage.size).toBe(1_000_000);
         expect((usage._meta as Record<string, unknown>)[META_USAGE]).toEqual({
             scope: 'turn', inputTokens: 2, outputTokens: 4, cacheReadInputTokens: 18999, cacheCreationInputTokens: 16522,
+            lastCall: { inputTokens: 2, outputTokens: 4, cacheReadInputTokens: 18999, cacheCreationInputTokens: 16522 },
         });
     });
 
     it('cache figures the CLI did not send count as nothing in used and are null in the split — never a guess', () => {
-        const usage = new ClaudeToAcp().frame(result({ input_tokens: 10, output_tokens: 5 })).find((u) => u.sessionUpdate === 'usage_update')!;
+        const usage = turn({ input_tokens: 10, output_tokens: 5 }).find((u) => u.sessionUpdate === 'usage_update')!;
         expect(usage.used).toBe(15);
         expect((usage._meta as Record<string, unknown>)[META_USAGE]).toEqual({
             scope: 'turn', inputTokens: 10, outputTokens: 5, cacheReadInputTokens: null, cacheCreationInputTokens: null,
+            lastCall: { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
         });
     });
 });

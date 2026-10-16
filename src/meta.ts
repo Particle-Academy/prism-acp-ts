@@ -166,8 +166,12 @@ export const META_SUBAGENTS = metaKey('subagents');
  * The token split behind a `usage_update`, with its SCOPE (issue #3): Claude's figures cover the TURN the result frame
  * closed; Codex's are the THREAD's running totals. Fields a provider did not send are `null`, never zero.
  *
- *   Claude: { scope: 'turn', inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens }
+ *   Claude: { scope: 'turn', inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, lastCall }
  *   Codex:  { scope: 'thread', inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens }
+ *
+ * These totals are for COST, not for `used`. `used` is how full the context is: for Claude the turn's last main-thread
+ * API call (`lastCall`: its input, cache read, cache written and output), for Codex the `last` request's total. A turn
+ * total counts the context once per call, which is how a meter read 6364.9k against a 1000k window.
  *
  * (Codex also keeps its earlier bare `_meta.inputTokens` / `outputTokens` / ... keys.)
  */
