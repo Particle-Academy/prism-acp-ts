@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childEnv } from '../env.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
-import { codexMcpConfig, readMcpServers, type McpServer } from '../mcp.js';
+import { codexMcpConfig, readMcpServers, type McpServer, type McpToolApproval } from '../mcp.js';
 import { isValidCliSessionId } from '../session-id.js';
 import { stripAnsiControlSequences } from '../text.js';
 import { JsonRpcPeer } from '../jsonrpc.js';
@@ -52,6 +52,12 @@ export interface CodexDriverOptions {
    * `_meta[particle.academy/model]`.
    */
   readonly model?: string;
+  /**
+   * Codex's MCP tool approval per server, by the server's name in `mcpServers`
+   * (`mcp_servers.<id>.default_tools_approval_mode`). `approve` lets a server the caller trusts -- its own -- run
+   * its tools without Codex asking. Absent: Codex's own default for every server.
+   */
+  readonly mcpToolApproval?: Readonly<Record<string, McpToolApproval>>;
 }
 
 export type CodexTransportFactory = (
@@ -178,7 +184,10 @@ export class CodexDriver implements AgentDriver {
     if (options.model !== undefined) assertModel(options.model);
     this.#options = options;
     const servers = readMcpServers(options.mcpServers);
-    this.#mcpConfig = servers.length === 0 ? undefined : codexMcpConfig(servers);
+    if (servers.length === 0 && options.mcpToolApproval !== undefined && Object.keys(options.mcpToolApproval).length > 0) {
+      codexMcpConfig(servers, options.mcpToolApproval); // refuses: it names servers that were not given
+    }
+    this.#mcpConfig = servers.length === 0 ? undefined : codexMcpConfig(servers, options.mcpToolApproval);
     this.#events = events;
     this.#transportFactory = transportFactory;
     this.#turnInactivityTimeoutMs = options.turnInactivityTimeoutMs ?? DEFAULT_TURN_INACTIVITY_TIMEOUT_MS;
@@ -524,6 +533,26 @@ export class CodexDriver implements AgentDriver {
       });
   }
 
+  /**
+   * An MCP server's elicitation, which Codex sends before an MCP tool call it wants approved (codex-cli 0.156.1 schema:
+   * { serverName, threadId, turnId, mode, message, requestedSchema | url }). There is no ACP mapping for an arbitrary
+   * form yet, so it is DECLINED -- explicitly, with the documented `{ action: 'decline' }` -- and SAID, naming the
+   * server and Codex's question. It used to get -32601, which Codex reports as "user rejected MCP tool call" while the
+   * person was never asked. A client that trusts a server sets `mcpToolApproval` so Codex never asks at all.
+   */
+  #declineElicitation(id: string | number, params: unknown): void {
+    const p = asObject(params);
+    const server = asString(p?.serverName) ?? 'an MCP server';
+    const message = asString(p?.message) ?? '';
+    const mode = asString(p?.mode) ?? 'unknown';
+    this.#events.onProtocolError?.(
+      `Codex asked ${JSON.stringify(server)} for an answer this driver cannot give (${mode}): ${stripAnsiControlSequences(message).text}. `
+        + `Declined. Set mcpToolApproval for ${JSON.stringify(server)} to let its tools run without asking.`,
+      { recoverable: true },
+    );
+    this.#sendServerReply({ jsonrpc: '2.0', id, result: { action: 'decline' } });
+  }
+
   #receive(raw: unknown): void {
     if (this.#closed) return;
     let frame: unknown = raw;
@@ -550,6 +579,8 @@ export class CodexDriver implements AgentDriver {
     if (method !== undefined && hasId) {
       if (APPROVAL_METHODS.has(method)) {
         void this.#handleApproval(object.id as string | number, method, object.params);
+      } else if (method === 'mcpServer/elicitation/request') {
+        this.#declineElicitation(object.id as string | number, object.params);
       } else {
         this.#recordUnmapped(`unhandled Codex server request: ${method}`, object);
         this.#sendServerReply({
