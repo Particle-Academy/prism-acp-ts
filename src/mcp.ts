@@ -56,14 +56,35 @@ export function claudeMcpConfig(servers: readonly McpServer[]): Record<string, u
   ])) };
 }
 
-/** App Server thread/start and thread/resume accept these JSON config overrides. */
-export function codexMcpConfig(servers: readonly McpServer[]): Record<string, unknown> {
+/**
+ * Codex's per-server MCP tool approval (`mcp_servers.<id>.default_tools_approval_mode`, documented in Codex's config
+ * reference): `approve` runs the server's tools without asking; `prompt` always asks; `writes` asks for writes;
+ * `auto` is Codex's own default.
+ */
+export type McpToolApproval = 'auto' | 'prompt' | 'writes' | 'approve';
+const MCP_TOOL_APPROVALS: ReadonlySet<string> = new Set<McpToolApproval>(['auto', 'prompt', 'writes', 'approve']);
+
+/**
+ * App Server thread/start and thread/resume accept these JSON config overrides. `approval` names servers in `servers`
+ * only, and only Codex's documented modes: anything else is refused, loudly, rather than dropped.
+ */
+export function codexMcpConfig(
+  servers: readonly McpServer[],
+  approval: Readonly<Record<string, McpToolApproval>> = {},
+): Record<string, unknown> {
   assertMcpSupport(servers, { http: true, sse: false });
-  return { mcp_servers: Object.fromEntries(servers.map((server) => [server.name,
-    'command' in server
+  const names = new Set(servers.map((server) => server.name));
+  for (const [name, mode] of Object.entries(approval)) {
+    if (!names.has(name)) invalid(`mcpToolApproval names ${JSON.stringify(name)}, which is not one of the MCP servers given`);
+    if (!MCP_TOOL_APPROVALS.has(mode)) invalid(`mcpToolApproval for ${JSON.stringify(name)} is ${JSON.stringify(mode)}; Codex documents auto, prompt, writes and approve`);
+  }
+  return { mcp_servers: Object.fromEntries(servers.map((server) => {
+    const mode = Object.prototype.hasOwnProperty.call(approval, server.name) ? approval[server.name] : undefined;
+    const entry = 'command' in server
       ? { command: server.command, args: server.args, env: namedValues(server.env) }
-      : { url: server.url, http_headers: namedValues(server.headers) },
-  ])) };
+      : { url: server.url, http_headers: namedValues(server.headers) };
+    return [server.name, mode === undefined ? entry : { ...entry, default_tools_approval_mode: mode }];
+  })) };
 }
 
 function namedValues(values: readonly McpNamedValue[]): Record<string, string> {

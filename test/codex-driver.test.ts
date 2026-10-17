@@ -97,7 +97,7 @@ class FakeTransport implements CodexTransport {
 }
 
 function setup(
-  options: { resumeSessionId?: string; turnInactivityTimeoutMs?: number } = {},
+  options: Partial<ConstructorParameters<typeof CodexDriver>[0]> = {},
   events: ConstructorParameters<typeof CodexDriver>[1] = {},
   historyItems?: readonly Record<string, unknown>[],
   singleHistoryTurn = false,
@@ -889,5 +889,72 @@ describe('CodexDriver turn cancel', () => {
     input.destroy();
     await inputClosed;
     expect(transport.closes).toBe(1);
+  });
+});
+
+/**
+ * MCP TOOL APPROVAL (Genie, 2026-10-17: every Codex agent's call to Genie's own MCP tools came back "user rejected MCP
+ * tool call" and the person was never asked). Before an MCP tool call Codex sends `mcpServer/elicitation/request`
+ * (codex-cli 0.156.1 `app-server generate-json-schema`: params { serverName, threadId, turnId, mode, message,
+ * requestedSchema | url }, answered { action: accept | decline | cancel, content? }). This driver answered it with
+ * -32601 "method not supported", which Codex reads as the user's refusal — silently.
+ *  - `mcpToolApproval` sets Codex's documented `mcp_servers.<id>.default_tools_approval_mode` per server, so a client
+ *    can pre-approve a server it trusts (its own) and Codex never asks.
+ *  - An elicitation this driver cannot answer is SAID, as a recoverable problem naming the server and Codex's question,
+ *    and declined explicitly — never a silent no.
+ */
+describe('CodexDriver MCP tool approval', () => {
+  const genie = { type: 'http' as const, name: 'genie', url: 'http://127.0.0.1:40123/mcp', headers: [] };
+  const other = { type: 'http' as const, name: 'other', url: 'http://127.0.0.1:40124/mcp', headers: [] };
+
+  it('puts default_tools_approval_mode on the named server only, on thread/start', async () => {
+    const state = setup({ mcpServers: [genie, other], mcpToolApproval: { genie: 'approve' } });
+    state.driver.start();
+    await state.driver.ready;
+    const start = state.transport.sent.find((f) => f.method === 'thread/start');
+    const servers = (start?.params as { config: { mcp_servers: Record<string, Record<string, unknown>> } }).config.mcp_servers;
+    expect(servers.genie).toMatchObject({ url: genie.url, default_tools_approval_mode: 'approve' });
+    expect(servers.other).not.toHaveProperty('default_tools_approval_mode'); // CONTROL: only the server named
+  });
+
+  it('and on thread/resume', async () => {
+    const state = setup({ resumeSessionId: 'thread-resumed', mcpServers: [genie], mcpToolApproval: { genie: 'approve' } });
+    state.driver.start();
+    await state.driver.ready;
+    const resume = state.transport.sent.find((f) => f.method === 'thread/resume');
+    expect((resume?.params as { config: { mcp_servers: Record<string, Record<string, unknown>> } }).config.mcp_servers.genie)
+      .toMatchObject({ default_tools_approval_mode: 'approve' });
+  });
+
+  it('refuses an approval for a server it was not given, or a mode Codex does not document', () => {
+    expect(() => setup({ mcpServers: [genie], mcpToolApproval: { nope: 'approve' } })).toThrow(/nope/);
+    expect(() => setup({ mcpServers: [genie], mcpToolApproval: { genie: 'always' as never } })).toThrow(/always/);
+  });
+
+  it('an MCP elicitation it cannot answer is SAID (recoverable, naming server and question) and declined explicitly', async () => {
+    const problems: Array<{ problem: string; detail: unknown }> = [];
+    const state = setup({ mcpServers: [genie] }, { onProtocolError: (problem, detail) => problems.push({ problem, detail }) });
+    state.driver.start();
+    await state.driver.ready;
+    state.transport.frame({
+      jsonrpc: '2.0', id: 77, method: 'mcpServer/elicitation/request',
+      params: { serverName: 'genie', threadId: 'thread-captured', turnId: null, mode: 'form', message: 'Allow the agentinbox tool?', requestedSchema: { type: 'object', properties: {} } },
+    });
+    await settle();
+    const reply = state.transport.sent.find((f) => f.id === 77);
+    expect(reply).toEqual({ jsonrpc: '2.0', id: 77, result: { action: 'decline' } });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]!.problem).toContain('genie');
+    expect(problems[0]!.problem).toContain('Allow the agentinbox tool?');
+    expect(problems[0]!.detail).toEqual({ recoverable: true });
+  });
+
+  it('CONTROL: another unknown server request still gets -32601', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.transport.frame({ jsonrpc: '2.0', id: 78, method: 'something/else', params: {} });
+    await settle();
+    expect(state.transport.sent.find((f) => f.id === 78)).toMatchObject({ error: { code: -32601 } });
   });
 });
