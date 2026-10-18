@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { childEnv } from '../env.js';
 import { claudeMcpConfig, readMcpServers, type McpServer } from '../mcp.js';
 import { assertModel } from '../meta.js';
+import { ClaudeTurnFailures, type TurnFailure } from '../turn-failure.js';
 import { isValidCliSessionId } from '../session-id.js';
 import { randomBytes } from 'node:crypto';
 import type { PermissionOutcome, PermissionRequest, ProblemDetail } from '../acp/agent.js';
@@ -214,6 +215,8 @@ export interface TurnOutcome {
   readonly isError: boolean;
   /** The CLI's own reason string, kept even when it maps to nothing. */
   readonly raw: string | null;
+  /** Why a failed turn failed, when the provider said (tynn #791). Absent on a turn that completed. */
+  readonly failure?: TurnFailure;
 }
 
 /**
@@ -349,6 +352,8 @@ export class ClaudeDriver {
   #child: ChildProcess | null = null;
   #stderr = '';
   #pendingOutcome: TurnOutcome | null = null;
+  /** The running turn's failure reason, read from its frames; taken at its `result`. */
+  readonly #failures = new ClaudeTurnFailures();
   /** Prompts written whose `result` has not arrived yet. */
   #turnsInFlight = 0;
   /** An interrupt was sent and the turn it targets has not ended yet. */
@@ -603,13 +608,17 @@ export class ClaudeDriver {
       // agent output, so it is neither mapped nor filed as unmapped.
       if (isObject(frame.value) && frame.value.type === 'control_response') continue;
       acceptedFrames.push(frame);
+      this.#failures.observe(frame.value);
 
       const outcome = turnOutcomeOf(frame.value);
       if (outcome !== null) {
         this.#turnsInFlight = Math.max(0, this.#turnsInFlight - 1);
         const interrupted = this.#interruptPending ? interruptedOutcomeOf(frame.value) : null;
         this.#interruptPending = false;
-        this.#pendingOutcome = interrupted ?? outcome;
+        // Taken for every turn, so a reason never leaks into the next one; attached only to a turn that failed.
+        const failure = this.#failures.take();
+        const settled = interrupted ?? outcome;
+        this.#pendingOutcome = settled.isError && failure !== undefined ? { ...settled, failure } : settled;
       }
     }
 

@@ -33,10 +33,12 @@ export {
   META_EXEC_POLICY_AMENDMENT,
   META_PERMISSION_DENIED,
   META_NS,
+  META_PARENT_TOOL_CALL,
   META_RATE_LIMIT,
   META_TASK,
   META_THINKING_SIGNATURE,
   META_THINKING_TOKENS_ESTIMATE,
+  META_TURN_FAILURE,
   META_UNMAPPED_FRAME,
   META_USAGE,
   RESERVED_META_KEYS,
@@ -99,6 +101,8 @@ export type { Served, ServeOptions } from './acp/stdio.js';
 
 export { cliSessionIdOf, turnOutcomeOf } from './claude/driver.js';
 export type { StopReason, TurnOutcome } from './claude/driver.js';
+export { ClaudeTurnFailures, codexFailureOf } from './turn-failure.js';
+export type { TurnFailure, TurnFailureKind } from './turn-failure.js';
 
 export { CODEX_DRIVER_CAPABILITIES, CodexDriver } from './codex/driver.js';
 export type { CodexDriverOptions, CodexTransportFactory } from './codex/driver.js';

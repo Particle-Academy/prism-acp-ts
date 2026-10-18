@@ -210,3 +210,10 @@ export function withMeta<T extends object>(
  * Agent/Task call that spawned it, so a client can nest or fold them. Absent on the main thread's own calls.
  */
 export const META_PARENT_TOOL_CALL = metaKey('parent_tool_call_id');
+
+/**
+ * Why a turn failed, on the error a failed `session/prompt` answers with (JSON-RPC `error.data`): `{ reason, kind,
+ * resetsAtMs? }` (see `TurnFailure` in src/turn-failure.ts). `kind` is `rate_limit`, `overloaded`, `auth`, `billing` or
+ * `other`; `reason` is the provider's own value, verbatim; `resetsAtMs` appears only when the provider said when.
+ */
+export const META_TURN_FAILURE = metaKey('turn_failure');

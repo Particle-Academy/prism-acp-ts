@@ -24,7 +24,7 @@
 import { JsonRpcPeer, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR, RpcError } from '../jsonrpc.js';
 import type { AcpUpdate } from '../claude/to-acp.js';
 import type { StopReason, TurnOutcome } from '../claude/driver.js';
-import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, withMeta } from '../meta.js';
+import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, META_TURN_FAILURE, withMeta } from '../meta.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
 import { PromptRefused, promptBlockKind, promptBlocks, type PromptBlockKind, type PromptContent } from '../prompt.js';
 
@@ -462,9 +462,12 @@ export class AcpAgent {
     // given the nearest-looking reason: `end_turn` would claim a clean finish
     // and `refusal` would claim a decision the agent never made.
     if (outcome.stopReason === null) {
+      // The reason, when the provider gave one, is structured in `data`: a client deciding whether to hold the turn
+      // until a limit resets must not have to parse this message.
       throw new RpcError(
         RPC_INTERNAL_ERROR,
         `turn did not complete${outcome.raw === null ? '' : `: ${outcome.raw}`}`,
+        outcome.failure === undefined ? undefined : { [META_TURN_FAILURE]: outcome.failure },
       );
     }
 

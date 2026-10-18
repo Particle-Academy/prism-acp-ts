@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childEnv } from '../env.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
+import { codexFailureOf } from '../turn-failure.js';
 import { codexMcpConfig, readMcpServers, type McpServer, type McpToolApproval } from '../mcp.js';
 import { isValidCliSessionId } from '../session-id.js';
 import { stripAnsiControlSequences } from '../text.js';
@@ -653,7 +654,9 @@ export class CodexDriver implements AgentDriver {
         } else if (status === 'interrupted' || status === 'canceled' || status === 'cancelled') {
           this.#finishTurn({ stopReason: 'cancelled', isError: false, raw: status }, id);
         } else {
-          this.#finishTurn({ stopReason: null, isError: true, raw: status }, id);
+          // The reason rides on the outcome (tynn #791): a usage limit read as an ordinary failure was never resumed.
+          const failure = codexFailureOf(turn.error);
+          this.#finishTurn({ stopReason: null, isError: true, raw: status, ...(failure === undefined ? {} : { failure }) }, id);
         }
         return;
       }

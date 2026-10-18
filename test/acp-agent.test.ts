@@ -232,6 +232,40 @@ describe('session/prompt', () => {
     expect(reply?.error).toMatchObject({ message: expect.stringContaining('did not complete') });
   });
 
+  it('says WHY a failed turn failed, structurally, in the error data (tynn #791)', async () => {
+    const h = await opened();
+    const promise = h.peer.receive({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/prompt',
+      params: { sessionId: 'sess_1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    h.drivers[0]?.finish({
+      stopReason: null, isError: true, raw: 'error_during_execution',
+      failure: { reason: 'rate_limit', kind: 'rate_limit', resetsAtMs: 1_792_302_600_000 },
+    });
+    await promise;
+
+    const reply = h.sent.find((m) => m.id === 2);
+    expect(reply?.error).toMatchObject({
+      data: { 'particle.academy/turn_failure': { reason: 'rate_limit', kind: 'rate_limit', resetsAtMs: 1_792_302_600_000 } },
+    });
+  });
+
+  it('sends no failure data when the provider gave no reason (the control)', async () => {
+    const h = await opened();
+    const promise = h.peer.receive({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/prompt',
+      params: { sessionId: 'sess_1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    h.drivers[0]?.finish({ stopReason: null, isError: true, raw: 'boom' });
+    await promise;
+
+    expect((h.sent.find((m) => m.id === 2)?.error as Record<string, unknown> | undefined)?.data).toBeUndefined();
+  });
+
   it('settles an in-flight turn when the agent process DIES', async () => {
     // Otherwise session/prompt never returns and the client waits forever on an
     // agent that no longer exists.

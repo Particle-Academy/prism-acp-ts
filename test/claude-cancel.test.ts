@@ -46,7 +46,13 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     }
     const text = frame.message.content.map((block) => block.text).join('');
     out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'working' } } });
-    if (text.includes('FINISH')) {
+    if (text.includes('LIMIT-NO-EVENT')) {
+      // tynn #791: the CLI ends the turn on a rate limit with NO rate_limit_event before it.
+      out({ type: 'assistant', parent_tool_use_id: null, message: { id: 'msg_limit', content: [] }, error: 'rate_limit' });
+      out({ type: 'result', subtype: 'error_during_execution', is_error: true, stop_reason: null });
+    } else if (text.includes('PLAIN-ERROR')) {
+      out({ type: 'result', subtype: 'error_during_execution', is_error: true, stop_reason: null });
+    } else if (text.includes('FINISH')) {
       out({ type: 'result', subtype: 'success', is_error: false, stop_reason: 'end_turn', terminal_reason: 'completed', result: 'done' });
     } else if (text.includes('ABORT-UNASKED')) {
       // The measured frame with NO interrupt asked for: must stay an error turn.
@@ -234,5 +240,33 @@ describe.skipIf(process.platform === 'win32')('ClaudeDriver turn cancel, against
     input.end();
     await served.closed;
     await until('the CLI to exit', () => exits.length === 1);
+  });
+});
+
+describe.skipIf(process.platform === 'win32')('ClaudeDriver turn failure reason, against a stand-in claude process (tynn #791)', () => {
+  it('a turn the CLI ends on rate_limit, with no rate_limit_event, carries the failure on its outcome', async () => {
+    const { driver, turnEnds } = driverFor();
+    driver.start();
+    try {
+      driver.prompt('LIMIT-NO-EVENT');
+      await until('the failed turn to end', () => turnEnds.length === 1);
+      expect(turnEnds[0]).toMatchObject({ isError: true, failure: { reason: 'rate_limit', kind: 'rate_limit' } });
+      expect(turnEnds[0]?.failure?.resetsAtMs).toBeUndefined();
+    } finally {
+      driver.kill();
+    }
+  });
+
+  it('the same failed turn without the field carries no failure (the control)', async () => {
+    const { driver, turnEnds } = driverFor();
+    driver.start();
+    try {
+      driver.prompt('PLAIN-ERROR');
+      await until('the failed turn to end', () => turnEnds.length === 1);
+      expect(turnEnds[0]?.isError).toBe(true);
+      expect(turnEnds[0]?.failure).toBeUndefined();
+    } finally {
+      driver.kill();
+    }
   });
 });
