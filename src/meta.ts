@@ -204,3 +204,9 @@ export function withMeta<T extends object>(
   const existing = (value as { _meta?: Record<string, unknown> })._meta ?? {};
   return { ...value, _meta: { ...existing, ...entries } };
 }
+
+/**
+ * The tool call a call was made INSIDE, on `tool_call` and `tool_call_update`: a subagent's calls carry the id of the
+ * Agent/Task call that spawned it, so a client can nest or fold them. Absent on the main thread's own calls.
+ */
+export const META_PARENT_TOOL_CALL = metaKey('parent_tool_call_id');

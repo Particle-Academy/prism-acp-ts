@@ -71,6 +71,9 @@ describe('the captured payloads', () => {
       [Date.parse('2026-10-06T04:20:00Z'), 'five_hour'],
       [Date.parse('2026-10-05T23:20:00Z'), 'five_hour'],
       [Date.parse('2026-10-11T11:00:00Z'), 'seven_day'],
+      // claude-subagent-tools-turn.ndjson, captured 2026-10-18 around 01:30Z.
+      [Date.parse('2026-10-18T05:50:00Z'), 'five_hour'],
+      [Date.parse('2026-10-21T08:00:00Z'), 'seven_day'],
     ]);
 
     for (const { file, payload } of capturedPayloads()) {

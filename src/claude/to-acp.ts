@@ -40,6 +40,7 @@ import {
   META_THINKING_SIGNATURE,
   META_THINKING_TOKENS_ESTIMATE,
   META_UNMAPPED_FRAME,
+  META_PARENT_TOOL_CALL,
   META_USAGE,
   withMeta,
 } from '../meta.js';
@@ -162,10 +163,47 @@ export class ClaudeToAcp {
           this.#noteCall(input.parent_tool_use_id, input.message.usage);
           this.#lastCallId = input.message.id;
         }
-        return [];
+        // A SUBAGENT's calls are the exception to "a replay": they never stream, so this frame is the only place
+        // their names and arguments appear. Ignoring it left their results as updates for calls the client was never
+        // told about, which Genie rendered as empty "(tool call)" rows.
+        return this.#subagentCalls(input);
       default:
         return this.#unknown(input);
     }
+  }
+
+  /** Subagent calls already announced: the CLI can repeat a frame, and a call is announced once. */
+  readonly #announced = new Set<string>();
+
+  /**
+   * A subagent's `tool_use` blocks, as `tool_call`s marked with the call that spawned the subagent. Complete when they
+   * arrive (nothing streams), so the arguments go straight into `rawInput`.
+   */
+  #subagentCalls(input: Record<string, unknown>): AcpUpdate[] {
+    const parent = asString(input.parent_tool_use_id);
+    const message = isObject(input.message) ? input.message : undefined;
+    if (parent === undefined || message === undefined || !Array.isArray(message.content)) return [];
+
+    const updates: AcpUpdate[] = [];
+    for (const block of message.content) {
+      if (!isObject(block) || block.type !== 'tool_use') continue;
+      const toolCallId = asString(block.id);
+      if (toolCallId === undefined || this.#announced.has(toolCallId)) continue;
+      this.#announced.add(toolCallId);
+
+      const name = asString(block.name) ?? 'unknown';
+      const update: AcpUpdate = {
+        sessionUpdate: 'tool_call',
+        toolCallId,
+        title: stripAnsiControlSequences(name).text,
+        name,
+        status: 'pending' satisfies ToolStatus,
+        ...(isObject(block.input) ? { rawInput: block.input } : {}),
+      };
+      const kind = TOOL_KINDS[name.toLowerCase()];
+      updates.push(withMeta(kind === undefined ? update : { ...update, kind }, { [META_PARENT_TOOL_CALL]: parent }));
+    }
+    return updates;
   }
 
   #streamEvent(event: unknown): AcpUpdate[] {
@@ -315,12 +353,15 @@ export class ClaudeToAcp {
       // failed call to `completed` would report a failure as a success, which
       // is the direction that misleads.
       const failed = entry.is_error === true;
-      updates.push({
+      const update: AcpUpdate = {
         sessionUpdate: 'tool_call_update',
         toolCallId,
         status: (failed ? 'failed' : 'completed') satisfies ToolStatus,
         content: [{ type: 'content', content: { type: 'text', text: textOf(entry.content) } }],
-      });
+      };
+      // A subagent's result names the call that spawned the subagent, as its announcement did.
+      const parent = asString(input.parent_tool_use_id);
+      updates.push(parent === undefined ? update : withMeta(update, { [META_PARENT_TOOL_CALL]: parent }));
     }
 
     return updates.length > 0 ? updates : this.#unknown(input);
