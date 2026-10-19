@@ -253,6 +253,11 @@ export function turnOutcomeOf(frame: unknown): TurnOutcome | null {
   const isError = frame.is_error === true || frame.subtype === 'error';
   const mapped = raw === null ? undefined : STOP_REASONS[raw];
 
+  // A built-in command (/compact, /context) runs no model turn, so a successful result carries NO stop reason
+  // (subtype success, is_error false, num_turns 0). It finished, cleanly: reported as end_turn, because null means
+  // "did not finish" and a client reads it that way (tynn, 2026-10-19).
+  if (!isError && raw === null && frame.subtype === 'success') return { stopReason: 'end_turn', isError: false, raw };
+
   return { stopReason: isError || mapped === undefined ? null : mapped, isError, raw };
 }
 

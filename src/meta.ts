@@ -217,3 +217,16 @@ export const META_PARENT_TOOL_CALL = metaKey('parent_tool_call_id');
  * `other`; `reason` is the provider's own value, verbatim; `resetsAtMs` appears only when the provider said when.
  */
 export const META_TURN_FAILURE = metaKey('turn_failure');
+
+/**
+ * A context compaction, on the `notice` Claude's `compact_boundary` becomes: `{ trigger, preTokens, postTokens,
+ * droppedTokens?, durationMs?, raw }`. `trigger` is the CLI's (`manual` for /compact, `auto` when the window filled);
+ * `raw` is its `compact_metadata`, verbatim.
+ */
+export const META_COMPACTION = metaKey('compaction');
+
+/**
+ * On an `agent_message_chunk`: this text is a built-in command's own output (e.g. "Compacted"), not the model's.
+ * Claude wraps it in `<local-command-stdout>`; the tags are removed.
+ */
+export const META_LOCAL_COMMAND = metaKey('local_command');

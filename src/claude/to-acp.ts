@@ -40,6 +40,8 @@ import {
   META_THINKING_SIGNATURE,
   META_THINKING_TOKENS_ESTIMATE,
   META_UNMAPPED_FRAME,
+  META_COMPACTION,
+  META_LOCAL_COMMAND,
   META_PARENT_TOOL_CALL,
   META_USAGE,
   withMeta,
@@ -158,6 +160,12 @@ export class ClaudeToAcp {
         // is the one per-call figure a turn without streaming has. The output
         // count on it can be a mid-stream snapshot, so a `message_delta` for the
         // same call, when there is one, arrives after it and replaces it.
+        // A SYNTHETIC message is the CLI's own answer (model "<synthetic>": e.g. "/compact" on an empty session says
+        // "Error: No messages to compact"). It never streams, so this frame is the only place its text appears, and it
+        // is no API call, so its zero usage must never become the context meter.
+        if (isObject(input.message) && input.message.model === '<synthetic>') {
+          return this.#syntheticText(input.message);
+        }
         if (isObject(input.message) && (input.parent_tool_use_id === null || input.parent_tool_use_id === undefined)
           && this.#lastCallId !== input.message.id) {
           this.#noteCall(input.parent_tool_use_id, input.message.usage);
@@ -170,6 +178,16 @@ export class ClaudeToAcp {
       default:
         return this.#unknown(input);
     }
+  }
+
+  /** A compaction's post-compaction size in this turn, from `compact_boundary`; cleared at each `result`. */
+  #compactedTo: number | null = null;
+
+  #syntheticText(message: Record<string, unknown>): AcpUpdate[] {
+    const blocks = Array.isArray(message.content) ? message.content : [];
+    return blocks
+      .filter((block): block is Record<string, unknown> => isObject(block) && block.type === 'text' && typeof block.text === 'string')
+      .map((block) => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: block.text as string } }));
   }
 
   /** Subagent calls already announced: the CLI can repeat a frame, and a call is announced once. */
@@ -341,6 +359,23 @@ export class ClaudeToAcp {
 
   #userFrame(input: Record<string, unknown>): AcpUpdate[] {
     const message = isObject(input.message) ? input.message : {};
+
+    if (typeof message.content === 'string') {
+      // A built-in command's own output (e.g. /compact's "Compacted"), replayed as a user frame wrapped in
+      // <local-command-stdout>. It is what the command SAID, so it is shown as agent text, marked as a command's.
+      const stdout = /^<local-command-stdout>([\s\S]*)<\/local-command-stdout>$/.exec(message.content.trim());
+      if (stdout !== null) {
+        const said = stdout[1]!.trim();
+        return said === '' ? [] : [withMeta(
+          { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: said } },
+          { [META_LOCAL_COMMAND]: true },
+        )];
+      }
+      // The summary a compaction carries forward, replayed as a synthetic user message. It is the model's next
+      // context, not something said in this conversation, and it is long; the compaction notice reports the event.
+      if (input.isSynthetic === true) return [];
+    }
+
     const content = Array.isArray(message.content) ? message.content : [];
     const updates: AcpUpdate[] = [];
 
@@ -379,6 +414,25 @@ export class ClaudeToAcp {
             availableCommands: Array.isArray(input.commands) ? input.commands : [],
           },
         ];
+
+      case 'compact_boundary': {
+        const meta = isObject(input.compact_metadata) ? input.compact_metadata : {};
+        const pre = typeof meta.pre_tokens === 'number' ? meta.pre_tokens : null;
+        const post = typeof meta.post_tokens === 'number' ? meta.post_tokens : null;
+        if (post !== null) this.#compactedTo = post;
+        const compaction = {
+          trigger: typeof meta.trigger === 'string' ? meta.trigger : null,
+          preTokens: pre,
+          postTokens: post,
+          ...(typeof meta.cumulative_dropped_tokens === 'number' ? { droppedTokens: meta.cumulative_dropped_tokens } : {}),
+          ...(typeof meta.duration_ms === 'number' ? { durationMs: meta.duration_ms } : {}),
+          raw: meta,
+        };
+        const message = pre !== null && post !== null
+          ? `Compacted the context from ${pre.toLocaleString('en-US')} to ${post.toLocaleString('en-US')} tokens.`
+          : 'Compacted the context.';
+        return [withMeta({ sessionUpdate: 'notice', notice: { level: 'info', message } }, { [META_COMPACTION]: compaction })];
+      }
 
       case 'thinking_tokens':
         return [
@@ -576,8 +630,10 @@ export class ClaudeToAcp {
     };
     const size = contextWindowOf(input.modelUsage);
     const lastCall = this.#lastCall;
+    const compactedTo = this.#compactedTo;
     this.#lastCall = null;
     this.#lastCallId = null;
+    this.#compactedTo = null;
 
     // ACP requires BOTH `used` and `size` on usage_update. Without a context
     // window there is no honest update to send, so none is sent and the figures
@@ -593,6 +649,11 @@ export class ClaudeToAcp {
     // `used` is how full the context is: the last main-thread call. Without one there is nothing measured to report,
     // so the turn's figures ride in _meta and no usage_update is sent -- the turn total is not a stand-in, it is the
     // number that read 6364.9k against a 1000k window.
+    // A compaction with no model call after it: the context now holds what the compaction left, which the CLI measured.
+    if (lastCall === null && compactedTo !== null) {
+      return [withMeta({ sessionUpdate: 'usage_update', used: compactedTo, size }, { [META_USAGE]: split })];
+    }
+
     if (lastCall === null) {
       return [
         withMeta({ sessionUpdate: 'notice', notice: { level: 'debug', message: 'turn complete' } }, {

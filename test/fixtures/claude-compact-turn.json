@@ -1,0 +1,161 @@
+[
+ {
+  "type": "system",
+  "subtype": "status",
+  "status": "compacting",
+  "session_id": "9adbc891-a558-48e0-93b0-460d6500ead8",
+  "uuid": "e3bee60f-7629-4c18-b1a6-2e1afc8507ed"
+ },
+ {
+  "type": "rate_limit_event",
+  "rate_limit_info": {
+   "status": "allowed",
+   "resetsAt": 1792450800,
+   "rateLimitType": "five_hour",
+   "overageStatus": "rejected",
+   "overageDisabledReason": "out_of_credits",
+   "isUsingOverage": false,
+   "unifiedWindows": {
+    "five_hour": {
+     "utilization": 0.29,
+     "resetsAt": 1792450800
+    },
+    "seven_day": {
+     "utilization": 0.07,
+     "resetsAt": 1792926000
+    }
+   }
+  },
+  "uuid": "dbda25ea-10ea-498a-984c-0e283df1e1ab",
+  "session_id": "9adbc891-a558-48e0-93b0-460d6500ead8"
+ },
+ {
+  "type": "system",
+  "subtype": "status",
+  "status": null,
+  "compact_result": "success",
+  "session_id": "9adbc891-a558-48e0-93b0-460d6500ead8",
+  "uuid": "a535b28b-73b8-4a88-a5a2-b3fa5c5caafa"
+ },
+ {
+  "type": "system",
+  "subtype": "compact_boundary",
+  "session_id": "9adbc891-a558-48e0-93b0-460d6500ead8",
+  "uuid": "796aea74-e7e7-4e51-bbfe-6ef8ba2a42c4",
+  "compact_metadata": {
+   "trigger": "manual",
+   "pre_tokens": 40341,
+   "post_tokens": 3942,
+   "cumulative_dropped_tokens": 36399,
+   "duration_ms": 7660
+  },
+  "logical_parent_uuid": "b5ebef44-56da-485b-b750-64ec45b035aa"
+ },
+ {
+  "type": "user",
+  "message": {
+   "role": "user",
+   "content": "This session is being continued from a previous conversation that ran out of context. [The summary is redacted from this fixture: it quoted the machine's own instructions.]"
+  },
+  "session_id": "9adbc891-a558-48e0-93b0-460d6500ead8",
+  "parent_tool_use_id": null,
+  "uuid": "3790102e-b89f-404d-9ce7-98f272f7fd08",
+  "timestamp": "2026-10-19T20:57:19.213Z",
+  "isReplay": false,
+  "isSynthetic": true
+ },
+ {
+  "type": "user",
+  "message": {
+   "role": "user",
+   "content": "<local-command-stdout>Compacted </local-command-stdout>"
+  },
+  "session_id": "9adbc891-a558-48e0-93b0-460d6500ead8",
+  "parent_tool_use_id": null,
+  "uuid": "cc9ef503-a80b-46ab-a260-9810eb89bb8e",
+  "timestamp": "2026-10-19T20:57:19.326Z",
+  "isReplay": true
+ },
+ {
+  "is_error": false,
+  "duration_api_ms": 0,
+  "num_turns": 0,
+  "stop_reason": null,
+  "session_id": "9adbc891-a558-48e0-93b0-460d6500ead8",
+  "total_cost_usd": 0.011293645000000001,
+  "usage": {
+   "output_tokens_details": {
+    "thinking_tokens": 0
+   },
+   "input_tokens": 0,
+   "cache_creation_input_tokens": 0,
+   "cache_read_input_tokens": 0,
+   "output_tokens": 0,
+   "server_tool_use": {
+    "web_search_requests": 0,
+    "web_fetch_requests": 0
+   },
+   "service_tier": "standard",
+   "cache_creation": {
+    "ephemeral_1h_input_tokens": 0,
+    "ephemeral_5m_input_tokens": 0
+   },
+   "inference_geo": "",
+   "iterations": [],
+   "speed": "standard",
+   "fallback_credit": null
+  },
+  "modelUsage": {
+   "claude-haiku-5-5": {
+    "inputTokens": 2000,
+    "outputTokens": 1380,
+    "thinkingTokens": 0,
+    "cacheReadInputTokens": 23527,
+    "cacheCreationInputTokens": 57146,
+    "webSearchRequests": 0,
+    "costUSD": 0.011293645000000001,
+    "contextWindow": 1000000,
+    "maxOutputTokens": 128000,
+    "canonicalModel": "claude-haiku-5-5",
+    "provider": "firstParty",
+    "costBasis": "list"
+   }
+  },
+  "permission_denials": [],
+  "fast_mode_state": "off",
+  "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "subagent_stats": {
+   "spawned": 0,
+   "requested": {
+    "background": 0,
+    "foreground": 0,
+    "unset": 0
+   },
+   "started_in_background": 0,
+   "max_depth": 0,
+   "spawned_by_subagents": 0,
+   "completed": 0,
+   "failed": 0,
+   "killed": {
+    "parent": 0,
+    "user": 0,
+    "system": 0
+   },
+   "refused": {
+    "depth_limit": 0,
+    "concurrency_limit": 0,
+    "budget": 0
+   },
+   "by_type": {}
+  },
+  "safety_stops": 0,
+  "subtype": "success",
+  "result": "",
+  "local_command": "compact",
+  "type": "result",
+  "duration_ms": 7797,
+  "uuid": "7be32068-55d2-45ff-aca4-a6bbbac3c3ef",
+  "queued_turn_count": 0,
+  "result_index": 0
+ }
+]
