@@ -26,6 +26,7 @@ import type { AcpUpdate } from '../claude/to-acp.js';
 import type { StopReason, TurnOutcome } from '../claude/driver.js';
 import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, META_PERMISSION_REASON, META_TURN_FAILURE, withMeta } from '../meta.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
+import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
 import { PromptRefused, promptBlockKind, promptBlocks, type PromptBlockKind, type PromptContent } from '../prompt.js';
 
 /** The protocol version this agent speaks. */
@@ -51,7 +52,15 @@ export interface AgentDriver {
    */
   cancel?(): Promise<void>;
   endInput(): void;
+  /** End the agent and every process it started. */
   kill(signal?: NodeJS.Signals): void;
+  /**
+   * End the agent and its whole process tree, and say whether anything is left. Both shipped drivers implement it; see
+   * {@link StopVerdict}.
+   */
+  stop?(options?: StopOptions): Promise<StopVerdict>;
+  /** The agent's pid and what holds its process tree, for a host that records them. Null until running. */
+  readonly processTree?: ProcessTree | null;
   readonly cliSessionId: string | null;
   readonly withheldCredentials: readonly string[];
 }
@@ -84,13 +93,13 @@ export interface PermissionRequest {
 }
 
 /**
- * The client's answer to a permission request. `reason` is what the agent is told when the answer is a refusal (any
- * outcome that is not an allow), in place of the default "The person denied this tool call." Use it when the refusal
- * is not the person's -- a limit the client enforces, say -- so the agent is told the truth and can act on it. It
- * never turns a refusal into an allow, and it is ignored on an allow. An empty string counts as absent.
+ * The client's answer to a permission request. `reason` is what the agent is told about the answer, in place of the
+ * default "The person denied this tool call." or "Allowed by the person." Use it when the decision is not the
+ * person's -- a limit the client enforces, or an allow it made without asking -- so the agent is told the truth. It
+ * never changes the decision itself. An empty string counts as absent.
  *
- * Where it reaches the provider: Claude, always (the hook's denial reason). Codex, on the legacy approval methods,
- * where a rejection carries text; Codex's v2 approval decisions carry no text, so there it cannot be delivered.
+ * Where it reaches the provider: Claude, always (the hook's decision reason). Codex, only on a refusal through the
+ * legacy approval methods, where a rejection carries text; Codex's allows and its v2 decisions carry no text.
  */
 export type PermissionOutcome =
   | { readonly outcome: 'selected'; readonly optionId: string; readonly reason?: string }

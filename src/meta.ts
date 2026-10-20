@@ -232,8 +232,8 @@ export const META_COMPACTION = metaKey('compaction');
 export const META_LOCAL_COMMAND = metaKey('local_command');
 
 /**
- * On a `session/request_permission` RESPONSE: the client's reason for refusing, as a string. It becomes the refusal the
- * agent reads instead of the default text. ACP's outcome union has no reason field, so over the wire it rides here; a
- * library caller sets `PermissionOutcome.reason` instead. Ignored on an allow.
+ * On a `session/request_permission` RESPONSE: the client's reason for its decision, as a string -- what the agent reads
+ * instead of the default text, for a refusal or an allow. ACP's outcome union has no reason field, so over the wire it
+ * rides here; a library caller sets `PermissionOutcome.reason` instead. It never changes the decision.
  */
 export const META_PERMISSION_REASON = metaKey('permission_reason');

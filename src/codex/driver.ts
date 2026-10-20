@@ -1,3 +1,4 @@
+import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -42,6 +43,12 @@ export interface CodexDriverOptions {
   readonly cwd: string;
   /** Trusted configuration; must not be built from untrusted input. */
   readonly binary?: string;
+  /**
+   * Arguments placed before the provider's own, for a binary that is an interpreter: `{ binary: process.execPath,
+   * binaryArgs: ['/abs/stub.mjs'] }`. The way to run a script provider on Windows, where a `.cmd` that is not an npm
+   * shim is refused (it would need cmd.exe, which interprets its arguments).
+   */
+  readonly binaryArgs?: readonly string[];
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   readonly allowEnv?: readonly string[];
   readonly resumeSessionId?: string;
@@ -339,6 +346,26 @@ export class CodexDriver implements AgentDriver {
     this.#shutdown(signal);
   }
 
+  /**
+   * End app-server and its whole process tree, and say whether anything is left (see {@link StopVerdict}). A transport
+   * that cannot report is closed, and the verdict says nothing was verified.
+   */
+  stop(options?: StopOptions): Promise<StopVerdict> {
+    const transport = this.#transport;
+    const verdict = transport?.stop !== undefined
+      ? transport.stop(options)
+      : Promise.resolve<StopVerdict>(transport === null
+        ? { graceful: true, empty: true, survivors: 0, verified: true }
+        : { graceful: false, empty: false, survivors: null, verified: false });
+    this.#shutdown('SIGTERM', transport?.stop === undefined);
+    return verdict;
+  }
+
+  /** app-server's pid and what holds its tree; null until it is running. */
+  get processTree(): ProcessTree | null {
+    return this.#transport?.processTree ?? null;
+  }
+
   async #connect(): Promise<void> {
     const { env, withheld } = childEnv(this.#options.parentEnv ?? process.env, {
       allow: ['CODEX_HOME', 'CODEX_CONFIG_DIR', 'XDG_CONFIG_HOME', ...(this.#options.allowEnv ?? [])],
@@ -352,7 +379,12 @@ export class CodexDriver implements AgentDriver {
       onExit: (code, signal) => this.#onExit(code, signal),
     };
     const transport = this.#transportFactory(
-      { cwd: this.#options.cwd, env, ...(this.#options.binary === undefined ? {} : { binary: this.#options.binary }) },
+      {
+        cwd: this.#options.cwd,
+        env,
+        ...(this.#options.binary === undefined ? {} : { binary: this.#options.binary }),
+        ...(this.#options.binaryArgs === undefined ? {} : { binaryArgs: this.#options.binaryArgs }),
+      },
       handlers,
     );
     this.#transport = transport;
@@ -1187,14 +1219,14 @@ export class CodexDriver implements AgentDriver {
     this.#events.onTurnEnd?.(outcome);
   }
 
-  #shutdown(signal: NodeJS.Signals): void {
+  #shutdown(signal: NodeJS.Signals, closeTransport = true): void {
     if (this.#closed) return;
     this.#closed = true;
     this.#clearTurnDeadline();
     this.#releasePendingCancel();
     this.#removeImages();
     for (const pending of [...this.#pendingApprovals.values()]) pending.cancel();
-    this.#transport?.close(signal);
+    if (closeTransport) this.#transport?.close(signal);
     this.#peer?.fail(new Error('Codex driver stopped'));
     this.#events.onExit?.(null, signal);
   }

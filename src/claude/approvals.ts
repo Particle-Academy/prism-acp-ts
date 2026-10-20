@@ -79,12 +79,14 @@ export function permissionRequestFor(input: HookInput): PermissionRequest {
 
 /** The hook's answer: allow ONLY for an explicit "allow once". */
 export function decisionFor(outcome: PermissionOutcome): HookDecision {
+  const given = typeof outcome.reason === 'string' && outcome.reason !== '' ? outcome.reason : undefined;
   if (outcome.outcome === 'selected' && outcome.optionId === 'allow_once') {
-    return { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'Allowed by the person.' };
+    // An allow the client made itself (nobody was asked) says so when it gives a reason.
+    return { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: given ?? 'Allowed by the person.' };
   }
   const fallback = outcome.outcome === 'cancelled' ? 'The request was cancelled.' : 'The person denied this tool call.';
   // The client's own reason when it gave one (a limit it enforces is not the person's refusal); today's text otherwise.
-  const why = typeof outcome.reason === 'string' && outcome.reason !== '' ? outcome.reason : fallback;
+  const why = given ?? fallback;
   return { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: why };
 }
 

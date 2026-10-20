@@ -11,7 +11,7 @@
  * that reason. A driver whose flags could only be checked by spawning something
  * would have its most mistake-prone surface covered by its least reliable test.
  */
-import { type ChildProcess, spawn, execFileSync } from 'node:child_process';
+import { type ChildProcess, execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,6 +25,7 @@ import type { PermissionOutcome, PermissionRequest, ProblemDetail } from '../acp
 export type { ProblemDetail } from '../acp/agent.js';
 import { ApprovalServer, HOOK_SCRIPT, approvalSettings, permissionRequestFor } from './approvals.js';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
+import { ProcessTreeError, launchProvider, type ProcessTree, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
 import type { DriverCapabilities } from '../acp/agent.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
@@ -60,6 +61,12 @@ export interface ClaudeDriverOptions {
   readonly cwd: string;
   /** Binary to run. Overridable for tests and unusual installs. */
   readonly binary?: string;
+  /**
+   * Arguments placed before the provider's own, for a binary that is an interpreter: `{ binary: process.execPath,
+   * binaryArgs: ['/abs/stub.mjs'] }`. The way to run a script provider on Windows, where a `.cmd` that is not an npm
+   * shim is refused (it would need cmd.exe, which interprets its arguments).
+   */
+  readonly binaryArgs?: readonly string[];
   /** Parent environment to build the child's from. Defaults to `process.env`. */
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   /** Extra environment names to pass through to the child. */
@@ -355,6 +362,7 @@ export class ClaudeDriver {
   readonly #framer = new NdjsonFramer();
   readonly #mapper = new ClaudeToAcp();
   #child: ChildProcess | null = null;
+  #provider: ProviderProcess | null = null;
   #stderr = '';
   #pendingOutcome: TurnOutcome | null = null;
   /** The running turn's failure reason, read from its frames; taken at its `result`. */
@@ -445,16 +453,20 @@ export class ClaudeDriver {
         env.PRISM_ACP_APPROVAL_SOCKET = channel.socket;
         env.PRISM_ACP_APPROVAL_TOKEN = channel.token;
       }
-      child = spawn(this.#options.binary ?? 'claude', claudeArgs(this.#options, this.#mcpConfigPath ?? undefined, settingsPath), {
+      // Under a supervisor that owns the whole process tree, and never through a shell (see process-tree.ts).
+      this.#provider = launchProvider(this.#options.binary ?? 'claude', [
+        ...(this.#options.binaryArgs ?? []),
+        ...claudeArgs(this.#options, this.#mcpConfigPath ?? undefined, settingsPath),
+      ], {
         cwd: this.#options.cwd,
         env,
-        // Windows npm installs expose a `.cmd` shim, which needs a shell.
-        shell: process.platform === 'win32',
-        stdio: ['pipe', 'pipe', 'pipe'],
       });
-    } catch {
+      child = this.#provider.child;
+    } catch (cause) {
       this.#removeMcpConfig();
       this.#removeApprovals();
+      // Its message names no path, and says why the CLI could not be run.
+      if (cause instanceof ProcessTreeError) throw cause;
       // A filesystem/spawn error can contain a sensitive path. Keep the report structural.
       throw new Error('failed to prepare Claude MCP configuration or spawn CLI');
     }
@@ -539,9 +551,23 @@ export class ClaudeDriver {
     this.#child?.stdin?.end();
   }
 
-  /** Stop the child. */
+  /** End the CLI and every process it started, now. */
   kill(signal: NodeJS.Signals = 'SIGTERM'): void {
-    this.#child?.kill(signal);
+    this.#provider?.kill(signal);
+  }
+
+  /**
+   * End the CLI and its whole process tree, and say whether anything is left: close stdin, give the CLI `graceMs` to
+   * exit on its own, terminate the tree, and resolve once the tree is empty (or the wait gave up -- see the verdict).
+   */
+  stop(options?: StopOptions): Promise<StopVerdict> {
+    if (this.#provider === null) return Promise.resolve({ graceful: true, empty: true, survivors: 0, verified: true });
+    return this.#provider.stop(options);
+  }
+
+  /** The CLI's pid and what holds its tree; null until it is running. */
+  get processTree(): ProcessTree | null {
+    return this.#provider?.tree ?? null;
   }
 
   /** Everything the CLI has written to stderr so far. */

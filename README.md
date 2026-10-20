@@ -139,6 +139,12 @@ handler) denies it, and the denial reason reaches the model. It is a PreToolUse 
 invocation with `--settings`, talking to the driver over a private socket with a token that travels only in the
 environment; the hook is marked `onFailure: "block"`, so a broken channel blocks the call rather than passing it.
 
+A decision that is not the person's -- a limit your client enforces, or an allow it made without asking -- can carry
+its own reason, which the agent reads instead of "The person denied this tool call." or "Allowed by the person.":
+return `{ outcome: 'selected', optionId: 'reject_once', reason }` (over ACP, put it in the response's
+`_meta["particle.academy/permission_reason"]`). It never changes the decision. Claude always receives it; Codex only on
+a refusal through its legacy approval methods, since its allows and its v2 decisions carry no text.
+
 ## Choosing the model, and learning which one you got
 
 Both drivers take a `model` option: Claude Code's `--model` (an alias such as `sonnet` or a full id), and the
@@ -497,6 +503,33 @@ interrupt itself is refused, the agent is stopped instead, so Stop always stops.
 A driver an embedder writes without `cancel()` gets that same stop.
 A cancel with no turn in flight does nothing. Closing the connection still stops
 every agent.
+
+## Ending a session ends every process it started
+
+Each CLI runs under a small supervisor that owns its whole process tree -- the CLI, its MCP servers, the shells and tool
+subprocesses they start, `detached` ones included -- and never through a shell:
+
+- **Windows:** the CLI is created suspended inside a Job Object (`KILL_ON_JOB_CLOSE`, no breakaway) before it runs a
+  single instruction. The supervisor is built once per install with the `csc.exe` of .NET Framework 4, into
+  `%LOCALAPPDATA%/prism-acp/supervisor-<source hash>/`, and its SHA-256 is checked before every launch. If it cannot be
+  built or verified the driver refuses to start, naming the cause, rather than run uncontained. Call
+  `prepareProcessTree({ directory? })` at startup so that surfaces once, before the first session.
+- **Linux:** the CLI leads its own process group, and descendants that leave it are found through `/proc` by parent and
+  by a per-launch `PRISM_ACP_TREE_ID` cookie in their environment. Not caught: one that clears its environment, leaves
+  the group and is orphaned. **macOS:** the process group only.
+
+A pid is never signalled unless its start time still matches, and the tree also ends when the CLI exits on its own or
+the host dies (on Windows, by the kernel; elsewhere, when the supervisor sees its control socket close).
+
+```ts
+const verdict = await driver.stop({ graceMs: 5_000 }); // close stdin, wait, end the tree, then report
+// { graceful: false, empty: true, survivors: 0, verified: true }
+driver.processTree; // { providerPid, supervisorPid, containment: { kind: 'job-object' } | { kind: 'process-group', pgid } }
+```
+
+`kill()` ends the tree too, without waiting to report. On Windows a `.cmd` is run only if it is an npm shim (as node +
+its script), and the current directory is never searched for the binary. To run a script as the provider, name the
+interpreter and pass the script first: `{ binary: process.execPath, binaryArgs: ['/abs/stub.mjs'] }`.
 
 ## Driver capabilities
 

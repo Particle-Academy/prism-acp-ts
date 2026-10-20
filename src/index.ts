@@ -111,3 +111,5 @@ export { CODEX_DRIVER_CAPABILITIES, CodexDriver } from './codex/driver.js';
 export type { CodexDriverOptions, CodexTransportFactory } from './codex/driver.js';
 export { codexRateLimitNotice, parseCodexRateLimit, readCodexRateLimit } from './codex/rate-limit.js';
 export type { CodexRateLimit, CodexRateLimitRead, CodexRateLimitWindow } from './codex/rate-limit.js';
+export { ProcessTreeError, launchProvider, prepareProcessTree } from './process-tree.js';
+export type { Containment, LaunchOptions, ProcessTree, ProviderProcess, StopOptions, StopVerdict } from './process-tree.js';

@@ -12,6 +12,11 @@ vi.mock('node:child_process', async () => ({
   ...await vi.importActual<typeof import('node:child_process')>('node:child_process'),
   spawn: vi.fn(),
 }));
+vi.mock('../src/process-tree.js', async () => ({
+  ...await vi.importActual<typeof import('../src/process-tree.js')>('../src/process-tree.js'),
+  // The provider is spawned directly through the intercepted spawn; containment is tested in process-tree.test.ts.
+  launchProvider: (await import('./fake-launch.js')).fakeLaunch,
+}));
 
 const UUID = '01a12564-30a8-7961-8aa9-6d145dd2e179';
 const INVALID_IDS = [

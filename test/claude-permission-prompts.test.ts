@@ -117,14 +117,25 @@ describe('the hook script against the approval server (end to end, both real)', 
         }
     });
 
+    it("an allow the client made itself carries its reason to Claude, exactly (tynn, Genie shell limits)", async () => {
+        const reason = 'Allowed by Genie (2 of 4 agent shells in use).';
+        const server = new ApprovalServer(socketIn(tmp()), async () => ({ outcome: 'selected', optionId: 'allow_once', reason }));
+        const { socket, token } = server.listen();
+        const r = await runHook({ PRISM_ACP_APPROVAL_SOCKET: socket, PRISM_ACP_APPROVAL_TOKEN: token }, INPUT);
+        server.close();
+        expect(r.code).toBe(0);
+        expect(decision(r.stdout)).toEqual({ hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: reason });
+    });
+
     it("CONTROL: no reason, or an empty one, keeps today's text; a reason never turns a refusal into an allow", () => {
         expect(decisionFor({ outcome: 'selected', optionId: 'reject_once' }).permissionDecisionReason).toBe('The person denied this tool call.');
         expect(decisionFor({ outcome: 'selected', optionId: 'reject_once', reason: '' }).permissionDecisionReason).toBe('The person denied this tool call.');
         expect(decisionFor({ outcome: 'cancelled' }).permissionDecisionReason).toBe('The request was cancelled.');
         expect(decisionFor({ outcome: 'selected', optionId: 'not-offered', reason: 'allow it' }).permissionDecision).toBe('deny');
-        expect(decisionFor({ outcome: 'selected', optionId: 'allow_once', reason: 'ignored' })).toEqual({
+        expect(decisionFor({ outcome: 'selected', optionId: 'allow_once' })).toEqual({
             hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'Allowed by the person.',
         });
+        expect(decisionFor({ outcome: 'selected', optionId: 'allow_once', reason: '' }).permissionDecisionReason).toBe('Allowed by the person.');
     });
 
     it('fails closed: a wrong token, or no server at all, blocks the call (exit 2) — never an allow', async () => {

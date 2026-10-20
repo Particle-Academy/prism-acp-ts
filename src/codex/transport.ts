@@ -1,5 +1,6 @@
-import { type ChildProcess, spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
+import { launchProvider, type ProcessTree, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
 
 export interface CodexTransportHandlers {
   readonly onFrame: (frame: unknown) => void;
@@ -12,12 +13,17 @@ export interface CodexTransport {
   start(): Promise<void>;
   send(frame: unknown): void;
   close(signal?: NodeJS.Signals): void;
+  /** End app-server and its whole process tree, and say whether anything is left. */
+  stop?(options?: StopOptions): Promise<StopVerdict>;
+  readonly processTree?: ProcessTree | null;
 }
 
 export interface CodexTransportOptions {
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
   readonly binary?: string;
+  /** Arguments placed before `app-server ...`, for a binary that is an interpreter (see CodexDriverOptions). */
+  readonly binaryArgs?: readonly string[];
 }
 
 /** Run App Server over its measured, newline-framed stdio JSON-RPC channel. */
@@ -26,6 +32,7 @@ export class StdioCodexTransport implements CodexTransport {
   readonly #handlers: CodexTransportHandlers;
   readonly #framer = new NdjsonFramer();
   #child: ChildProcess | null = null;
+  #provider: ProviderProcess | null = null;
   #stderrBuffer = '';
   #closed = false;
   #stderrOverflowReported = false;
@@ -42,12 +49,13 @@ export class StdioCodexTransport implements CodexTransport {
       throw new Error('Codex app-server stdio transport requires Node.js 22 or newer');
     }
 
-    const child = spawn(this.#options.binary ?? 'codex', ['app-server', '--listen', 'stdio://'], {
+    // Under a supervisor that owns the whole process tree, and never through a shell (see process-tree.ts).
+    const provider = launchProvider(this.#options.binary ?? 'codex', [...(this.#options.binaryArgs ?? []), 'app-server', '--listen', 'stdio://'], {
       cwd: this.#options.cwd,
       env: { ...this.#options.env },
-      shell: process.platform === 'win32',
-      stdio: ['pipe', 'pipe', 'pipe'],
     });
+    this.#provider = provider;
+    const child = provider.child;
     this.#child = child;
 
     child.stdout?.on('data', (chunk: Buffer) => {
@@ -69,7 +77,7 @@ export class StdioCodexTransport implements CodexTransport {
     });
 
     await new Promise<void>((resolve, reject) => {
-      child.once('spawn', resolve);
+      provider.started.then(() => resolve(), (cause: Error) => reject(new Error(`Codex app-server spawn failed (${cause.name})`)));
       child.once('error', (cause: Error) => reject(new Error(`Codex app-server spawn failed (${cause.name})`)));
     });
   }
@@ -86,7 +94,17 @@ export class StdioCodexTransport implements CodexTransport {
     if (this.#closed) return;
     this.#closed = true;
     this.#child?.stdin?.end();
-    this.#child?.kill(signal);
+    this.#provider?.kill(signal);
+  }
+
+  stop(options?: StopOptions): Promise<StopVerdict> {
+    this.#closed = true;
+    if (this.#provider === null) return Promise.resolve({ graceful: true, empty: true, survivors: 0, verified: true });
+    return this.#provider.stop(options);
+  }
+
+  get processTree(): ProcessTree | null {
+    return this.#provider?.tree ?? null;
   }
 
   #onStderr(chunk: string): void {
