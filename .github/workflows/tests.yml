@@ -37,6 +37,25 @@ jobs:
       - run: npm run build
       - run: npx vitest run
 
+  # Windows has its own containment (a Job Object, a csc-built supervisor), its own command resolution (npm shims, no
+  # shell) and its own quoting, and none of it runs on Linux. It is verified here, never on a developer's desktop:
+  # 0.21.0 shipped passing --settings and --mcp-config paths wrapped in quotes that only a Windows run could see.
+  windows:
+    name: windows, node 24
+    runs-on: windows-latest
+    needs: third-party
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npx vitest run
+
   third-party:
     name: Third-party dependency allowlist
     runs-on: ubuntu-latest

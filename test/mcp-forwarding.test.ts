@@ -68,7 +68,8 @@ function client(provider: 'claude' | 'codex') {
     const argv = args as string[];
     const flag = argv.indexOf('--mcp-config');
     if (flag !== -1) {
-      const path = argv[flag + 1].replace(/^"|"$/g, '');
+      // Read as given: a path the CLI could not open as-is (quoted, say) must fail here too.
+      const path = argv[flag + 1];
       configPaths.push(path);
       configs.push(JSON.parse(readFileSync(path, 'utf8')));
       if (process.platform !== 'win32') {
@@ -336,17 +337,13 @@ describe('Claude temporary credential file lifecycle', () => {
     } finally { await c.close(); }
   });
 
-  it('quotes a file path with spaces and refuses Windows expansion characters', () => {
-    const path = 'C:\\temp folder\\mcp.json';
-    const args = claudeArgs({ cwd: '/work' }, path);
-    expect(args[args.indexOf('--mcp-config') + 1]).toBe(
-      process.platform === 'win32' ? `"${path}"` : path,
-    );
-    for (const character of ['%', '!', '"', '\r', '\n']) {
-      const unsafe = `C:\\temp${character}folder\\mcp.json`;
-      if (process.platform === 'win32') {
-        expect(() => claudeArgs({ cwd: '/work' }, unsafe)).toThrow(/cannot be represented safely/);
-      }
+  it('passes a file path verbatim on every platform: no shell runs the CLI, so nothing may be pre-quoted', () => {
+    // Before 0.21.0 the path was wrapped in quotes for cmd.exe. Without a shell those quotes would reach the CLI as
+    // part of the path, and it would read a file that does not exist.
+    for (const path of ['C:\\temp folder\\mcp.json', 'C:\\temp%folder!\\mcp.json', '/tmp/a b/mcp.json']) {
+      const args = claudeArgs({ cwd: '/work' }, path, path);
+      expect(args[args.indexOf('--mcp-config') + 1]).toBe(path);
+      expect(args[args.indexOf('--settings') + 1]).toBe(path);
     }
   });
 
@@ -356,7 +353,7 @@ describe('Claude temporary credential file lifecycle', () => {
     try {
       if (mode === 'throw') vi.mocked(spawn).mockImplementation((_binary, args) => {
         const argv = args as string[];
-        path = argv[argv.indexOf('--mcp-config') + 1].replace(/^"|"$/g, '');
+        path = argv[argv.indexOf('--mcp-config') + 1];
         throw new Error(`sensitive cause ${TOKEN}`);
       });
       const reply = await c.request('session/new', { cwd: '/work', mcpServers: SERVERS });

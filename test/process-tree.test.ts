@@ -295,4 +295,33 @@ describe('through the drivers, where a host enters', () => {
     expect(argv).toEqual(['app-server', '--listen', 'stdio://']);
     expect(await transport.stop({ graceMs: 100 })).toMatchObject({ empty: true, verified: true });
   });
+
+  it('ClaudeDriver hands the CLI --settings and --mcp-config paths it can open as given (0.21.0 sent them quoted on Windows)', async () => {
+    const { ClaudeDriver } = await import('../src/claude/driver.js');
+    const dir = tmp();
+    const argvFile = join(dir, 'argv.json');
+    const script = join(dir, 'stub-claude.mjs');
+    // Records its argv, and whether each path flag names a file it can actually read.
+    writeFileSync(script, [
+      "import { existsSync, writeFileSync } from 'node:fs';",
+      'const argv = process.argv.slice(2);',
+      "const opened = Object.fromEntries(['--settings', '--mcp-config'].map((flag) => [flag, existsSync(argv[argv.indexOf(flag) + 1])]));",
+      `writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify({ argv, opened }));`,
+      'setInterval(() => {}, 1 << 30);',
+    ].join('\n'));
+    const driver = new ClaudeDriver({
+      cwd: dir,
+      binary: process.execPath,
+      binaryArgs: [script],
+      permissionPrompts: { tools: ['Bash'] },
+      mcpServers: [{ name: 'probe', command: process.execPath, args: [], env: [] }],
+    }, {});
+    driver.start();
+    const seen = await until('argv', () => (existsSync(argvFile) ? JSON.parse(readFileSync(argvFile, 'utf8')) as {
+      argv: string[]; opened: Record<string, boolean>;
+    } : undefined));
+    expect(seen.opened).toEqual({ '--settings': true, '--mcp-config': true });
+    for (const flag of ['--settings', '--mcp-config']) expect(seen.argv[seen.argv.indexOf(flag) + 1]).not.toMatch(/^"|"$/);
+    expect(await driver.stop({ graceMs: 100 })).toMatchObject({ empty: true });
+  });
 });

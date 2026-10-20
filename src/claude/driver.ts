@@ -168,21 +168,10 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
   if ((options.mcpServers?.length ?? 0) > 0 && mcpConfigPath === undefined) {
     throw new Error('claudeArgs requires an MCP config file path when mcpServers is non-empty');
   }
-  if (mcpConfigPath !== undefined) {
-    // shell:true is needed for Windows npm shims. Only a generated file path
-    // crosses that shell; JSON values and credentials never become argv.
-    if (process.platform === 'win32' && /["%!\r\n\0]/.test(mcpConfigPath)) {
-      throw new Error('MCP config file path cannot be represented safely by the Windows shell');
-    }
-    args.push('--mcp-config', process.platform === 'win32' ? `"${mcpConfigPath}"` : mcpConfigPath);
-  }
-  if (settingsPath !== undefined) {
-    // Same rule as the MCP config: only a generated file path crosses the Windows shell.
-    if (process.platform === 'win32' && /["%!\r\n\0]/.test(settingsPath)) {
-      throw new Error('settings file path cannot be represented safely by the Windows shell');
-    }
-    args.push('--settings', process.platform === 'win32' ? `"${settingsPath}"` : settingsPath);
-  }
+  // Plain paths on every platform. No shell runs the CLI any more (process-tree.ts quotes the argv itself), so the
+  // quotes this once added for cmd.exe would now reach the CLI as part of the path.
+  if (mcpConfigPath !== undefined) args.push('--mcp-config', mcpConfigPath);
+  if (settingsPath !== undefined) args.push('--settings', settingsPath);
 
   return args;
 }
