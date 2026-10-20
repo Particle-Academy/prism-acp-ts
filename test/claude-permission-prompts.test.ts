@@ -102,6 +102,31 @@ describe('the hook script against the approval server (end to end, both real)', 
         expect(decision(r.stdout).permissionDecisionReason).toMatch(/denied/i);
     });
 
+    it("a refusal that carries the client's reason reaches Claude with exactly that text (tynn, Genie shell limits)", async () => {
+        const reason = 'Genie: this workspace already runs 3 of 3 shells (npm run dev, vitest, php artisan queue:work). Stop one first.';
+        for (const outcome of [
+            { outcome: 'selected', optionId: 'reject_once', reason },
+            { outcome: 'cancelled', reason },
+        ] as const) {
+            const server = new ApprovalServer(socketIn(tmp()), async () => outcome);
+            const { socket, token } = server.listen();
+            const r = await runHook({ PRISM_ACP_APPROVAL_SOCKET: socket, PRISM_ACP_APPROVAL_TOKEN: token }, INPUT);
+            server.close();
+            expect(r.code).toBe(0);
+            expect(decision(r.stdout)).toEqual({ hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason });
+        }
+    });
+
+    it("CONTROL: no reason, or an empty one, keeps today's text; a reason never turns a refusal into an allow", () => {
+        expect(decisionFor({ outcome: 'selected', optionId: 'reject_once' }).permissionDecisionReason).toBe('The person denied this tool call.');
+        expect(decisionFor({ outcome: 'selected', optionId: 'reject_once', reason: '' }).permissionDecisionReason).toBe('The person denied this tool call.');
+        expect(decisionFor({ outcome: 'cancelled' }).permissionDecisionReason).toBe('The request was cancelled.');
+        expect(decisionFor({ outcome: 'selected', optionId: 'not-offered', reason: 'allow it' }).permissionDecision).toBe('deny');
+        expect(decisionFor({ outcome: 'selected', optionId: 'allow_once', reason: 'ignored' })).toEqual({
+            hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'Allowed by the person.',
+        });
+    });
+
     it('fails closed: a wrong token, or no server at all, blocks the call (exit 2) — never an allow', async () => {
         const server = new ApprovalServer(socketIn(tmp()), async () => ({ outcome: 'selected', optionId: 'allow_once' }));
         const { socket } = server.listen();

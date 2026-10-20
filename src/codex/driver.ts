@@ -1294,9 +1294,12 @@ function codexDecision(method: string, outcome: PermissionOutcome, choices: Map<
     return isObject(choice.decision) ? choice.decision : { permissions: {}, scope: 'turn' };
   }
   if (method === 'applyPatchApproval' || method === 'execCommandApproval') {
-    return isObject(choice.decision) && 'decision' in choice.decision
-      ? { decision: choice.decision.decision }
-      : { decision: choice.decision };
+    const decision = isObject(choice.decision) && 'decision' in choice.decision ? choice.decision.decision : choice.decision;
+    // A legacy rejection carries text, so the client's reason replaces the default there. The v2 decisions carry none.
+    if (outcome.reason !== undefined && outcome.reason !== '' && isObject(decision) && isObject(decision.denied)) {
+      return { decision: { denied: { ...decision.denied, rejection: outcome.reason } } };
+    }
+    return { decision };
   }
   return { decision: choice.decision };
 }

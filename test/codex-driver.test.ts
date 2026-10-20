@@ -7,6 +7,7 @@ import {
   META_CLI_SESSION_ID,
   META_DRIVER_CAPABILITIES,
   META_EXEC_POLICY_AMENDMENT,
+  META_PERMISSION_REASON,
   META_UNMAPPED_FRAME,
 } from '../src/meta.js';
 import { encodeLine } from '../src/ndjson.js';
@@ -125,7 +126,7 @@ async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
 
-async function permissionHarness(overrides: Record<string, unknown> = {}) {
+async function permissionHarness(overrides: Record<string, unknown> = {}, method = 'item/commandExecution/requestApproval') {
   const input = new PassThrough();
   const output = new PassThrough();
   const outputFrames: Record<string, unknown>[] = [];
@@ -154,7 +155,7 @@ async function permissionHarness(overrides: Record<string, unknown> = {}) {
   transport.frame({
     jsonrpc: '2.0',
     id: 88,
-    method: 'item/commandExecution/requestApproval',
+    method,
     params: {
       itemId: 'approval-item',
       turnId: 'turn-live',
@@ -340,6 +341,31 @@ describe('CodexDriver', () => {
     const result = await state.answer({ outcome: { outcome: 'cancelled' } });
 
     expect(result).toMatchObject({ result: { decision: 'cancel' } });
+    state.close();
+  });
+
+  it('a refusal reason from the client becomes the legacy rejection text, exactly (tynn, Genie shell limits)', async () => {
+    const reason = 'Genie: this workspace already runs 3 of 3 shells (npm run dev, vitest, php artisan queue:work).';
+    const state = await permissionHarness({ callId: 'call-1', command: ['rm', '-rf', 'build'], cwd: '/work' }, 'execCommandApproval');
+    const result = await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-deny' }, _meta: { [META_PERMISSION_REASON]: reason } });
+
+    expect(result).toMatchObject({ result: { decision: { denied: { rejection: reason } } } });
+    state.close();
+  });
+
+  it('CONTROL: without a reason the legacy rejection keeps its default text', async () => {
+    const state = await permissionHarness({ callId: 'call-1', command: ['rm', '-rf', 'build'], cwd: '/work' }, 'execCommandApproval');
+    const result = await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-deny' }, _meta: { [META_PERMISSION_REASON]: '' } });
+
+    expect(result).toMatchObject({ result: { decision: { denied: { rejection: 'Declined by user' } } } });
+    state.close();
+  });
+
+  it('a reason never turns a refusal into an allow, and a v2 decline (which carries no text) is unchanged by one', async () => {
+    const state = await permissionHarness({ availableDecisions: ['accept', 'decline'] });
+    const result = await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-decline' }, _meta: { [META_PERMISSION_REASON]: 'a limit' } });
+
+    expect(result).toMatchObject({ result: { decision: 'decline' } });
     state.close();
   });
 

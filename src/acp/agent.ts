@@ -24,7 +24,7 @@
 import { JsonRpcPeer, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR, RpcError } from '../jsonrpc.js';
 import type { AcpUpdate } from '../claude/to-acp.js';
 import type { StopReason, TurnOutcome } from '../claude/driver.js';
-import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, META_TURN_FAILURE, withMeta } from '../meta.js';
+import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, META_PERMISSION_REASON, META_TURN_FAILURE, withMeta } from '../meta.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
 import { PromptRefused, promptBlockKind, promptBlocks, type PromptBlockKind, type PromptContent } from '../prompt.js';
 
@@ -83,9 +83,18 @@ export interface PermissionRequest {
   readonly _meta?: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * The client's answer to a permission request. `reason` is what the agent is told when the answer is a refusal (any
+ * outcome that is not an allow), in place of the default "The person denied this tool call." Use it when the refusal
+ * is not the person's -- a limit the client enforces, say -- so the agent is told the truth and can act on it. It
+ * never turns a refusal into an allow, and it is ignored on an allow. An empty string counts as absent.
+ *
+ * Where it reaches the provider: Claude, always (the hook's denial reason). Codex, on the legacy approval methods,
+ * where a rejection carries text; Codex's v2 approval decisions carry no text, so there it cannot be delivered.
+ */
 export type PermissionOutcome =
-  | { readonly outcome: 'selected'; readonly optionId: string }
-  | { readonly outcome: 'cancelled' };
+  | { readonly outcome: 'selected'; readonly optionId: string; readonly reason?: string }
+  | { readonly outcome: 'cancelled'; readonly reason?: string };
 
 /**
  * Builds a driver for one session.
@@ -388,7 +397,13 @@ export class AcpAgent {
             ...request,
           });
           const outcome = asObject(result)?.outcome;
-          return isPermissionOutcome(outcome) ? outcome : { outcome: 'cancelled' };
+          if (!isPermissionOutcome(outcome)) return { outcome: 'cancelled' };
+          // Built fresh, so nothing else on the client's object travels inward.
+          const reason = asString(asObject(asObject(result)?._meta)?.[META_PERMISSION_REASON]);
+          const base: PermissionOutcome = outcome.outcome === 'cancelled'
+            ? { outcome: 'cancelled' }
+            : { outcome: 'selected', optionId: outcome.optionId };
+          return reason === undefined || reason === '' ? base : { ...base, reason };
         },
         onTurnEnd: (outcome) => {
           const turn = session.turn;

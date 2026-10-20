@@ -82,7 +82,9 @@ export function decisionFor(outcome: PermissionOutcome): HookDecision {
   if (outcome.outcome === 'selected' && outcome.optionId === 'allow_once') {
     return { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'Allowed by the person.' };
   }
-  const why = outcome.outcome === 'cancelled' ? 'The request was cancelled.' : 'The person denied this tool call.';
+  const fallback = outcome.outcome === 'cancelled' ? 'The request was cancelled.' : 'The person denied this tool call.';
+  // The client's own reason when it gave one (a limit it enforces is not the person's refusal); today's text otherwise.
+  const why = typeof outcome.reason === 'string' && outcome.reason !== '' ? outcome.reason : fallback;
   return { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: why };
 }
 
