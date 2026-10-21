@@ -24,7 +24,8 @@
 import { JsonRpcPeer, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR, RpcError } from '../jsonrpc.js';
 import type { AcpUpdate } from '../claude/to-acp.js';
 import type { StopReason, TurnOutcome } from '../claude/driver.js';
-import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, META_PERMISSION_REASON, META_TURN_FAILURE, withMeta } from '../meta.js';
+import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, META_MODEL_INFO, META_PERMISSION_REASON, META_TURN_FAILURE, withMeta } from '../meta.js';
+import type { SessionModelState } from '../models.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
 import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
 import { PromptRefused, promptBlockKind, promptBlocks, type PromptBlockKind, type PromptContent } from '../prompt.js';
@@ -61,6 +62,10 @@ export interface AgentDriver {
   stop?(options?: StopOptions): Promise<StopVerdict>;
   /** The agent's pid and what holds its process tree, for a host that records them. Null until running. */
   readonly processTree?: ProcessTree | null;
+  /** The models the signed-in account offers, and which one this session uses. Both shipped drivers implement it. */
+  modelState?(): Promise<SessionModelState>;
+  /** Switch the live session's model. Both shipped drivers implement it (Codex applies it from the next turn). */
+  setModel?(modelId: string): Promise<void>;
   readonly cliSessionId: string | null;
   readonly withheldCredentials: readonly string[];
 }
@@ -190,8 +195,9 @@ export class AcpAgent {
     peer
       .handle('initialize', (params) => this.#initialize(params))
       .handle('authenticate', () => this.#authenticate())
-      .handle('session/new', (params) => this.#sessionNew(params))
-      .handle('session/load', (params) => this.#sessionLoad(params))
+      .handle('session/new', async (params) => await this.#withModels(this.#sessionNew(params)))
+      .handle('session/load', async (params) => await this.#withModels(this.#sessionLoad(params), asString(asObject(params)?.sessionId)))
+      .handle('session/set_model', async (params) => await this.#sessionSetModel(params))
       .handle('session/prompt', async (params) => await this.#sessionPrompt(params));
 
     peer.onNotify('session/cancel', (params) => this.#sessionCancel(params));
@@ -271,6 +277,53 @@ export class AcpAgent {
     this.#open(id, cwd, undefined, mcpServers);
     this.#minted.add(id);
     return { sessionId: id };
+  }
+
+  /**
+   * ACP's (unstable) session model state on a session/new or session/load result: `models: { availableModels,
+   * currentModelId }`, from the provider itself (see models.ts), so a client lists what the account really offers.
+   * Waited for at most 10 s, and LEFT OUT -- never invented -- if the driver cannot say; the session works either way.
+   */
+  async #withModels(result: Record<string, unknown>, loadedId?: string): Promise<Record<string, unknown>> {
+    const id = loadedId ?? asString(result.sessionId);
+    const driver = id === undefined ? undefined : this.#sessions.get(id)?.driver;
+    if (driver?.modelState === undefined) return result;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const state = await Promise.race([
+        driver.modelState(),
+        new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 10_000); }),
+      ]);
+      if (state === null) {
+        this.#options.onProtocolError?.(id!, 'the agent did not report its models within 10 s', { recoverable: true });
+        return result;
+      }
+      return { ...result, models: acpModels(state) };
+    } catch (cause) {
+      this.#options.onProtocolError?.(id!, `the agent could not report its models (${messageOf(cause)})`, { recoverable: true });
+      return result;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /** ACP's (unstable) `session/set_model`: switch a live session's model. The result is an empty object. */
+  async #sessionSetModel(params: unknown): Promise<Record<string, unknown>> {
+    const object = asObject(params);
+    const sessionId = asString(object?.sessionId);
+    const modelId = asString(object?.modelId);
+    if (sessionId === undefined || modelId === undefined) {
+      throw new RpcError(RPC_INVALID_PARAMS, 'session/set_model requires a sessionId and a modelId');
+    }
+    const session = this.#sessions.get(sessionId);
+    if (session === undefined || session.exited) throw new RpcError(RPC_INVALID_PARAMS, `no live session: ${sessionId}`);
+    if (session.driver.setModel === undefined) throw new RpcError(RPC_INVALID_PARAMS, 'this agent cannot switch models');
+    try {
+      await session.driver.setModel(modelId);
+    } catch (cause) {
+      throw new RpcError(RPC_INVALID_PARAMS, messageOf(cause));
+    }
+    return {};
   }
 
   #sessionLoad(params: unknown): Record<string, unknown> {
@@ -592,6 +645,25 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+/** The driver's model state in ACP's shape: what ACP's model info has no field for rides in `_meta`. */
+function acpModels(state: SessionModelState): Record<string, unknown> {
+  return {
+    availableModels: state.availableModels.map((model) => {
+      const extra = {
+        ...(model.resolvedModel === undefined ? {} : { resolvedModel: model.resolvedModel }),
+        ...(model.isDefault === undefined ? {} : { isDefault: model.isDefault }),
+      };
+      return {
+        modelId: model.modelId,
+        name: model.name,
+        ...(model.description === undefined ? {} : { description: model.description }),
+        ...(Object.keys(extra).length === 0 ? {} : { _meta: { [META_MODEL_INFO]: extra } }),
+      };
+    }),
+    currentModelId: state.currentModelId,
+  };
 }
 
 function isPermissionOutcome(value: unknown): value is PermissionOutcome {

@@ -60,6 +60,15 @@ class FakeTransport implements CodexTransport {
           },
         };
         break;
+      case 'model/list':
+        // Two pages, as the app-server pages them; the second holds a hidden model the driver must leave out.
+        result = params?.cursor === null || params?.cursor === undefined
+          ? { data: [{ id: 'gpt-6.1-sol', model: 'gpt-6.1-sol', displayName: 'GPT-6.1-Sol', description: 'Workhorse.', isDefault: true, hidden: false }], nextCursor: 'models-2' }
+          : { data: [
+            { id: 'gpt-6-luna', model: 'gpt-6-luna', displayName: 'GPT-6-Luna', description: 'Fast.', isDefault: false, hidden: false },
+            { id: 'internal', model: 'internal', displayName: 'Internal', description: '', isDefault: false, hidden: true },
+          ], nextCursor: null };
+        break;
       case 'thread/turns/list':
         this.#turnPage += 1;
         result = this.#singleHistoryTurn
@@ -982,5 +991,45 @@ describe('CodexDriver MCP tool approval', () => {
     state.transport.frame({ jsonrpc: '2.0', id: 78, method: 'something/else', params: {} });
     await settle();
     expect(state.transport.sent.find((f) => f.id === 78)).toMatchObject({ error: { code: -32601 } });
+  });
+});
+
+/**
+ * THE MODEL PICKER SHOWS WHAT CODEX OFFERS (tynn, for the owner, 2026-10-21). `model/list` is the app-server's own
+ * method (its schema: ModelListParams -> ModelListResponse { data, nextCursor }); measured with
+ * scripts/probe-codex-models.mjs on codex-cli 0.163.0. A switch has no call of its own: turn/start's `model` applies to
+ * that turn and every later one.
+ */
+describe('CodexDriver models', () => {
+  const turnStartsOf = (transport: FakeTransport) => transport.sent.filter((frame) => frame.method === 'turn/start');
+
+  it('lists every page of model/list, without hidden models, with the default current', async () => {
+    const state = setup();
+    state.driver.start();
+    const models = await state.driver.modelState();
+    expect(models.availableModels.map((m) => m.modelId)).toEqual(['gpt-6.1-sol', 'gpt-6-luna']);
+    expect(models.currentModelId).toBe('gpt-6.1-sol');
+    expect(state.transport.sent.filter((f) => f.method === 'model/list').map((f) => (f.params as Record<string, unknown>).cursor))
+      .toEqual([null, 'models-2']);
+    state.driver.kill();
+  });
+
+  it('a switch is sent with the next turn/start, and only from then on', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('first');
+    await settle();
+    expect(turnStartsOf(state.transport)[0]?.params).not.toHaveProperty('model');
+    state.transport.frame({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { id: 'turn-live', status: 'completed' } } });
+    await settle();
+
+    await state.driver.setModel('gpt-6-luna');
+    expect((await state.driver.modelState()).currentModelId).toBe('gpt-6-luna');
+    state.driver.prompt('second');
+    await settle();
+    expect(turnStartsOf(state.transport)[1]?.params).toMatchObject({ model: 'gpt-6-luna' });
+    await expect(state.driver.setModel('--flag')).rejects.toThrow(/refusing model/);
+    state.driver.kill();
   });
 });

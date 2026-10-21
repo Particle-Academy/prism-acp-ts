@@ -42,6 +42,15 @@ class ProviderChild extends EventEmitter {
       for (const line of chunk.toString().trimEnd().split('\n')) {
         const request = JSON.parse(line) as Record<string, unknown>;
         this.sent.push(request);
+        // Claude's control `initialize`, which the driver sends at start for the model list: answered as the CLI does.
+        if (request.type === 'control_request') {
+          const id = request.request_id;
+          queueMicrotask(() => this.stdout.write(encodeLine({
+            type: 'control_response',
+            response: { subtype: 'success', request_id: id, response: { models: [{ value: 'default', displayName: 'Default' }] } },
+          })));
+          continue;
+        }
         if (typeof request.id !== 'number') continue;
         const params = request.params as Record<string, unknown>;
         let result: unknown = {};

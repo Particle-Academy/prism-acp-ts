@@ -1,4 +1,5 @@
 import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
+import { codexModelsOf, type AvailableModel, type SessionModelState } from '../models.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -161,6 +162,10 @@ export class CodexDriver implements AgentDriver {
   #itemSequence = 0;
   #approvalSequence = 0;
   #transport: CodexTransport | null = null;
+  /** The model this thread uses: what thread/start reported, a reroute, or setModel(). Null until known. */
+  #currentModelId: string | null = null;
+  /** Chosen by setModel(); sent with the next turn/start, which applies it to that turn and every later one. */
+  #modelOverride: string | null = null;
   #peer: JsonRpcPeer | null = null;
   #started = false;
   #closed = false;
@@ -361,6 +366,39 @@ export class CodexDriver implements AgentDriver {
     return verdict;
   }
 
+  /**
+   * The models the signed-in account offers, and which one this thread uses -- ACP's session model state. The
+   * app-server's `model/list`, paged, once the handshake is done; hidden models are left out, as Codex's own picker
+   * leaves them out. `currentModelId` is what thread/start reported, a reroute, or the last setModel().
+   */
+  async modelState(): Promise<SessionModelState> {
+    if (!this.#started) throw new Error('driver is not started');
+    await this.#ready;
+    const peer = this.#requirePeer();
+    const availableModels: AvailableModel[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 20; page += 1) {
+      const result = asObject(await peer.request('model/list', { cursor, includeHidden: false }));
+      availableModels.push(...codexModelsOf(result));
+      const next = asString(result?.nextCursor);
+      cursor = next === undefined || next.length === 0 ? null : next;
+      if (cursor === null) break;
+    }
+    const current = this.#currentModelId ?? availableModels.find((model) => model.isDefault)?.modelId ?? null;
+    return { availableModels, currentModelId: current };
+  }
+
+  /**
+   * Switch the thread's model. Codex has no separate call for it: turn/start's `model` applies to that turn and every
+   * later one, so the choice is sent with the next turn, and a turn already running finishes on the model it began
+   * with. The id must pass the same check as the `model` option.
+   */
+  async setModel(modelId: string): Promise<void> {
+    const model = assertModel(modelId);
+    this.#modelOverride = model;
+    this.#currentModelId = model;
+  }
+
   /** app-server's pid and what holds its tree; null until it is running. */
   get processTree(): ProcessTree | null {
     return this.#transport?.processTree ?? null;
@@ -550,6 +588,8 @@ export class CodexDriver implements AgentDriver {
         threadId,
         cwd: this.#options.cwd,
         input,
+        // turn/start's `model` overrides "this turn and subsequent turns" (app-server schema, TurnStartParams).
+        ...(this.#modelOverride === null ? {} : { model: this.#modelOverride }),
       })
       .then((value) => {
         const turn = asObject(asObject(value)?.turn);
@@ -1172,6 +1212,7 @@ export class CodexDriver implements AgentDriver {
   /** The model in use, as Codex named it; nothing when it did not. */
   #reportModel(model: string | undefined): void {
     if (model === undefined || model.length === 0) return;
+    this.#currentModelId = model;
     this.#emit(withMeta({ sessionUpdate: 'notice', notice: { level: 'debug', message: 'model' } }, { [META_MODEL]: model }));
   }
 

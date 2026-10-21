@@ -237,3 +237,9 @@ export const META_LOCAL_COMMAND = metaKey('local_command');
  * rides here; a library caller sets `PermissionOutcome.reason` instead. It never changes the decision.
  */
 export const META_PERMISSION_REASON = metaKey('permission_reason');
+
+/**
+ * On one entry of a session's `models.availableModels`: what ACP's model info has no field for -- the concrete model an
+ * alias resolves to (`resolvedModel`) and whether the provider marks it as its default (`isDefault`).
+ */
+export const META_MODEL_INFO = metaKey('model_info');

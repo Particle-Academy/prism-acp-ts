@@ -25,6 +25,7 @@ import type { PermissionOutcome, PermissionRequest, ProblemDetail } from '../acp
 export type { ProblemDetail } from '../acp/agent.js';
 import { ApprovalServer, HOOK_SCRIPT, approvalSettings, permissionRequestFor } from './approvals.js';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
+import { ModelListError, claudeModelsOf, type SessionModelState } from '../models.js';
 import { ProcessTreeError, launchProvider, type ProcessTree, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
 import type { DriverCapabilities } from '../acp/agent.js';
@@ -361,6 +362,12 @@ export class ClaudeDriver {
   /** An interrupt was sent and the turn it targets has not ended yet. */
   #interruptPending = false;
   #controlSequence = 0;
+  /** This driver's own control requests awaiting the CLI's control_response, by request_id. */
+  readonly #controlWaiters = new Map<string, { resolve: (response: Record<string, unknown>) => void; reject: (cause: Error) => void }>();
+  /** The account's models, from the control `initialize` answer. Null until started. */
+  #models: Promise<SessionModelState['availableModels']> | null = null;
+  /** The model this session uses: the `model` option, then whatever setModel() chose. Null = the CLI's default. */
+  #currentModelId: string | null = null;
   readonly #mcpServers: readonly McpServer[];
   #mcpConfigDirectory: string | null = null;
   #mcpConfigPath: string | null = null;
@@ -474,7 +481,18 @@ export class ClaudeDriver {
       this.#events.onProtocolError?.(`failed to spawn: ${cause.message}`);
     });
 
+    this.#currentModelId = this.#options.model ?? null;
+    this.#models = this.#control({ subtype: 'initialize' }).then((response) => {
+      // The control_response's `response` is the envelope ({ subtype, request_id, response }); the models are inside.
+      if (response.subtype !== 'success') throw new ModelListError('the Claude CLI refused the initialize request');
+      return claudeModelsOf(response.response);
+    });
+    // Nobody may ask for the models; a refusal or an early exit must not become an unhandled rejection.
+    this.#models.catch(() => {});
+
     child.on('close', (code, signal) => {
+      for (const waiter of this.#controlWaiters.values()) waiter.reject(new ModelListError('the Claude CLI exited before answering'));
+      this.#controlWaiters.clear();
       this.#removeMcpConfig();
       this.#removeApprovals();
       // Flush first: a frame can be complete without its trailing newline, and
@@ -532,6 +550,51 @@ export class ClaudeDriver {
     });
     return new Promise<void>((resolve, reject) => {
       stdin.write(request, (cause) => (cause ? reject(new Error('failed to write the Claude interrupt request')) : resolve()));
+    });
+  }
+
+  /**
+   * The models the signed-in account offers, and which one this session uses -- ACP's session model state. From the
+   * CLI's control `initialize` answer (see models.ts for the measurement), sent at start; no turn runs.
+   * `currentModelId` is the `model` option or the last setModel(), else the CLI's own `default` entry.
+   */
+  async modelState(): Promise<SessionModelState> {
+    if (this.#models === null) throw new Error('driver is not started');
+    const availableModels = await this.#models;
+    const current = this.#currentModelId ?? availableModels.find((model) => model.isDefault)?.modelId ?? null;
+    return { availableModels, currentModelId: current };
+  }
+
+  /**
+   * Switch the live session's model; the next turn uses it. The control `set_model` request, MEASURED rather than
+   * documented: scripts/probe-claude-models.mjs (claude-code 2.1.301, 2026-10-21) switched a running CLI from its
+   * default to haiku, and the next turn's assistant message and result named claude-haiku-5-5. Rejects if the CLI
+   * refuses; the id must pass the same check as the `model` option.
+   */
+  async setModel(modelId: string): Promise<void> {
+    const model = assertModel(modelId);
+    const response = await this.#control({ subtype: 'set_model', model });
+    if (response.subtype !== 'success') throw new Error(`the Claude CLI refused to switch model to ${JSON.stringify(model)}`);
+    this.#currentModelId = model;
+  }
+
+  /** Send one control request and resolve with the CLI's control_response (its `response` object). */
+  #control(request: Record<string, unknown>, timeoutMs = 30_000): Promise<Record<string, unknown>> {
+    const stdin = this.#child?.stdin;
+    if (stdin === null || stdin === undefined || stdin.destroyed) return Promise.reject(new Error('driver is not started, or its stdin has closed'));
+    this.#controlSequence += 1;
+    const id = `prism-acp-control-${this.#controlSequence}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#controlWaiters.delete(id);
+        reject(new ModelListError(`the Claude CLI did not answer ${String(request.subtype)} within ${timeoutMs} ms`));
+      }, timeoutMs);
+      timer.unref();
+      this.#controlWaiters.set(id, {
+        resolve: (response) => { clearTimeout(timer); resolve(response); },
+        reject: (cause) => { clearTimeout(timer); reject(cause); },
+      });
+      stdin.write(encodeLine({ type: 'control_request', request_id: id, request }));
     });
   }
 
@@ -624,9 +687,18 @@ export class ClaudeDriver {
         continue;
       }
       if (cliSessionId !== null) this.cliSessionId = cliSessionId;
-      // The CLI's answer to this driver's own control request. Nothing waits on it (see cancel()), and it is not
-      // agent output, so it is neither mapped nor filed as unmapped.
-      if (isObject(frame.value) && frame.value.type === 'control_response') continue;
+      // The CLI's answer to this driver's own control request: handed to whatever waits on it (initialize,
+      // set_model; nothing waits on interrupt, see cancel()). Not agent output, so neither mapped nor unmapped.
+      if (isObject(frame.value) && frame.value.type === 'control_response') {
+        const response = isObject(frame.value.response) ? frame.value.response : undefined;
+        const id = typeof response?.request_id === 'string' ? response.request_id : undefined;
+        const waiter = id === undefined ? undefined : this.#controlWaiters.get(id);
+        if (waiter !== undefined && id !== undefined && response !== undefined) {
+          this.#controlWaiters.delete(id);
+          waiter.resolve(response);
+        }
+        continue;
+      }
       acceptedFrames.push(frame);
       this.#failures.observe(frame.value);
 

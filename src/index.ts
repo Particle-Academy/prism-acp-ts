@@ -28,6 +28,7 @@ export {
   META_COMPACTION,
   META_LOCAL_COMMAND,
   META_PERMISSION_REASON,
+  META_MODEL_INFO,
   META_MODEL,
   META_PLUGINS,
   META_SUBAGENTS,
@@ -112,4 +113,6 @@ export type { CodexDriverOptions, CodexTransportFactory } from './codex/driver.j
 export { codexRateLimitNotice, parseCodexRateLimit, readCodexRateLimit } from './codex/rate-limit.js';
 export type { CodexRateLimit, CodexRateLimitRead, CodexRateLimitWindow } from './codex/rate-limit.js';
 export { ProcessTreeError, launchProvider, prepareProcessTree } from './process-tree.js';
+export { ModelListError, listModels } from './models.js';
+export type { AvailableModel, ListModelsOptions, SessionModelState } from './models.js';
 export type { Containment, LaunchOptions, ProcessTree, ProviderProcess, StopOptions, StopVerdict } from './process-tree.js';

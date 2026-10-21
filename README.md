@@ -162,6 +162,30 @@ const model = update._meta?.[META_MODEL]; // e.g. 'claude-haiku-5-5', 'gpt-6.1-s
 Claude reports it on its first frame; Codex on the thread's start or resume, and again on `model/rerouted` when it
 switches. A provider that does not name its model carries no key -- never a guessed default.
 
+### The models the account offers, and switching
+
+The list comes from the provider, for the account that is signed in, so a new model appears without anyone editing a
+list: Claude's control `initialize` answer (what the Agent SDK's `supportedModels()` reads) and Codex's `model/list`.
+No turn runs to get it.
+
+```ts
+import { listModels } from '@particle-academy/prism-acp';
+
+// Before any session exists, e.g. to fill a picker. Starts the CLI briefly and ends it.
+const { availableModels, currentModelId } = await listModels('claude');
+// [{ modelId: 'fable', name: 'Fable 5.1', description: '...', resolvedModel: 'claude-fable-5-1' }, ...]
+
+// On a running session:
+const state = await driver.modelState();   // the same shape; currentModelId is this session's model
+await driver.setModel('fable');            // Claude: switched at once. Codex: from the next turn on.
+```
+
+Over ACP, `session/new` and `session/load` carry the same list as ACP's (unstable) session model state,
+`models: { availableModels: [{ modelId, name, description }], currentModelId }`, with `resolvedModel` and `isDefault`
+under `_meta["particle.academy/model_info"]`; and `session/set_model` switches a live session. If the provider does not
+answer within 10 s, `models` is left out, never invented. The request shapes are measured: re-run
+`npm run probe:claude-models` and `npm run probe:codex-models` when a CLI changes.
+
 ## Resuming a session: use the CLI's id, not ACP's
 
 `session/load` works, and `initialize` reports `loadSession: true`. The trap is

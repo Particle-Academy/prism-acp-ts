@@ -793,3 +793,87 @@ describe('session/load refuses an id that names no conversation', () => {
     expect(h.drivers).toHaveLength(0);
   });
 });
+
+/**
+ * THE MODEL STATE OVER ACP (tynn, for the owner, 2026-10-21). session/new and session/load carry ACP's (unstable)
+ * `models: { availableModels, currentModelId }` from the driver, and `session/set_model` switches a live session.
+ * What ACP's model info has no field for rides in `_meta`.
+ */
+describe('models', () => {
+  class ModelDriver extends FakeDriver {
+    switched: string[] = [];
+    refuse = false;
+    failList = false;
+    async modelState() {
+      if (this.failList) throw new Error('no answer');
+      return {
+        availableModels: [
+          { modelId: 'default', name: 'Default', resolvedModel: 'claude-opus-5-5', isDefault: true },
+          { modelId: 'fable', name: 'Fable 5.1', description: 'For your toughest challenges', resolvedModel: 'claude-fable-5-1' },
+        ],
+        currentModelId: this.switched.at(-1) ?? 'default',
+      };
+    }
+    async setModel(modelId: string) {
+      if (this.refuse) throw new Error(`the CLI refused ${modelId}`);
+      this.switched.push(modelId);
+    }
+  }
+  function modelHarness(configure: (driver: ModelDriver) => void = () => {}) {
+    const sent: Record<string, unknown>[] = [];
+    const drivers: ModelDriver[] = [];
+    const problems: string[] = [];
+    const peer = new JsonRpcPeer({ send: (m) => sent.push(m as Record<string, unknown>) });
+    new AcpAgent(peer, {
+      driverFactory: (options, events) => {
+        const driver = new ModelDriver(options, events);
+        configure(driver);
+        drivers.push(driver);
+        return driver;
+      },
+      newSessionId: () => 'sess_models',
+      onProtocolError: (_id, problem) => problems.push(problem),
+    });
+    return { peer, sent, drivers, problems } as unknown as ReturnType<typeof harness> & { drivers: ModelDriver[]; problems: string[] };
+  }
+
+  it('session/new carries the provider\'s models in ACP\'s shape', async () => {
+    const h = modelHarness();
+    const reply = await call(h, 'session/new', { cwd: '/work', mcpServers: [] });
+    expect(reply.result).toEqual({
+      sessionId: 'sess_models',
+      models: {
+        availableModels: [
+          { modelId: 'default', name: 'Default', _meta: { 'particle.academy/model_info': { resolvedModel: 'claude-opus-5-5', isDefault: true } } },
+          { modelId: 'fable', name: 'Fable 5.1', description: 'For your toughest challenges', _meta: { 'particle.academy/model_info': { resolvedModel: 'claude-fable-5-1' } } },
+        ],
+        currentModelId: 'default',
+      },
+    });
+  });
+
+  it('session/set_model switches the live session; a refusal is an error the client sees', async () => {
+    const h = modelHarness();
+    await call(h, 'session/new', { cwd: '/work', mcpServers: [] });
+    expect((await call(h, 'session/set_model', { sessionId: 'sess_models', modelId: 'fable' }, 2)).result).toEqual({});
+    expect(h.drivers[0]!.switched).toEqual(['fable']);
+
+    h.drivers[0]!.refuse = true;
+    const refused = await call(h, 'session/set_model', { sessionId: 'sess_models', modelId: 'nope' }, 3);
+    expect((refused.error as { message: string }).message).toMatch(/refused nope/);
+    const unknown = await call(h, 'session/set_model', { sessionId: 'sess_other', modelId: 'fable' }, 4);
+    expect((unknown.error as { message: string }).message).toMatch(/no live session/);
+  });
+
+  it('a driver that cannot say leaves models OUT -- never invented -- and the session still opens', async () => {
+    const h = modelHarness((driver) => { driver.failList = true; });
+    const reply = await call(h, 'session/new', { cwd: '/work', mcpServers: [] });
+    expect(reply.result).toEqual({ sessionId: 'sess_models' });
+    expect(h.problems.some((p) => p.includes('could not report its models'))).toBe(true);
+  });
+
+  it('CONTROL: a driver with no model support answers session/new as before', async () => {
+    const h = harness();
+    expect((await call(h, 'session/new', { cwd: '/work', mcpServers: [] })).result).toEqual({ sessionId: 'sess_1' });
+  });
+});
