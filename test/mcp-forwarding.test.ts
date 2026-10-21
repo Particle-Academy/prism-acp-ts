@@ -329,7 +329,17 @@ describe('Claude temporary credential file lifecycle', () => {
           const descriptor = readFileSync(snapshot, 'utf16le').split(/\r?\n/)
             .find((line) => line.startsWith('D:'));
           // The whole descriptor in the message, so a failure on a machine nobody may test on can be read from CI.
-          expect(descriptor?.match(/\([^)]*\)/g), `descriptor: ${descriptor}`).toEqual([`(A;ID;FA;;;${sid})`]);
+          const entries = descriptor?.match(/\([^)]*\)/g) ?? [];
+          // SDDL names the built-in Administrator account (RID 500, as on GitHub's Windows runners) "LA", not by SID.
+          const self = new Set([sid, ...(sid?.endsWith('-500') ? ['LA'] : [])]);
+          const trustees = entries.map((entry) => entry.slice(1, -1).split(';')[5]);
+          // The user's own entry must be there. Beside it, only SYSTEM (SY) and Administrators (BA) may appear: both can
+          // read any file whatever its DACL (the OS itself; backup and take-ownership privileges), and an elevated
+          // runner hands them inherited entries. Any OTHER identity -- another local user, Users, Everyone -- fails.
+          expect(trustees.some((trustee) => self.has(trustee)), `descriptor: ${descriptor}`).toBe(true);
+          expect(trustees.filter((trustee) => !self.has(trustee) && trustee !== 'SY' && trustee !== 'BA'), `descriptor: ${descriptor}`)
+            .toEqual([]);
+          expect(entries.every((entry) => entry.startsWith('(A;')), `descriptor: ${descriptor}`).toBe(true);
         } finally { if (existsSync(snapshot)) unlinkSync(snapshot); }
       } else {
         expect(statSync(path).mode & 0o777).toBe(0o600);
