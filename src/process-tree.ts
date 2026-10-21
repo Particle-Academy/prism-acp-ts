@@ -203,6 +203,10 @@ class SupervisedProvider implements ProviderProcess {
       // The supervisor did not answer: end it. On Windows that closes the job, and the kernel ends the tree.
       this.child.kill();
       await Promise.race([this.#supervisorGone, delay(SUPERVISOR_REPORT_MS)]);
+    } else {
+      // The supervisor exits right after its report. Waiting for it means that when stop() resolves nothing of ours
+      // is running: the supervisor's working directory is the provider's, and a host may remove it next.
+      await Promise.race([this.#supervisorGone, delay(SUPERVISOR_REPORT_MS)]);
     }
     if (typeof reported === 'number') return { graceful, empty: reported === 0, survivors: reported, verified: true };
     return { graceful, empty: this.#windows, survivors: null, verified: false };

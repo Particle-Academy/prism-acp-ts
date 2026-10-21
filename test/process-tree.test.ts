@@ -20,8 +20,9 @@ const TREE = join(here, 'fixtures', 'process-tree.cjs');
 const dirs: string[] = [];
 const launched: ProviderProcess[] = [];
 afterAll(async () => {
-  for (const provider of launched) provider.kill();
-  for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  await Promise.all(launched.map((provider) => provider.stop({ graceMs: 0 })));
+  // Retries cover Windows releasing a directory a moment after its last process exits.
+  for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'prism-tree-')); dirs.push(d); return d; };
 

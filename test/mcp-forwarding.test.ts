@@ -328,7 +328,8 @@ describe('Claude temporary credential file lifecycle', () => {
             { stdio: 'pipe', windowsHide: true });
           const descriptor = readFileSync(snapshot, 'utf16le').split(/\r?\n/)
             .find((line) => line.startsWith('D:'));
-          expect(descriptor?.match(/\([^)]*\)/g)).toEqual([`(A;ID;FA;;;${sid})`]);
+          // The whole descriptor in the message, so a failure on a machine nobody may test on can be read from CI.
+          expect(descriptor?.match(/\([^)]*\)/g), `descriptor: ${descriptor}`).toEqual([`(A;ID;FA;;;${sid})`]);
         } finally { if (existsSync(snapshot)) unlinkSync(snapshot); }
       } else {
         expect(statSync(path).mode & 0o777).toBe(0o600);
