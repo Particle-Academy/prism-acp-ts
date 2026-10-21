@@ -62,6 +62,11 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     }
     return;
   }
+  // The driver asks for the model list at start (models.ts); answered as the measured CLI answers it.
+  if (frame.type === 'control_request' && frame.request && frame.request.subtype === 'initialize') {
+    out({ type: 'control_response', response: { subtype: 'success', request_id: frame.request_id, response: { models: [] } } });
+    return;
+  }
   if (frame.type === 'control_request' && frame.request && frame.request.subtype === 'interrupt') {
     out({ type: 'control_response', response: { subtype: 'success', request_id: frame.request_id, response: { still_queued: [] } } });
     if (inTurn) {
@@ -94,6 +99,10 @@ function freshLog(): string {
   writeFileSync(logFile, '');
   return logFile;
 }
+
+/** An interrupt control request. The driver's own `initialize` (the model list, sent at start) is not one. */
+const isInterrupt = (frame: Record<string, unknown>) =>
+  frame.type === 'control_request' && (frame.request as { subtype?: unknown } | undefined)?.subtype === 'interrupt';
 
 function stdinFrames(): Record<string, unknown>[] {
   return readFileSync(logFile, 'utf8')
@@ -140,7 +149,7 @@ describe.skipIf(process.platform === 'win32')('ClaudeDriver turn cancel, against
       await driver.cancel();
       await until('the interrupted turn to end', () => turnEnds.length === 1);
 
-      const controls = stdinFrames().filter((frame) => frame.type === 'control_request');
+      const controls = stdinFrames().filter(isInterrupt);
       expect(controls).toHaveLength(1);
       expect(controls[0]).toEqual({
         type: 'control_request',
@@ -170,8 +179,8 @@ describe.skipIf(process.platform === 'win32')('ClaudeDriver turn cancel, against
       await until('the process to start', () => driver.running);
       await driver.cancel();
       driver.prompt('FINISH');
-      await until('the turn to be logged', () => stdinFrames().length === 1);
-      expect(stdinFrames().filter((frame) => frame.type === 'control_request')).toEqual([]);
+      await until('the turn to be logged', () => stdinFrames().filter((frame) => frame.type === 'user').length === 1);
+      expect(stdinFrames().filter(isInterrupt)).toEqual([]);
       expect(exits).toEqual([]);
     } finally {
       driver.kill();
