@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ProcessTreeError, launchProvider, prepareProcessTree } from '../src/process-tree.js';
 
 /**
@@ -26,6 +26,9 @@ async function runOnce(): Promise<number | null> {
 }
 
 describe.runIf(process.platform === 'win32')('the Windows supervisor', () => {
+  // This suite uses its own directory; prepare it before timing the tests that verify and rebuild its executable.
+  beforeAll(async () => { await prepareProcessTree({ directory }); }, 60_000);
+
   it('is built once into the given directory, with its hash recorded beside it', async () => {
     await prepareProcessTree({ directory });
     expect(existsSync(executable)).toBe(true);

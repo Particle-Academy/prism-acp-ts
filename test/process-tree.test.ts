@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, describe, expect, it } from 'vitest';
-import { ProcessTreeError, launchProvider, resolveWindowsCommand, windowsCommandLine, type ProviderProcess } from '../src/process-tree.js';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ProcessTreeError, launchProvider, prepareProcessTree, resolveWindowsCommand, windowsCommandLine, type ProviderProcess } from '../src/process-tree.js';
 
 /**
  * A PROVIDER'S WHOLE PROCESS TREE ENDS WITH IT (tynn, Genie, 2026-10-20). On Windows a Stop killed cmd.exe and left
@@ -19,6 +19,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const TREE = join(here, 'fixtures', 'process-tree.cjs');
 const dirs: string[] = [];
 const launched: ProviderProcess[] = [];
+// Match host startup: a cold Windows supervisor compile belongs to setup, outside the first provider test's clock.
+beforeAll(async () => { await prepareProcessTree(); }, 60_000);
+
 afterAll(async () => {
   await Promise.all(launched.map((provider) => provider.stop({ graceMs: 0 })));
   // Retries cover Windows releasing a directory a moment after its last process exits.
