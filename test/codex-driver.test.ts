@@ -1,6 +1,6 @@
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CODEX_DRIVER_CAPABILITIES, CodexDriver, type CodexTransportFactory } from '../src/codex/driver.js';
+import { CODEX_DRIVER_CAPABILITIES, CodexDriver, type CodexDriverOptions, type CodexTransportFactory } from '../src/codex/driver.js';
 import type { CodexTransport, CodexTransportHandlers, CodexTransportOptions } from '../src/codex/transport.js';
 import { serve } from '../src/acp/stdio.js';
 import {
@@ -191,6 +191,97 @@ async function permissionHarness(overrides: Record<string, unknown> = {}, method
     close: () => input.destroy(),
   };
 }
+
+describe('CodexDriver execution policy', () => {
+  it('keeps on-request approval and omits sandbox on thread/start by default', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    const start = state.transport.sent.find((frame) => frame.method === 'thread/start');
+    expect(start).toMatchObject({ params: { approvalPolicy: 'on-request' } });
+    expect(start?.params).not.toHaveProperty('sandbox');
+  });
+
+  it('preserves Codex settings by omitting both options on thread/resume by default', async () => {
+    const state = setup({ resumeSessionId: 'thread-resumed' });
+    state.driver.start();
+    await state.driver.ready;
+    const resume = state.transport.sent.find((frame) => frame.method === 'thread/resume');
+    expect(resume).toMatchObject({ params: { threadId: 'thread-resumed' } });
+    expect(resume?.params).not.toHaveProperty('approvalPolicy');
+    expect(resume?.params).not.toHaveProperty('sandbox');
+  });
+
+  describe.each([
+    ['thread/start', {}],
+    ['thread/resume', { resumeSessionId: 'thread-resumed' }],
+  ] as const)('%s', (method, resumeOptions) => {
+    it('sends an approval override without adding a sandbox override', async () => {
+      const state = setup({ ...resumeOptions, approvalPolicy: 'never' });
+      state.driver.start();
+      await state.driver.ready;
+      const request = state.transport.sent.find((frame) => frame.method === method);
+      expect(request).toMatchObject({ params: { approvalPolicy: 'never' } });
+      expect(request?.params).not.toHaveProperty('sandbox');
+    });
+
+    it('sends a sandbox override without adding an approval override on resume', async () => {
+      const state = setup({ ...resumeOptions, sandbox: 'read-only' });
+      state.driver.start();
+      await state.driver.ready;
+      const request = state.transport.sent.find((frame) => frame.method === method);
+      expect(request).toMatchObject({ params: { sandbox: 'read-only' } });
+      if (method === 'thread/start') expect(request?.params).toHaveProperty('approvalPolicy', 'on-request');
+      else expect(request?.params).not.toHaveProperty('approvalPolicy');
+    });
+
+    it('keeps the validated settings when the caller later changes its options object', async () => {
+      let transport!: FakeTransport;
+      const options: CodexDriverOptions = {
+        cwd: 'C:\\work', parentEnv: {}, ...resumeOptions, approvalPolicy: 'untrusted', sandbox: 'read-only',
+      };
+      const driver = new CodexDriver(options, {}, (_options, handlers) => (transport = new FakeTransport(handlers)));
+      Object.assign(options, { approvalPolicy: 'never', sandbox: 'danger-full-access' });
+      driver.start();
+      await driver.ready;
+      expect(transport.sent.find((frame) => frame.method === method))
+        .toMatchObject({ params: { approvalPolicy: 'untrusted', sandbox: 'read-only' } });
+    });
+
+    it.each([
+      ['untrusted', 'read-only'],
+      ['on-request', 'workspace-write'],
+      ['never', 'danger-full-access'],
+    ] as const)('sends approvalPolicy %s and sandbox %s', async (approvalPolicy, sandbox) => {
+      const state = setup({ ...resumeOptions, approvalPolicy, sandbox });
+      state.driver.start();
+      await state.driver.ready;
+      expect(state.transport.sent.find((frame) => frame.method === method))
+        .toMatchObject({ params: { approvalPolicy, sandbox } });
+    });
+  });
+
+  describe.each([
+    ['approvalPolicy', ['untrusted', 'on-request', 'never']],
+    ['sandbox', ['read-only', 'workspace-write', 'danger-full-access']],
+  ] as const)('%s validation', (option, allowed) => {
+    it.each(['on-failure', '', 'NEVER', 123, false, null, {}, ['never'], new String('never')])(
+      'refuses %j at construction before spawning or sending', (value) => {
+        const transport = new FakeTransport({
+          onFrame: vi.fn(), onStderr: vi.fn(), onProblem: vi.fn(), onExit: vi.fn(),
+        });
+        const start = vi.spyOn(transport, 'start');
+        const factory = vi.fn<CodexTransportFactory>(() => transport);
+        const options = { cwd: 'C:\\work', parentEnv: {}, [option]: value } as CodexDriverOptions;
+        expect(() => new CodexDriver(options, {}, factory))
+          .toThrow(new RegExp(`${option}.*${allowed.join('.*')}`));
+        expect(factory).not.toHaveBeenCalled();
+        expect(start).not.toHaveBeenCalled();
+        expect(transport.sent).toEqual([]);
+      },
+    );
+  });
+});
 
 describe('CodexDriver', () => {
   afterEach(() => {

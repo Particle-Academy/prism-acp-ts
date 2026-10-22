@@ -294,6 +294,26 @@ checks its identity by resuming the captured id through `thread/resume`; omit
 
 ## Codex permissions
 
+`CodexDriver` accepts two trusted configuration options, sent on both `thread/start` and `thread/resume`:
+
+- `approvalPolicy`: `'untrusted' | 'on-request' | 'never'`. New threads default to `'on-request'`. On resume,
+  it is sent only when explicitly configured, preserving Codex's existing setting when omitted.
+- `sandbox`: `'read-only' | 'workspace-write' | 'danger-full-access'`. Omitted leaves the choice to Codex's own
+  default or resumed setting; no sandbox override is sent.
+
+Unknown values are refused at construction, before anything is spawned or sent. In particular, `'on-failure'` is
+not supported: these are the string values in Codex App Server's schema (`codex-cli 0.163.0`, regenerated with
+`codex app-server generate-json-schema`). Never derive either option from model or tool output.
+
+For a caller that deliberately wants full access ("yolo mode"):
+
+```ts
+new CodexDriver({ cwd, approvalPolicy: 'never', sandbox: 'danger-full-access' });
+```
+
+**`'never'` + `'danger-full-access'` turns off Codex's approval prompts AND its sandbox: commands run with the
+user's full permissions and nobody is asked.**
+
 Codex App Server approvals become ACP `session/request_permission` requests.
 The driver offers the decisions Codex sent, including the persistent
 execpolicy-amendment choice; its argv is kept on that option under

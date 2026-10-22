@@ -62,6 +62,20 @@ export interface CodexDriverOptions {
    */
   readonly model?: string;
   /**
+   * Codex approval policy on thread/start and thread/resume. New threads default to `on-request`; on resume,
+   * omitted leaves Codex's setting unchanged. Trusted configuration; never derive it from model or tool output.
+   * `never` with sandbox `danger-full-access` turns off Codex's approval prompts AND its sandbox:
+   * commands run with the user's full permissions and nobody is asked.
+   */
+  readonly approvalPolicy?: 'untrusted' | 'on-request' | 'never';
+  /**
+   * Codex sandbox on thread/start and thread/resume. Omitted uses Codex's own default or resumed setting.
+   * Trusted configuration; never derive it from model or tool output. `danger-full-access` with approvalPolicy
+   * `never` turns off Codex's approval prompts AND its sandbox: commands run with the user's full permissions
+   * and nobody is asked.
+   */
+  readonly sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  /**
    * Codex's MCP tool approval per server, by the server's name in `mcpServers`
    * (`mcp_servers.<id>.default_tools_approval_mode`). `approve` lets a server the caller trusts -- its own -- run
    * its tools without Codex asking. Absent: Codex's own default for every server.
@@ -195,7 +209,14 @@ export class CodexDriver implements AgentDriver {
     transportFactory: CodexTransportFactory = DEFAULT_TRANSPORT_FACTORY,
   ) {
     if (options.model !== undefined) assertModel(options.model);
-    this.#options = options;
+    if (options.approvalPolicy !== undefined && !['untrusted', 'on-request', 'never'].includes(options.approvalPolicy)) {
+      throw new Error('approvalPolicy must be one of: untrusted, on-request, never');
+    }
+    if (options.sandbox !== undefined && !['read-only', 'workspace-write', 'danger-full-access'].includes(options.sandbox)) {
+      throw new Error('sandbox must be one of: read-only, workspace-write, danger-full-access');
+    }
+    // Keep constructor-validated settings stable across asynchronous startup.
+    this.#options = { ...options };
     const servers = readMcpServers(options.mcpServers);
     if (servers.length === 0 && options.mcpToolApproval !== undefined && Object.keys(options.mcpToolApproval).length > 0) {
       codexMcpConfig(servers, options.mcpToolApproval); // refuses: it names servers that were not given
@@ -442,7 +463,8 @@ export class CodexDriver implements AgentDriver {
     if (this.#options.resumeSessionId === undefined) {
       const result = await peer.request('thread/start', {
         cwd: this.#options.cwd,
-        approvalPolicy: 'on-request',
+        approvalPolicy: this.#options.approvalPolicy ?? 'on-request',
+        ...(this.#options.sandbox === undefined ? {} : { sandbox: this.#options.sandbox }),
         ...(this.#options.model === undefined ? {} : { model: this.#options.model }),
         ...(this.#mcpConfig === undefined ? {} : { config: this.#mcpConfig }),
       });
@@ -456,6 +478,8 @@ export class CodexDriver implements AgentDriver {
         threadId: this.#options.resumeSessionId,
         cwd: this.#options.cwd,
         excludeTurns: true,
+        ...(this.#options.approvalPolicy === undefined ? {} : { approvalPolicy: this.#options.approvalPolicy }),
+        ...(this.#options.sandbox === undefined ? {} : { sandbox: this.#options.sandbox }),
         ...(this.#options.model === undefined ? {} : { model: this.#options.model }),
         ...(this.#mcpConfig === undefined ? {} : { config: this.#mcpConfig }),
       });
