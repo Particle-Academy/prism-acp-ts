@@ -525,7 +525,10 @@ export class CodexDriver implements AgentDriver {
         await this.#requirePeer().request('thread/turns/list', {
           threadId,
           sortDirection: 'asc',
-          itemsView: 'none',
+          // TurnItemsView in codex-cli 0.163.0's schema is 'notLoaded' | 'summary' | 'full'. 'none' is refused with
+          // -32600 (measured live), which killed every graceful restart (thread/resume) of a Codex agent. 'notLoaded' asks for the
+          // turns only: each turn's items are fetched with thread/items/list below.
+          itemsView: 'notLoaded',
           limit: 100,
           ...(cursor === undefined ? {} : { cursor }),
         }),
@@ -1411,10 +1414,20 @@ function isMintedAcpId(id: string): boolean {
   return /^sess_\d+_\d+$/.test(id);
 }
 
+/**
+ * A provider failure, as text an embedder can show. An RPC error keeps its code AND the app-server's own message:
+ * dropping the message hid why a graceful restart died ("a codex app-server error", tynn 2026-10-22). The message is
+ * provider text, so terminal control sequences are stripped, it is put on one line and bounded; a non-RPC cause
+ * still reports only its type, since an arbitrary Error message can carry anything.
+ */
 function safeError(prefix: string, cause: unknown): string {
   if (cause !== null && typeof cause === 'object' && 'code' in cause) {
     const code = (cause as { code?: unknown }).code;
-    return `${prefix} (RPC code ${typeof code === 'number' ? code : 'unknown'})`;
+    const raw = (cause as { message?: unknown }).message;
+    const message = typeof raw === 'string'
+      ? stripAnsiControlSequences(raw).text.replace(/\s+/g, ' ').trim().slice(0, 300)
+      : '';
+    return `${prefix} (RPC code ${typeof code === 'number' ? code : 'unknown'}${message === '' ? '' : `: ${message}`})`;
   }
   return `${prefix} (${cause instanceof Error ? cause.name : typeof cause})`;
 }

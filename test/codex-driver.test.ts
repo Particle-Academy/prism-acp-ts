@@ -13,12 +13,17 @@ import {
 import { encodeLine } from '../src/ndjson.js';
 import { readCodexRateLimit } from '../src/codex/rate-limit.js';
 
+/** TurnItemsView, verbatim from `codex app-server generate-json-schema` (codex-cli 0.163.0). */
+const TURN_ITEMS_VIEWS: readonly string[] = ['notLoaded', 'summary', 'full'];
+
 class FakeTransport implements CodexTransport {
   readonly sent: Record<string, unknown>[] = [];
   /** How many times the driver closed (killed) the app-server. A turn cancel must leave this at 0. */
   closes = 0;
   /** When set, turn/interrupt is answered with this JSON-RPC error instead of the documented `{}`. */
   interruptError: { code: number; message: string } | null = null;
+  /** When set, thread/turns/list is answered with this JSON-RPC error. */
+  turnsListError: { code: number; message: string } | null = null;
   #handlers: CodexTransportHandlers;
   #turnPage = 0;
   #historyItems: readonly Record<string, unknown>[];
@@ -70,6 +75,20 @@ class FakeTransport implements CodexTransport {
           ], nextCursor: null };
         break;
       case 'thread/turns/list':
+        if (this.turnsListError !== null) {
+          const error = this.turnsListError;
+          queueMicrotask(() => this.#handlers.onFrame({ jsonrpc: '2.0', id: frame.id, error }));
+          return;
+        }
+        // codex-cli 0.163.0's own schema (ThreadTurnsListParams.itemsView -> TurnItemsView) allows only these. The real
+        // app-server answers anything else with -32600 (measured live), and a graceful restart (thread/resume) died on exactly that
+        // (tynn, 2026-10-22): the driver sent 'none'. So this fake refuses it the same way.
+        if (params?.itemsView !== undefined && !TURN_ITEMS_VIEWS.includes(params.itemsView as string)) {
+          queueMicrotask(() => this.#handlers.onFrame({ jsonrpc: '2.0', id: frame.id, error: {
+            code: -32600, message: `Invalid request: unknown variant \`${String(params.itemsView)}\`, expected one of \`notLoaded\`, \`summary\`, \`full\``,
+          } }));
+          return;
+        }
         this.#turnPage += 1;
         result = this.#singleHistoryTurn
           ? { data: [{ id: 'turn-history' }], nextCursor: null }
@@ -661,7 +680,8 @@ describe('CodexDriver', () => {
       params: { threadId: 'thread-captured', excludeTurns: true },
     });
     expect(calls.find((frame) => frame.method === 'thread/turns/list')).toMatchObject({
-      params: { threadId: 'thread-captured', sortDirection: 'asc', itemsView: 'none' },
+      // 'notLoaded': turns only. Each turn's items are fetched separately, with thread/items/list, below.
+      params: { threadId: 'thread-captured', sortDirection: 'asc', itemsView: 'notLoaded' },
     });
     expect(calls.find((frame) => frame.method === 'thread/items/list')).toMatchObject({
       params: { threadId: 'thread-captured', turnId: 'turn-history' },
@@ -1122,5 +1142,39 @@ describe('CodexDriver models', () => {
     expect(turnStartsOf(state.transport)[1]?.params).toMatchObject({ model: 'gpt-6-luna' });
     await expect(state.driver.setModel('--flag')).rejects.toThrow(/refusing model/);
     state.driver.kill();
+  });
+});
+
+/**
+ * A GRACEFUL RESTART MUST SURVIVE (tynn, 2026-10-22). A Codex agent restarted with thread/resume died about 9 s after
+ * start: the resume succeeded, then history replay sent thread/turns/list with itemsView 'none', which codex-cli
+ * 0.163.0 refuses (-32600, measured live), and the startup failure shut the session down. The owner saw only "a codex app-server
+ * error", because the driver kept the RPC code and dropped the message.
+ */
+describe('CodexDriver graceful restart', () => {
+  it('a resumed session replays its history and stays up', async () => {
+    const problems: string[] = [];
+    const state = setup({ resumeSessionId: 'thread-captured' }, { onProtocolError: (problem) => problems.push(problem) });
+    state.driver.start();
+    await state.driver.ready;
+    expect(problems).toEqual([]);
+    expect(state.transport.closes).toBe(0);
+    const turnsList = state.transport.sent.find((frame) => frame.method === 'thread/turns/list');
+    expect(TURN_ITEMS_VIEWS).toContain((turnsList?.params as Record<string, unknown>).itemsView);
+    state.driver.kill();
+  });
+
+  it('a startup failure carries the app-server\'s own message, cleaned, not just its code', async () => {
+    const problems: string[] = [];
+    const state = setup({ resumeSessionId: 'thread-captured' }, { onProtocolError: (problem) => problems.push(problem) });
+    state.driver.start();
+    // The transport exists once start() has run its synchronous part; history replay has not been reached yet.
+    state.transport.turnsListError = { code: -32600, message: 'Invalid request: unknown variant `none`\u001b[31m\nsecond line' };
+    await state.driver.ready;
+    const failure = problems.find((problem) => problem.startsWith('Codex app-server startup failed'));
+    expect(failure).toContain('RPC code -32600');
+    expect(failure).toContain('Invalid request: unknown variant `none`');
+    // Cleaned: no terminal control sequences, and on one line.
+    expect(failure).not.toMatch(/\u001b|\n/);
   });
 });
