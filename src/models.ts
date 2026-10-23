@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { childEnv } from './env.js';
+import { apiKeyEnvironment, apiKeyHome, type ProviderCredentials } from './credentials.js';
 import { assertModel } from './meta.js';
 import { NdjsonFramer, encodeLine } from './ndjson.js';
 import { launchProvider } from './process-tree.js';
@@ -122,6 +123,8 @@ export interface ListModelsOptions {
   readonly timeoutMs?: number;
   /** Codex only: include models the provider hides from its own picker. */
   readonly includeHidden?: boolean;
+  /** Subscription (the default) or an API key with its home: what the account the list is for is. See credentials.ts. */
+  readonly credentials?: ProviderCredentials;
 }
 
 /**
@@ -130,10 +133,13 @@ export interface ListModelsOptions {
  * and ends it. `currentModelId` is the provider's default here, since no session has chosen one.
  */
 export async function listModels(provider: 'claude' | 'codex', options: ListModelsOptions = {}): Promise<SessionModelState> {
-  const { env } = childEnv(options.parentEnv ?? process.env, {
+  const parentEnv = options.parentEnv ?? process.env;
+  const keyed = apiKeyHome(provider, options.credentials, parentEnv);
+  const { env } = childEnv(parentEnv, {
     allow: provider === 'claude'
       ? ['CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', ...(options.allowEnv ?? [])]
       : ['CODEX_HOME', 'CODEX_CONFIG_DIR', 'XDG_CONFIG_HOME', ...(options.allowEnv ?? [])],
+    ...(keyed === null ? {} : { set: apiKeyEnvironment(provider, keyed) }),
   });
   const args = provider === 'claude'
     ? ['--print', '--output-format', 'stream-json', '--input-format', 'stream-json', '--verbose']
@@ -190,6 +196,12 @@ export async function listModels(provider: 'claude' | 'codex', options: ListMode
     };
     await request('initialize', { clientInfo: { name: '@particle-academy/prism-acp', version: '0' }, capabilities: {} });
     child.child.stdin?.write(encodeLine({ jsonrpc: '2.0', method: 'initialized' }));
+    if (keyed !== null) {
+      const login = await request('account/login/start', { type: 'apiKey', apiKey: keyed.apiKey }).catch(() => {
+        throw new ModelListError('codex refused the API key login');
+      });
+      if ((login as { type?: unknown } | undefined)?.type !== 'apiKey') throw new ModelListError('codex did not confirm the API key login');
+    }
     const models: AvailableModel[] = [];
     let cursor: string | null = null;
     for (let page = 0; page < 20; page += 1) {

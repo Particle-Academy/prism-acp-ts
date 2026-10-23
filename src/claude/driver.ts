@@ -11,11 +11,13 @@
  * that reason. A driver whose flags could only be checked by spawning something
  * would have its most mistake-prone surface covered by its least reliable test.
  */
-import { type ChildProcess, execFileSync } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childEnv } from '../env.js';
+import { apiKeyEnvironment, apiKeyHome, type ProviderCredentials } from '../credentials.js';
+import { restrictToCurrentUser } from '../private-directory.js';
 import { claudeMcpConfig, readMcpServers, type McpServer } from '../mcp.js';
 import { assertModel } from '../meta.js';
 import { ClaudeTurnFailures, type TurnFailure } from '../turn-failure.js';
@@ -92,6 +94,12 @@ export interface ClaudeDriverOptions {
   /** Tool names the agent may use. Omitted means the CLI's own default. */
   readonly allowedTools?: readonly string[];
   readonly disallowedTools?: readonly string[];
+  /**
+   * How the CLI authenticates: the person's subscription login (the default), or an API key the app supplies, with
+   * an app- or tenant-owned configuration home so the person's own login is never touched. See credentials.ts. App or
+   * tenant configuration; never built from what an ACP client sends.
+   */
+  readonly credentials?: ProviderCredentials;
 }
 
 export interface ClaudeDriverEvents {
@@ -298,19 +306,8 @@ function isObject(value: unknown): value is Record<string, unknown> {
 function privateMcpDirectory(): string {
   const directory = mkdtempSync(join(tmpdir(), 'prism-acp-mcp-'));
   try {
-    if (process.platform === 'win32') {
-      const system32 = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
-      const env = childEnv(process.env).env;
-      const identity = execFileSync(join(system32, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'],
-        { encoding: 'utf8', windowsHide: true, env });
-      const sid = identity.match(/\bS-\d+(?:-\d+)+\b/)?.[0];
-      if (sid === undefined) throw new Error('cannot identify the Windows process identity');
-      // File modes are ignored on Windows. Remove inherited grants and let
-      // only this process identity read/write new files in the directory.
-      execFileSync(join(system32, 'icacls.exe'),
-        [directory, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`],
-        { stdio: 'pipe', windowsHide: true, env });
-    }
+    // File modes are ignored on Windows: only this process identity may read or write the directory.
+    restrictToCurrentUser(directory);
     return directory;
   } catch {
     rmdirSync(directory);
@@ -412,7 +409,10 @@ export class ClaudeDriver {
       return;
     }
 
-    const { env, withheld } = childEnv(this.#options.parentEnv ?? process.env, {
+    const parentEnv = this.#options.parentEnv ?? process.env;
+    // Checked before anything starts: a key with no usable home is refused here, naming the field, never the key.
+    const keyed = apiKeyHome('claude', this.#options.credentials, parentEnv);
+    const { env, withheld } = childEnv(parentEnv, {
       allow: [
         // The CLI finds the user's own login through these, so they are allowed
         // explicitly rather than inherited wholesale.
@@ -420,6 +420,8 @@ export class ClaudeDriver {
         'XDG_CONFIG_HOME',
         ...(this.#options.allowEnv ?? []),
       ],
+      // API-key mode: the app's key and the app's home, set explicitly. Inherited credentials stay withheld either way.
+      ...(keyed === null ? {} : { set: apiKeyEnvironment('claude', keyed) }),
     });
     this.withheldCredentials = withheld;
 

@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childEnv } from '../env.js';
+import { apiKeyEnvironment, apiKeyHome, type ProviderCredentials } from '../credentials.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
 import { codexFailureOf } from '../turn-failure.js';
 import { codexMcpConfig, readMcpServers, type McpServer, type McpToolApproval } from '../mcp.js';
@@ -81,6 +82,12 @@ export interface CodexDriverOptions {
    * its tools without Codex asking. Absent: Codex's own default for every server.
    */
   readonly mcpToolApproval?: Readonly<Record<string, McpToolApproval>>;
+  /**
+   * How the app-server authenticates: the person's ChatGPT login (the default), or an API key the app supplies, under
+   * an app- or tenant-owned CODEX_HOME so the person's own login is never replaced. See credentials.ts. App or tenant
+   * configuration; never built from what an ACP client sends.
+   */
+  readonly credentials?: ProviderCredentials;
 }
 
 export type CodexTransportFactory = (
@@ -426,8 +433,11 @@ export class CodexDriver implements AgentDriver {
   }
 
   async #connect(): Promise<void> {
-    const { env, withheld } = childEnv(this.#options.parentEnv ?? process.env, {
+    const parentEnv = this.#options.parentEnv ?? process.env;
+    const keyed = apiKeyHome('codex', this.#options.credentials, parentEnv);
+    const { env, withheld } = childEnv(parentEnv, {
       allow: ['CODEX_HOME', 'CODEX_CONFIG_DIR', 'XDG_CONFIG_HOME', ...(this.#options.allowEnv ?? [])],
+      ...(keyed === null ? {} : { set: apiKeyEnvironment('codex', keyed) }),
     });
     this.withheldCredentials = withheld;
 
@@ -459,6 +469,7 @@ export class CodexDriver implements AgentDriver {
       capabilities: {},
     });
     peer.notify('initialized');
+    if (keyed !== null) await loginWithApiKey(peer, keyed.apiKey);
 
     if (this.#options.resumeSessionId === undefined) {
       const result = await peer.request('thread/start', {
@@ -1512,4 +1523,21 @@ function describe(value: unknown): string {
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   if (Array.isArray(value)) return `array(${value.length})`;
   return typeof value === 'object' ? 'object' : typeof value;
+}
+
+/**
+ * Log the app-server in with an API key, under the CODEX_HOME the credentials named: Codex's own
+ * `account/login/start { type: 'apiKey' }` (codex-cli 0.163.0's schema; measured to answer `{ type: 'apiKey' }` and
+ * announce `authMode: apikey`). Codex accepts any non-empty key here and checks it on the first model call, so a bad
+ * key surfaces as that turn's failure. The app-server's own error text is not forwarded: it is not ours to promise it
+ * never echoes the key.
+ */
+export async function loginWithApiKey(peer: JsonRpcPeer, apiKey: string): Promise<void> {
+  let result: unknown;
+  try {
+    result = await peer.request('account/login/start', { type: 'apiKey', apiKey });
+  } catch {
+    throw new Error('Codex refused the API key login');
+  }
+  if (asObject(result)?.type !== 'apiKey') throw new Error('Codex did not confirm the API key login');
 }

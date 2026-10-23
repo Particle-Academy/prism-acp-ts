@@ -62,8 +62,10 @@ in any protocol — and the way to use them is to run the CLI they belong to. So
 this package spawns the agent binary and translates, rather than reimplementing
 the agent against an HTTP API the user has no key for.
 
-That also keeps the credential out of this package entirely. It never reads one,
-never holds one, and never puts one on a wire.
+In subscription mode (the default) that also keeps the credential out of this
+package entirely: it never reads one, never holds one, and never puts one on a
+wire. An app that bills per token instead can hand the drivers an API key; see
+[API keys instead of a subscription](#api-keys-instead-of-a-subscription).
 
 ## The environment is built, not inherited
 
@@ -110,6 +112,44 @@ Nothing here mutates `process.env`. A workspace may hold an API key on purpose �
 other consumers beside this one legitimately bill per token — so the child's
 environment is constructed and the ambient one is left alone.
 
+## API keys instead of a subscription
+
+A deployment uses either the person's subscription or API keys, and an app may
+offer its users or tenants either. So credentials are app or tenant
+configuration, passed to the driver (and to `listModels`) by the embedder, never
+something an ACP client sends:
+
+```ts
+new ClaudeDriver({
+  cwd,
+  credentials: { mode: 'apiKey', apiKey: process.env.TENANT_ANTHROPIC_KEY!, home: '/srv/app/tenants/acme/claude' },
+});
+new CodexDriver({
+  cwd,
+  credentials: { mode: 'apiKey', apiKey: tenantOpenAiKey, home: '/srv/app/tenants/acme/codex' },
+});
+```
+
+`home` is the CLI's configuration home for that app or tenant
+(`CLAUDE_CONFIG_DIR` for Claude, `CODEX_HOME` for Codex). It is what keeps the
+person's own login untouched: Claude gets the key in its environment, and Codex
+is logged in with `account/login/start { type: 'apiKey' }`, each under `home`.
+Measured with both CLIs: the person's `~/.claude` and `~/.codex/auth.json` were
+not modified. Under the person's own home, Codex's API-key login would REPLACE
+their ChatGPT login, so a `home` that is their subscription home is refused.
+
+- The key is never put in argv and never logged; inherited credentials stay
+  withheld in both modes.
+- A `home` this package creates is restricted to the current user. Codex keeps
+  the key in it (`auth.json`, plain text), so treat the directory as a secret.
+- A home has its own settings, MCP servers, skills and session history: a
+  session started under one home resumes under that home only.
+- A bad key fails the first turn. Claude reports it as `kind: 'auth'`; Codex
+  classifies a rejected key on its websocket as `httpConnectionFailed`, which
+  arrives as `kind: 'other'` with that reason.
+- For `session/load`'s session check with Claude, pass the same directory as
+  `probeSessionStore(id, { configDir: home })`.
+
 ## Framing is pinned, not inferred
 
 This package exists in three languages, and framing is where three
@@ -117,7 +157,7 @@ implementations of one protocol disagree without anyone noticing. So:
 
 - a trailing `\r` is **stripped**, not left to each language's JSON parser to
   tolerate;
-- `MAX_LINE_BYTES` is **1,000,000** in every port, because a cap that differs
+- `MAX_LINE_BYTES` is **64,000,000** in every port, because a cap that differs
   per language means one implementation dies where another succeeds on the same
   stream;
 - an oversized or unparseable line reports its **size, never its content** — a

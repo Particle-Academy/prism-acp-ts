@@ -3,6 +3,8 @@ export type { Frame, FrameError } from './ndjson.js';
 export type { McpCapabilities, McpNamedValue, McpServer } from './mcp.js';
 
 export { BASE_ALLOW, OUTRANKING_CREDENTIALS, childEnv } from './env.js';
+export { apiKeyEnvironment, apiKeyHome } from './credentials.js';
+export type { ApiKeyHome, CredentialProvider, ProviderCredentials } from './credentials.js';
 export type { ChildEnvOptions, ChildEnvResult } from './env.js';
 
 export {
