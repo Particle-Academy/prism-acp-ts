@@ -99,6 +99,14 @@ describe('the allow-list', () => {
     const { env } = childEnv({ PATH: '/usr/bin' }, { set: { PATH: '/opt/bin' } });
     expect(env.PATH).toBe('/opt/bin');
   });
+
+  it('lets `set` REPLACE an inherited spelling in another case, leaving one entry, not two', () => {
+    // A Windows child given both `codex_home` and `CODEX_HOME` receives both, and which it reads is not ours to choose.
+    // For CODEX_HOME that is whose login an API key lands in.
+    const { env } = childEnv({ codex_home: 'C:\\person\\.codex' }, { allow: ['CODEX_HOME'], set: { CODEX_HOME: 'C:\\tenant\\codex' } });
+    expect(Object.keys(env).filter((name) => name.toUpperCase() === 'CODEX_HOME')).toEqual(['CODEX_HOME']);
+    expect(env.CODEX_HOME).toBe('C:\\tenant\\codex');
+  });
 });
 
 describe('it never touches the ambient environment', () => {

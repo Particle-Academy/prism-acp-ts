@@ -174,6 +174,12 @@ export function childEnv(
   // Explicit values last: a caller setting something deliberately outranks
   // whatever the parent happened to contain.
   for (const [name, value] of Object.entries(options.set ?? {})) {
+    // REPLACE, case-insensitively: an inherited `codex_home` left beside a set `CODEX_HOME` reaches a Windows child
+    // as two entries for one variable, and which one it reads is not ours to decide (measured: both are passed). For
+    // CODEX_HOME that choice is whose login an API key is written into.
+    for (const existing of Object.keys(env)) {
+      if (upper(existing) === upper(name)) delete env[existing];
+    }
     env[name] = value;
   }
 

@@ -142,6 +142,12 @@ their ChatGPT login, so a `home` that is their subscription home is refused.
   withheld in both modes.
 - A `home` this package creates is restricted to the current user. Codex keeps
   the key in it (`auth.json`, plain text), so treat the directory as a secret.
+- **The agent can reach its own key.** Claude's key is in the CLI's environment,
+  which the commands and MCP servers it runs inherit unless the CLI removes it;
+  Codex's is in `auth.json` under `home`. Anything running as the same OS user
+  can read either, so tenants that must not reach each other's keys need
+  separate OS users, not just separate homes. (A subscription login has the
+  same property: the agent runs as the person whose login it is.)
 - A home has its own settings, MCP servers, skills and session history: a
   session started under one home resumes under that home only.
 - A bad key fails the first turn. Claude reports it as `kind: 'auth'`; Codex
