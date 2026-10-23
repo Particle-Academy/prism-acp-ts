@@ -149,6 +149,22 @@ function describe(value: unknown): string {
   return typeof value;
 }
 
+const REPRESENTABLE = 'valid epoch seconds representable as a JavaScript date';
+
+/** Whether epoch seconds, as milliseconds, are a date JavaScript can hold (`new Date` refuses past 8.64e15 ms). */
+function representable(seconds: number): boolean {
+  const ms = seconds * 1000;
+  return Number.isFinite(ms) && ms <= 8.64e15;
+}
+
+/**
+ * The window the provider says is binding, if the frame reported it. An OWN property only: `windows[rateLimitType]`
+ * with a type of `toString` read a function as the window and reported "NaN% used" (G-96).
+ */
+export function bindingWindow(limit: ClaudeRateLimit): ClaudeRateLimitWindow | undefined {
+  return Object.hasOwn(limit.windows, limit.rateLimitType) ? limit.windows[limit.rateLimitType] : undefined;
+}
+
 function refuse(path: string, expected: string, got: unknown): RateLimitRead {
   return { ok: false, reason: `rate_limit: ${path} expected ${expected}, got ${describe(got)}` };
 }
@@ -188,6 +204,8 @@ export function readRateLimit(value: unknown): RateLimitRead {
   if (resetsAtSeconds === undefined) {
     return refuse('resetsAt', 'finite number > 0 (epoch seconds)', value.resetsAt);
   }
+  // Past JavaScript's last date the notice's toISOString() throws, and that throw used to end the agent (G-97).
+  if (!representable(resetsAtSeconds)) return refuse('resetsAt', REPRESENTABLE, value.resetsAt);
 
   // An absent `unifiedWindows` is refused, not treated as "no windows": it is
   // the only part of this payload that answers "how much is left", so a
@@ -197,7 +215,10 @@ export function readRateLimit(value: unknown): RateLimitRead {
     return refuse('unifiedWindows', 'an object', value.unifiedWindows);
   }
 
-  const windows: Record<string, ClaudeRateLimitWindow> = {};
+  // Collected as entries and built with Object.fromEntries, which DEFINES each key: assigning `windows[name]` with a
+  // window the provider named `__proto__` set the object's prototype instead, so the window vanished from `_meta`
+  // while the notice still read it (G-96).
+  const entries: Array<[string, ClaudeRateLimitWindow]> = [];
   for (const [name, window] of Object.entries(value.unifiedWindows)) {
     if (!isObject(window)) return refuse(`unifiedWindows.${name}`, 'an object', window);
 
@@ -214,9 +235,13 @@ export function readRateLimit(value: unknown): RateLimitRead {
         window.resetsAt,
       );
     }
+    if (!representable(windowResetsAtSeconds)) {
+      return refuse(`unifiedWindows.${name}.resetsAt`, REPRESENTABLE, window.resetsAt);
+    }
 
-    windows[name] = { utilization, resetsAtMs: windowResetsAtSeconds * 1000 };
+    entries.push([name, { utilization, resetsAtMs: windowResetsAtSeconds * 1000 }]);
   }
+  const windows: Record<string, ClaudeRateLimitWindow> = Object.fromEntries(entries);
 
   const isUsingOverage =
     typeof value.isUsingOverage === 'boolean' ? value.isUsingOverage : undefined;
@@ -249,7 +274,7 @@ export function readRateLimit(value: unknown): RateLimitRead {
  * numbers they would otherwise have to open a debugger to see.
  */
 export function rateLimitNotice(limit: ClaudeRateLimit): string {
-  const binding = limit.windows[limit.rateLimitType];
+  const binding = bindingWindow(limit);
   const resetsAtMs = binding?.resetsAtMs ?? limit.resetsAtMs;
   const used =
     binding === undefined ? '' : ` at ${Math.round(binding.utilization * 100)}% used`;

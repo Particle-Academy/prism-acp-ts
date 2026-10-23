@@ -1,4 +1,4 @@
-import { readRateLimit } from './claude/rate-limit.js';
+import { bindingWindow, readRateLimit } from './claude/rate-limit.js';
 
 /**
  * Why a turn failed, when the provider said: carried on `TurnOutcome.failure` and on the error a failed
@@ -68,7 +68,7 @@ export class ClaudeTurnFailures {
     if (value.type === 'rate_limit_event') {
       const read = readRateLimit(value.rate_limit_info ?? value);
       if (read.ok && read.limit.status !== 'allowed') {
-        const binding = read.limit.windows[read.limit.rateLimitType];
+        const binding = bindingWindow(read.limit);
         this.#resetsAtMs = binding?.resetsAtMs ?? read.limit.resetsAtMs;
       }
     }
@@ -82,7 +82,7 @@ export class ClaudeTurnFailures {
     this.#resetsAtMs = null;
     if (reason === null) return undefined;
 
-    const kind = CLAUDE_KINDS[reason] ?? 'other';
+    const kind = kindOf(CLAUDE_KINDS, reason);
     return kind === 'rate_limit' && resetsAtMs !== null ? { reason, kind, resetsAtMs } : { reason, kind };
   }
 }
@@ -97,5 +97,13 @@ export function codexFailureOf(error: unknown): TurnFailure | undefined {
   else if (typeof info === 'object' && info !== null) reason = Object.keys(info)[0];
   if (reason === undefined || reason === '') return undefined;
 
-  return { reason, kind: CODEX_KINDS[reason] ?? 'other' };
+  return { reason, kind: kindOf(CODEX_KINDS, reason) };
+}
+
+/**
+ * A provider's reason as a kind. An OWN property only: indexing the table directly answered `constructor` with a
+ * function, which JSON drops, so the client got a failure with no kind at all (G-96).
+ */
+function kindOf(kinds: Readonly<Record<string, TurnFailureKind>>, reason: string): TurnFailureKind {
+  return Object.hasOwn(kinds, reason) ? kinds[reason]! : 'other';
 }

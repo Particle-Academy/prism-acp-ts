@@ -218,7 +218,7 @@ export class ClaudeToAcp {
         status: 'pending' satisfies ToolStatus,
         ...(isObject(block.input) ? { rawInput: block.input } : {}),
       };
-      const kind = TOOL_KINDS[name.toLowerCase()];
+      const kind = toolKind(name);
       updates.push(withMeta(kind === undefined ? update : { ...update, kind }, { [META_PARENT_TOOL_CALL]: parent }));
     }
     return updates;
@@ -274,7 +274,7 @@ export class ClaudeToAcp {
         name,
         status: 'pending' satisfies ToolStatus,
       };
-      const kind = TOOL_KINDS[name.toLowerCase()];
+      const kind = toolKind(name);
       // Omitted when unrecognised -- see TOOL_KINDS.
       return [kind === undefined ? update : { ...update, kind }];
     }
@@ -858,6 +858,15 @@ function commandsFromInit(input: Record<string, unknown>): AcpUpdate | undefined
     { sessionUpdate: 'available_commands_update', availableCommands },
     { [META_PLUGINS]: plugins, [META_SUBAGENTS]: subagents },
   );
+}
+
+/**
+ * A tool's kind by its name. An OWN property only: the name is chosen by whoever defines the tool, and indexing the table
+ * directly answered `__proto__` with `{}`, which went out as `"kind":{}` (G-96).
+ */
+function toolKind(name: string): string | undefined {
+  const key = name.toLowerCase();
+  return Object.hasOwn(TOOL_KINDS, key) ? TOOL_KINDS[key] : undefined;
 }
 
 function nonEmptyString(value: unknown): string | undefined {
