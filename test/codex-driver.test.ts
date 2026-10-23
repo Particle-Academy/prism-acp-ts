@@ -123,6 +123,10 @@ class FakeTransport implements CodexTransport {
   frame(value: unknown): void {
     this.#handlers.onFrame(value);
   }
+
+  exit(): void {
+    this.#handlers.onExit(0, null);
+  }
 }
 
 function setup(
@@ -153,6 +157,428 @@ async function settle(): Promise<void> {
 async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
+
+/** Shapes checked against codex-cli 0.163.0's generated schema, rather than the older fake's extra fields. */
+describe('Codex current app-server compatibility', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it.each(['0', '12.50', 12.5, null])('reads credits with the schema-defined decimal balance %j', (balance) => {
+    const read = readCodexRateLimit({ primary: null, secondary: null,
+      credits: { hasCredits: true, unlimited: false, balance } });
+    expect(read).toMatchObject({ ok: true, limit: { credits: {
+      hasCredits: true, unlimited: false, balance: balance === null ? null : Number(balance),
+    } } });
+  });
+
+  it.each(['', ' ', '0x10', '-1', 'NaN', 'Infinity', '1e999', '9'.repeat(400), {}, true])('refuses malformed credits balances without exposing their contents: %j', (balance) => {
+    const read = readCodexRateLimit({ primary: null, secondary: null,
+      credits: { hasCredits: true, unlimited: false, balance } });
+    expect(read).toMatchObject({ ok: false, reason: expect.stringContaining('rateLimits.credits.balance') });
+    if (!read.ok && typeof balance === 'string' && balance.length > 0) expect(read.reason).toContain(`string(${balance.length})`);
+  });
+
+  it.each(['serverRequest/resolved', 'turn/completed'])('drops an already-selected reply when %s clears it before it is sent', async (method) => {
+    let answer!: (outcome: { outcome: 'selected'; optionId: string }) => void;
+    const state = setup({}, { onRequestPermission: () => new Promise((resolve) => { answer = resolve; }) });
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await settle();
+    state.transport.frame({ id: 850, method: 'item/commandExecution/requestApproval', params: { itemId: 'approval' } });
+    answer({ outcome: 'selected', optionId: 'codex-accept' });
+    await Promise.resolve(); // decision selected, JSON-RPC response continuation has not run yet
+    state.transport.frame({ method, params: method === 'serverRequest/resolved'
+      ? { requestId: 850 } : { turn: { id: 'turn-live', status: 'completed' } } });
+    await settle();
+    expect(state.transport.sent.filter((frame) => frame.id === 850)).toEqual([]);
+    state.driver.kill();
+  });
+
+  it.each([undefined, null])('offers standard command decisions when availableDecisions is %s', async (availableDecisions) => {
+    const state = await permissionHarness({ command: 'git status', availableDecisions });
+    const options = (state.permissionRequest.params as { options: { optionId: string }[] }).options;
+    expect(options.map((option) => option.optionId)).toEqual([
+      'codex-accept', 'codex-accept-session', 'codex-decline', 'codex-cancel',
+    ]);
+    expect(await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-accept' } }))
+      .toMatchObject({ result: { decision: 'accept' } });
+    state.close();
+  });
+
+  it.each([[[]], [['futureDecision']]])('does not invent grants when an explicit decision list is %j', async (availableDecisions) => {
+    const state = await permissionHarness({ availableDecisions });
+    expect(await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-accept' } }))
+      .toMatchObject({ result: { decision: 'cancel' } });
+    state.close();
+  });
+
+  it('offers only the proposed persistent command rule when the decision list is absent', async () => {
+    const state = await permissionHarness({ availableDecisions: undefined, proposedExecpolicyAmendment: ['git', 'status'] });
+    expect(await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-accept-amendment' } }))
+      .toMatchObject({ result: { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['git', 'status'] } } } });
+    state.close();
+  });
+
+  it('shows managed network context and preserves exactly the proposed policy', async () => {
+    const rule = { host: 'example.test', action: 'allow' };
+    const state = await permissionHarness({
+      command: null, availableDecisions: undefined,
+      networkApprovalContext: { host: 'example.test', protocol: 'https' },
+      proposedNetworkPolicyAmendments: [rule],
+    });
+    expect((state.permissionRequest.params as { toolCall: unknown }).toolCall)
+      .toMatchObject({ title: 'Allow network access to example.test (https)' });
+    expect(await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-network-0' } }))
+      .toMatchObject({ result: { decision: { applyNetworkPolicyAmendment: { network_policy_amendment: rule } } } });
+    state.close();
+  });
+
+  it('identifies terminal input and includes its permission context', async () => {
+    const state = await permissionHarness({
+      command: 'yes\n', kind: 'writeStdin', environmentId: 'env-test',
+      additionalPermissions: { network: { enabled: true } },
+    });
+    expect((state.permissionRequest.params as { toolCall: unknown }).toolCall).toMatchObject({
+      title: 'Send input to terminal: yes\n',
+      rawInput: { kind: 'writeStdin', environmentId: 'env-test', additionalPermissions: { network: { enabled: true } } },
+    });
+    state.close();
+  });
+
+  it.each(['userMessage', 'agentMessage', 'reasoning'])('accepts a completed %s without an invented status field', async (type) => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.transport.frame({ method: 'item/completed', params: { item: {
+      type, id: 'schema-item', text: 'answer', content: [{ type: 'text', text: 'question' }], summary: ['thought'],
+    } } });
+    expect(state.updates.filter((update) => (update._meta as Record<string, unknown>)?.[META_UNMAPPED_FRAME])).toEqual([]);
+  });
+
+  it('keeps raw reasoning when the completed item has no summary and no streamed deltas', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.transport.frame({ method: 'item/completed', params: { item: { type: 'reasoning', id: 'thought', summary: [], content: ['visible thought'] } } });
+    expect(state.updates).toContainEqual({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'visible thought' } });
+  });
+
+  it('streams command output as tool content and keeps the final raw result', async () => {
+    vi.useFakeTimers();
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.transport.frame({ method: 'item/started', params: { item: {
+      type: 'commandExecution', id: 'command-output', command: 'npm test', cwd: '/workspace', status: 'inProgress',
+    } } });
+    state.transport.frame({ method: 'item/commandExecution/outputDelta', params: { itemId: 'command-output', delta: 'test passed\n' } });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(state.updates).toContainEqual({
+      sessionUpdate: 'tool_call_update', toolCallId: 'command-output',
+      content: [{ type: 'content', content: { type: 'text', text: 'test passed\n' } }],
+    });
+    state.transport.frame({ method: 'item/completed', params: { item: {
+      type: 'commandExecution', id: 'command-output', command: 'npm test', cwd: '/workspace',
+      status: 'completed', exitCode: 0, aggregatedOutput: 'test passed\n', durationMs: 20,
+    } } });
+    const final = state.updates.at(-1)!;
+    expect(final).toMatchObject({ status: 'completed', rawOutput: { output: 'test passed\n', exitCode: 0, durationMs: 20 } });
+    expect(final).toHaveProperty('content', [{ type: 'content', content: { type: 'text', text: 'test passed\n' } }]);
+    expect(state.updates.find((update) => update.sessionUpdate === 'tool_call'))
+      .toMatchObject({ status: 'in_progress', rawInput: { command: 'npm test', cwd: '/workspace' } });
+    state.driver.kill();
+  });
+
+  it('coalesces 1000 command deltas into one cumulative snapshot per window', async () => {
+    vi.useFakeTimers();
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    const snapshots = () => state.updates.filter((update) => update.toolCallId === 'output');
+    for (let index = 0; index < 1000; index += 1) {
+      state.transport.frame({ method: 'item/commandExecution/outputDelta', params: { itemId: 'output', delta: 'x' } });
+    }
+    expect(snapshots()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(199);
+    expect(snapshots()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(snapshots()).toEqual([{
+      sessionUpdate: 'tool_call_update', toolCallId: 'output',
+      content: [{ type: 'content', content: { type: 'text', text: 'x'.repeat(1000) } }],
+    }]);
+    state.transport.frame({ method: 'item/commandExecution/outputDelta', params: { itemId: 'output', delta: 'next' } });
+    expect(snapshots()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(snapshots()).toHaveLength(2);
+    expect(snapshots()[1]).toMatchObject({
+      content: [{ type: 'content', content: { type: 'text', text: 'x'.repeat(1000) + 'next' } }],
+    });
+    state.transport.frame({ method: 'item/completed', params: { item: {
+      type: 'commandExecution', id: 'output', status: 'completed', exitCode: 0, aggregatedOutput: null,
+    } } });
+    expect(state.updates.at(-1)).toMatchObject({ rawOutput: { output: 'x'.repeat(1000) + 'next' } });
+    state.driver.kill();
+  });
+
+  it('completion cancels only its pending snapshot and delivers the final output immediately', async () => {
+    vi.useFakeTimers();
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    for (const itemId of ['finished', 'running']) {
+      state.transport.frame({ method: 'item/commandExecution/outputDelta', params: { itemId, delta: itemId } });
+    }
+    state.transport.frame({ method: 'item/completed', params: { item: {
+      type: 'commandExecution', id: 'finished', status: 'completed', exitCode: 0, aggregatedOutput: 'final output',
+    } } });
+    expect(state.updates.filter((update) => update.toolCallId === 'finished')).toEqual([expect.objectContaining({
+      status: 'completed', rawOutput: { output: 'final output', exitCode: 0 },
+      content: [{ type: 'content', content: { type: 'text', text: 'final output' } }],
+    })]);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(state.updates.filter((update) => update.toolCallId === 'finished')).toHaveLength(1);
+    expect(state.updates.filter((update) => update.toolCallId === 'running')).toEqual([{
+      sessionUpdate: 'tool_call_update', toolCallId: 'running',
+      content: [{ type: 'content', content: { type: 'text', text: 'running' } }],
+    }]);
+    expect(vi.getTimerCount()).toBe(0);
+    state.driver.kill();
+  });
+
+  it.each(['turn completion', 'kill', 'stop', 'transport exit'])('clears every pending output snapshot on %s', async (ending) => {
+    vi.useFakeTimers();
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await flushMicrotasks();
+    for (const itemId of ['first', 'second']) {
+      state.transport.frame({ method: 'item/commandExecution/outputDelta', params: { itemId, delta: 'pending' } });
+    }
+    expect(state.updates.filter((update) => update.sessionUpdate === 'tool_call_update')).toEqual([]);
+    if (ending === 'turn completion') {
+      state.transport.frame({ method: 'turn/completed', params: { turn: { id: 'turn-live', status: 'completed' } } });
+      expect(state.turnEnds).toHaveLength(1);
+    } else if (ending === 'kill') state.driver.kill();
+    else if (ending === 'stop') await state.driver.stop();
+    else state.transport.exit();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(201);
+    expect(state.updates.filter((update) => update.sessionUpdate === 'tool_call_update')).toEqual([]);
+    state.driver.kill();
+  });
+
+  it('bounds streamed command previews and records truncation without including the discarded text', async () => {
+    vi.useFakeTimers();
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    for (const delta of ['private-prefix' + 'x'.repeat(999_985), 'last', 'tail']) {
+      state.transport.frame({ method: 'item/commandExecution/outputDelta', params: { itemId: 'large', delta } });
+    }
+    await vi.advanceTimersByTimeAsync(200);
+    const content = state.updates.at(-1)!.content as { content: { text: string } }[];
+    expect(content[0].content.text).toHaveLength(1_000_000);
+    expect(content[0].content.text.endsWith('lasttail')).toBe(true);
+    const notices = state.updates.filter((update) => String((update.notice as { message?: string })?.message).includes('preview truncated'));
+    expect(notices).toHaveLength(1);
+    expect(JSON.stringify(notices)).not.toContain('private-prefix');
+    state.driver.kill();
+  });
+
+  it.each([{ itemId: 'invalid', delta: 4 }, { delta: 'orphan' }])('records malformed command output without rendering it: %j', async (params) => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.transport.frame({ method: 'item/commandExecution/outputDelta', params });
+    expect(state.updates.filter((update) => update.sessionUpdate === 'tool_call_update')).toEqual([]);
+    expect(state.updates.at(-1)?._meta).toHaveProperty(META_UNMAPPED_FRAME);
+    state.driver.kill();
+  });
+
+  it.each([
+    { host: 'example.test', action: 'unknown' }, { host: 12, action: 'allow' }, { action: 'allow' }, null,
+  ])('never offers a malformed persistent network grant: %j', async (rule) => {
+    const state = await permissionHarness({ availableDecisions: undefined, proposedNetworkPolicyAmendments: [rule] });
+    const options = (state.permissionRequest.params as { options: { optionId: string }[] }).options;
+    expect(options.some((option) => option.optionId.startsWith('codex-network-'))).toBe(false);
+    expect(await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-network-0' } }))
+      .toMatchObject({ result: { decision: 'cancel' } });
+    state.close();
+  });
+
+  it('sanitizes a persistent deny option while preserving its exact host and action on the wire', async () => {
+    const rule = { host: '\u001b[31mexample.test\u001b[0m', action: 'deny' };
+    const state = await permissionHarness({
+      availableDecisions: [{ applyNetworkPolicyAmendment: { network_policy_amendment: rule } }],
+    });
+    const options = (state.permissionRequest.params as { options: unknown[] }).options;
+    expect(options).toContainEqual({ optionId: 'codex-network-0', name: 'Deny example.test and remember', kind: 'reject_always' });
+    expect(await state.answer({ outcome: { outcome: 'selected', optionId: 'codex-network-0' } }))
+      .toMatchObject({ result: { decision: { applyNetworkPolicyAmendment: { network_policy_amendment: rule } } } });
+    state.close();
+  });
+
+  it.each([
+    { type: 'dynamicToolCall', status: 'completed', success: false, contentItems: [{ type: 'inputText', text: 'failed result' }] },
+    { type: 'mcpToolCall', status: 'failed', result: null, error: { message: 'failed result' } },
+  ])('keeps a failed $type result visible', async (item) => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.transport.frame({ method: 'item/completed', params: { item: { id: 'failed-tool', tool: 'lookup', ...item } } });
+    expect(state.updates.at(-1)).toMatchObject({ status: 'failed', content: [{ type: 'content', content: { type: 'text', text: 'failed result' } }] });
+    state.driver.kill();
+  });
+
+  it('maps the canonical contextCompaction item lifecycle', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    for (const method of ['item/started', 'item/completed']) {
+      state.transport.frame({ method, params: { item: { id: 'compact', type: 'contextCompaction' } } });
+    }
+    expect(state.updates.filter((update) => update.sessionUpdate === 'compaction_update')).toEqual([
+      { sessionUpdate: 'compaction_update', status: 'in_progress' },
+      { sessionUpdate: 'compaction_update', status: 'completed' },
+    ]);
+    state.driver.kill();
+  });
+
+  it('ignores foreign-thread and stale resolution events, and refuses stale approval requests', async () => {
+    const permission = vi.fn(() => new Promise<never>(() => {}));
+    const state = setup({}, { onRequestPermission: permission });
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await settle();
+    state.transport.frame({ id: 820, method: 'item/commandExecution/requestApproval', params: {
+      itemId: 'approval', threadId: 'thread-captured', turnId: 'turn-live',
+    } });
+    for (const params of [
+      { requestId: 820, threadId: 'thread-other' },
+      { requestId: 820, threadId: 'thread-captured', turnId: 'turn-stale' },
+    ]) state.transport.frame({ method: 'serverRequest/resolved', params });
+    state.transport.frame({ id: 821, method: 'item/commandExecution/requestApproval', params: {
+      itemId: 'stale-approval', threadId: 'thread-captured', turnId: 'turn-stale',
+    } });
+    state.transport.frame({ id: 822, method: 'item/fileChange/requestApproval', params: {
+      itemId: 'foreign-approval', threadId: 'thread-other', turnId: 'turn-live',
+    } });
+    expect(permission).toHaveBeenCalledTimes(1);
+    for (const id of [821, 822]) expect(state.transport.sent.find((frame) => frame.id === id)).toHaveProperty('error.code', -32602);
+    state.driver.kill();
+    expect(state.transport.sent.find((frame) => frame.id === 820)).toMatchObject({ result: { decision: 'cancel' } });
+  });
+
+  it.each(['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall'])('replays %s as a finished tool rather than pending work', async (type) => {
+    const item = {
+      type, id: 'finished-tool', status: 'completed', command: 'echo result', cwd: '/workspace', changes: [],
+      tool: 'lookup', arguments: { key: 'value' }, aggregatedOutput: 'result', exitCode: 0,
+      result: { content: [{ type: 'text', text: 'MCP result' }], structuredContent: { found: true } },
+      contentItems: [{ type: 'inputText', text: 'dynamic result' }], success: true,
+    };
+    const state = setup({ resumeSessionId: 'thread-resumed' }, {}, [{ item }], true);
+    state.driver.start();
+    await state.driver.ready;
+    const tool = state.updates.find((update) => update.toolCallId === 'finished-tool');
+    expect(tool).toMatchObject({ sessionUpdate: 'tool_call', status: 'completed' });
+    if (type === 'commandExecution') expect(tool).toMatchObject({ content: [{ type: 'content', content: { type: 'text', text: 'result' } }] });
+    if (type === 'mcpToolCall') expect(tool).toMatchObject({ rawOutput: item.result });
+    if (type === 'dynamicToolCall') expect(tool).toMatchObject({ rawOutput: { contentItems: item.contentItems, success: true } });
+    if (type === 'mcpToolCall' || type === 'dynamicToolCall') expect(tool).toMatchObject({
+      content: [{ type: 'content', content: { type: 'text', text: type === 'mcpToolCall' ? 'MCP result' : 'dynamic result' } }],
+    });
+  });
+
+  it('reports a failed command with exit status and its unstreamed error output', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.transport.frame({ method: 'item/completed', params: { item: {
+      type: 'commandExecution', id: 'failed-command', command: 'npm test', status: 'completed',
+      exitCode: 1, aggregatedOutput: 'assertion failed',
+    } } });
+    expect(state.updates.at(-1)).toMatchObject({
+      status: 'failed', rawOutput: { exitCode: 1, output: 'assertion failed' },
+      content: [{ type: 'content', content: { type: 'text', text: 'assertion failed' } }],
+    });
+  });
+
+  it('drops a resolved approval and ignores a late human grant without pausing the next turn', async () => {
+    vi.useFakeTimers();
+    let answer!: (outcome: { outcome: 'selected'; optionId: string }) => void;
+    const state = setup({ turnInactivityTimeoutMs: 100 }, {
+      onRequestPermission: () => new Promise((resolve) => { answer = resolve; }),
+    });
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await flushMicrotasks();
+    state.transport.frame({ id: 808, method: 'item/commandExecution/requestApproval', params: {
+      itemId: 'approval', threadId: 'thread-captured', turnId: 'turn-live', availableDecisions: ['accept', 'cancel'],
+    } });
+    state.transport.frame({ method: 'serverRequest/resolved', params: { threadId: 'thread-captured', requestId: 808 } });
+    answer({ outcome: 'selected', optionId: 'codex-accept' });
+    await flushMicrotasks();
+    expect(state.transport.sent.filter((frame) => frame.id === 808)).toEqual([]);
+    await vi.advanceTimersByTimeAsync(101);
+    expect(state.turnEnds).toHaveLength(1);
+    state.driver.kill();
+  });
+
+  it('turn completion invalidates pending approvals so a late grant never reaches Codex', async () => {
+    let answer!: (outcome: { outcome: 'selected'; optionId: string }) => void;
+    const state = setup({}, { onRequestPermission: () => new Promise((resolve) => { answer = resolve; }) });
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await settle();
+    state.transport.frame({ id: 809, method: 'item/commandExecution/requestApproval', params: { itemId: 'approval', availableDecisions: ['accept', 'cancel'] } });
+    state.transport.frame({ method: 'turn/completed', params: { turn: { id: 'turn-live', status: 'interrupted' } } });
+    answer({ outcome: 'selected', optionId: 'codex-accept' });
+    await settle();
+    expect(state.transport.sent.filter((frame) => frame.id === 809)).toEqual([]);
+    state.driver.kill();
+  });
+
+  it('does not let another thread complete the primary turn or mix its answer into the transcript', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await settle();
+    state.transport.frame({ method: 'thread/started', params: { thread: { id: 'thread-child' } } });
+    state.transport.frame({ method: 'item/agentMessage/delta', params: { threadId: 'thread-child', turnId: 'turn-child', itemId: 'child-answer', delta: 'child text' } });
+    state.transport.frame({ method: 'turn/completed', params: { threadId: 'thread-child', turn: { id: 'turn-child', status: 'completed' } } });
+    expect(state.turnEnds).toEqual([]);
+    expect(state.driver.cliSessionId).toBe('thread-captured');
+    expect(state.updates.filter((update) => update.sessionUpdate === 'agent_message_chunk')).toEqual([]);
+    expect(JSON.stringify(state.updates)).not.toContain('child text');
+    state.driver.kill();
+  });
+
+  it('does not let a stale completion end a different turn in the same thread', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('go');
+    await settle();
+    state.transport.frame({ method: 'turn/completed', params: { threadId: 'thread-captured', turn: { id: 'turn-stale', status: 'completed' } } });
+    expect(state.turnEnds).toEqual([]);
+    state.driver.kill();
+  });
+
+  it('fails closed when the permission callback throws synchronously', async () => {
+    const state = setup({}, { onRequestPermission: () => { throw new Error('UI failed'); } });
+    state.driver.start();
+    await state.driver.ready;
+    state.transport.frame({ id: 810, method: 'item/commandExecution/requestApproval', params: { itemId: 'approval' } });
+    await settle();
+    expect(state.transport.sent.find((frame) => frame.id === 810)).toMatchObject({ result: { decision: 'cancel' } });
+    state.driver.kill();
+  });
+});
 
 async function permissionHarness(overrides: Record<string, unknown> = {}, method = 'item/commandExecution/requestApproval') {
   const input = new PassThrough();
@@ -670,7 +1096,7 @@ describe('CodexDriver', () => {
     expect(state.transport).toBeUndefined();
   });
 
-  it('declares transcriptReplay when the Codex history fixture emits session_message', async () => {
+  it('replays assistant history with ACP agent_message_chunk and object content', async () => {
     const state = setup({ resumeSessionId: 'thread-captured' });
     state.driver.start();
     await state.driver.ready;
@@ -687,8 +1113,14 @@ describe('CodexDriver', () => {
       params: { threadId: 'thread-captured', turnId: 'turn-history' },
     });
     expect(calls.some((frame) => (frame.params as Record<string, unknown> | undefined)?.cursor === 'turn-cursor')).toBe(true);
-    const replayed = state.updates.some((update) => update.sessionUpdate === 'session_message');
+    const replayed = state.updates.some((update) => update.sessionUpdate === 'agent_message_chunk');
     expect(CODEX_DRIVER_CAPABILITIES.transcriptReplay).toBe(replayed);
+    const assistant = state.updates.filter((update) => update.sessionUpdate === 'agent_message_chunk');
+    expect(assistant.length).toBeGreaterThan(0);
+    for (const update of assistant) expect(update).toMatchObject({
+      messageId: 'item-history', content: { type: 'text', text: 'remembered' },
+    });
+    expect(state.updates.some((update) => update.sessionUpdate === 'session_message')).toBe(false);
   });
 
   it('preserves the execpolicy argv on its own ACP permission option', async () => {
@@ -724,7 +1156,7 @@ describe('CodexDriver', () => {
     });
   });
 
-  it('treats a declined item as the turn boundary', async () => {
+  it.each(['commandExecution', 'fileChange'])('keeps a declined %s inside the turn until Codex completes the turn', async (type) => {
     const state = setup();
     state.driver.start();
     await state.driver.ready;
@@ -733,15 +1165,17 @@ describe('CodexDriver', () => {
     state.transport.frame({
       jsonrpc: '2.0',
       method: 'item/completed',
-      params: { item: { type: 'commandExecution', id: 'item-denied', command: ['do'], status: 'declined' } },
+      params: { item: { type, id: 'item-denied', command: 'do', changes: [], status: 'declined' } },
     });
 
-    expect(state.turnEnds).toHaveLength(1);
-    expect(state.turnEnds[0]).toMatchObject({ stopReason: 'cancelled', raw: 'declined' });
+    expect(state.turnEnds).toHaveLength(0);
+    expect(() => state.driver.prompt('too early')).toThrow('already in flight');
     expect(state.updates.find((update) => update.toolCallId === 'item-denied')).toMatchObject({
       sessionUpdate: 'tool_call_update',
       status: 'failed',
     });
+    state.transport.frame({ method: 'turn/completed', params: { turn: { id: 'turn-live', status: 'completed' } } });
+    expect(state.turnEnds).toEqual([{ stopReason: 'end_turn', isError: false, raw: 'completed' }]);
   });
 
   it('emits a complete assistant item when no deltas were received', async () => {
@@ -754,9 +1188,25 @@ describe('CodexDriver', () => {
       params: { item: { type: 'agentMessage', id: 'message-without-deltas', text: 'complete answer', status: 'completed' } },
     });
     expect(state.updates).toContainEqual({
-      sessionUpdate: 'session_message',
-      content: [{ type: 'text', text: 'complete answer' }],
+      sessionUpdate: 'agent_message_chunk',
+      messageId: 'message-without-deltas',
+      content: { type: 'text', text: 'complete answer' },
     });
+  });
+
+  it('keeps assistant deltas on their message id and does not repeat completed text', async () => {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.transport.frame({ method: 'item/agentMessage/delta', params: { itemId: 'assistant-stream', delta: 'one answer' } });
+    state.transport.frame({ method: 'item/completed', params: { item: {
+      type: 'agentMessage', id: 'assistant-stream', text: 'one answer',
+    } } });
+    expect(state.updates.filter((update) => update.sessionUpdate === 'agent_message_chunk')).toEqual([
+      { sessionUpdate: 'agent_message_chunk', messageId: 'assistant-stream', content: { type: 'text', text: 'one answer' } },
+    ]);
+    expect(state.updates.some((update) => update.sessionUpdate === 'session_message')).toBe(false);
+    state.driver.kill();
   });
 
   it('records malformed frame length without exposing its content', async () => {

@@ -35,8 +35,8 @@ import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '
 
 /**
  * Claude driver's behavior claim, published by initialize for clients.
- * permissionRequests is currently false; clients should read
- * this declaration rather than branch on a provider name.
+ * permissionRequests is false by default. An embedder enabling permissionPrompts
+ * declares that configured capability through serve's driverCapabilities.
  */
 export const CLAUDE_DRIVER_CAPABILITIES = {
   permissionRequests: false,
@@ -91,7 +91,7 @@ export interface ClaudeDriverOptions {
    * (`Bash`, `WebFetch`, `Write`, ...).
    */
   readonly permissionPrompts?: { readonly tools: readonly string[] };
-  /** Tool names the agent may use. Omitted means the CLI's own default. */
+  /** CLI --allowed-tools permission auto-allow rules; does not restrict the available tool catalog. */
   readonly allowedTools?: readonly string[];
   readonly disallowedTools?: readonly string[];
   /**

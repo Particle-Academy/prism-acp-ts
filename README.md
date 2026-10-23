@@ -7,8 +7,8 @@ A client — an editor, a terminal UI, an orchestrator — gets structured state
 from an agent instead of guessing it from bytes on a pseudo-terminal: session
 state, streaming assistant output with thought content separable, tool calls
 with status, a plan that changes in place, token usage and cost. Codex can raise
-mid-turn permission requests for the client to answer; Claude currently cannot,
-though Claude tool denials are reported as failed tool calls.
+mid-turn permission requests for the client to answer. Claude can do so for the
+tools explicitly configured through its optional `permissionPrompts` hook.
 
 ```sh
 npm install @particle-academy/prism-acp
@@ -185,6 +185,21 @@ handler) denies it, and the denial reason reaches the model. It is a PreToolUse 
 invocation with `--settings`, talking to the driver over a private socket with a token that travels only in the
 environment; the hook is marked `onFailure: "block"`, so a broken channel blocks the call rather than passing it.
 
+`CLAUDE_DRIVER_CAPABILITIES.permissionRequests` describes the default and remains
+`false`. When an embedder configures this hook, its `serve` declaration can report
+the enabled capability:
+
+```ts
+driverCapabilities: { ...CLAUDE_DRIVER_CAPABILITIES, permissionRequests: true }
+```
+
+Only declare `true` for a runtime with the configured hook and permission handler.
+`serve` supplies the handler that forwards requests to the ACP client. The
+capability declaration itself does not install a hook or authorize a tool.
+Claude's `allowedTools` option is a permission auto-allow list, following the CLI;
+it does not restrict the catalog of available tools. Application authorization
+remains the embedding application's responsibility.
+
 A decision that is not the person's -- a limit your client enforces, or an allow it made without asking -- can carry
 its own reason, which the agent reads instead of "The person denied this tool call." or "Allowed by the person.":
 return `{ outcome: 'selected', optionId: 'reject_once', reason }` (over ACP, put it in the response's
@@ -277,6 +292,11 @@ drivers because their measured resume behavior differs. Codex thread ids are
 the provider's own captured ids and are the same ids accepted by its resume
 method; ACP-minted ids are refused.
 
+Codex assistant text uses `agent_message_chunk` with a single content object
+during streaming, history replay, and completion without streamed deltas.
+`messageId` carries the Codex item id, so clients can distinguish adjacent
+assistant messages. Completion does not repeat text already streamed.
+
 The human half of the conversation differs too. Against a real Claude child,
 the CLI did not echo the client's prompt as `user_message_chunk`, and loading
 its session replayed zero updates. A Claude client cannot reconstruct the whole
@@ -361,12 +381,28 @@ new CodexDriver({ cwd, approvalPolicy: 'never', sandbox: 'danger-full-access' })
 user's full permissions and nobody is asked.**
 
 Codex App Server approvals become ACP `session/request_permission` requests.
-The driver offers the decisions Codex sent, including the persistent
-execpolicy-amendment choice; its argv is kept on that option under
+When Codex supplies `availableDecisions`, the driver offers only the recognized
+choices in that list. When it omits the list (as in the generated `codex-cli
+0.163.0` request schema), the driver offers allow once, allow for the session,
+decline and continue, and cancel. Persistent command or network rules are offered
+only when Codex explicitly proposes them. An empty or unrecognized explicit
+list provides no grant. A persistent execpolicy amendment's argv is kept under
 `particle.academy/execpolicy_amendment` so a client can preserve the distinction
-between one-time approval and a remembered command. Human decisions have no
-default timeout. Cancelling a session, disconnecting the ACP client, or shutting
-down the driver answers any outstanding Codex approval with `cancel`.
+between one-time approval and a remembered command. Managed network and terminal
+input requests have distinct titles and retain their context in `rawInput`.
+Human decisions have no default timeout. Cancelling a session, disconnecting the
+ACP client, or shutting down the driver answers outstanding approvals with
+`cancel`. Requests cleared by Codex or by turn completion ignore late UI replies.
+
+A declined command or file change is a failed tool; the turn continues until
+Codex sends `turn/completed`. Explicit foreign-thread and stale-turn events do
+not contribute to the active turn and are reported through unmapped metadata.
+Foreign-thread diagnostics omit the other thread's payload.
+Command output streams as cumulative ACP content snapshots, retaining at most
+the last 1,000,000 characters per active command and reporting any truncation.
+Completion replaces that preview with Codex's aggregated output when available;
+`rawOutput` also carries exit code and duration when reported. Resumed tool calls
+retain their final status and results, including MCP and dynamic-tool text.
 
 Claude permission denials arrive as `tool_call_update` with `status: "failed"`
 and the sanitized rejection message in `content`. The structured refusal detail
@@ -438,6 +474,9 @@ Codex has a separate `CodexRateLimit` parser because App Server windows report
 `ClaudeRateLimit` uses fractional `utilization` and named windows. Both convert
 the provider's epoch-second reset timestamp to `resetsAtMs`. Do not feed one
 provider's payload to the other's parser.
+Codex credit balances accept the CLI's decimal strings as well as numeric
+values, normalizing them to a finite non-negative number in `credits.balance`.
+Malformed balances are refused with a type-and-length diagnostic.
 
 Both parsers accept usage beyond the allowance (`usedPercent` above 100 or
 `utilization` above 1) without capping it. Overage is real state, and capping
@@ -500,9 +539,9 @@ and connection failures still determine whether a forwarded server can connect.
 
 ### Commit streamed messages at the turn boundary
 
-`agent_message_chunk` and `agent_thought_chunk` carry no message id. The turn
-boundary is the only delimiter between replies, so commit the accumulated
-message there. Clearing the in-flight message without committing loses the
+Chunks can omit `messageId`; when no id is supplied, use the turn boundary to
+commit the accumulated message. Codex assistant chunks carry their item id;
+clients can group them by `messageId`. Clearing the in-flight message without committing loses the
 reply (including the whole reply in a single-message turn); not clearing it
 appends the next turn to the previous one.
 
@@ -628,10 +667,10 @@ measured behavior in `_meta` under
 `particle.academy/driver_capabilities`. The object carries
 `permissionRequests`, `transcriptReplay`, `mcpCapabilities`, `promptBlocks` and
 `cancel` (whether `session/cancel` keeps the session; label Stop from it). If the key is absent, capabilities
-were not declared; absence does not mean `false`. Claude reports
-`permissionRequests: false` today, and that is expected to change when its
-permission bridge lands. Read this declaration at runtime rather than caching
-capabilities against a provider name.
+were not declared; absence does not mean `false`. Claude's exported default has
+`permissionRequests: false`; a host that enables its optional permission hook
+declares the configured capability through `serve` as described above. Read the
+runtime declaration rather than caching capabilities against a provider name.
 
 ## Development
 
@@ -645,7 +684,10 @@ npm run build
 `npm run test:live` opts into real Claude and Codex children and uses the
 authenticated CLI subscriptions. The Codex case checks for the home directory
 at `CODEX_HOME` or `~/.codex`; if it is missing, Vitest reports a skip naming
-the path. It does not inspect a credential filename. It includes a live Codex
+the path. It does not inspect a credential filename. Codex tests use temporary
+working directories with a read-only sandbox. They require assistant text and
+successful completion, memory across a second turn, and history replay and
+memory after a fresh-process resume. They also exercise a live Codex
 turn cancel: `turn/interrupt` accepted, the turn's raw status `interrupted`, the
 app-server neither closed nor exited, and the next prompt reaching `end_turn`.
 

@@ -89,16 +89,19 @@ export function readCodexRateLimit(value: unknown): CodexRateLimitRead {
   if (rates.credits !== undefined && rates.credits !== null) {
     if (!isObject(rates.credits)) return refuse('rateLimits.credits', 'an object or null', rates.credits);
     const { hasCredits, unlimited, balance } = rates.credits;
+    // CreditsSnapshot.balance is string|null in Codex's generated schema (0.163.0), observed live as "0".
+    // Keep our numeric public value, accepting only finite non-negative decimal strings in addition to older numbers.
+    const numericBalance = typeof balance === 'string' && /^\d+(?:\.\d+)?$/.test(balance) ? Number(balance) : balance;
     if (typeof hasCredits !== 'boolean') {
       return refuse('rateLimits.credits.hasCredits', 'boolean', hasCredits);
     }
     if (typeof unlimited !== 'boolean') {
       return refuse('rateLimits.credits.unlimited', 'boolean', unlimited);
     }
-    if (balance !== undefined && balance !== null && !finite(balance, 0)) {
-      return refuse('rateLimits.credits.balance', 'finite number >= 0 or null', balance);
+    if (balance !== undefined && balance !== null && !finite(numericBalance, 0)) {
+      return refuse('rateLimits.credits.balance', 'finite non-negative decimal string, number or null', balance);
     }
-    credits = { hasCredits, unlimited, balance: typeof balance === 'number' ? balance : null };
+    credits = { hasCredits, unlimited, balance: typeof numericBalance === 'number' ? numericBalance : null };
   }
 
   if (rates.planType !== undefined && typeof rates.planType !== 'string') {

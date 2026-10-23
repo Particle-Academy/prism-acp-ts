@@ -17,13 +17,14 @@ export interface LiveCodexHostOptions {
 /** Construct the real ACP host and Codex App Server transport for live tests. */
 export function startLiveCodexHost(options: LiveCodexHostOptions) {
   const parentEnv = options.parentEnv ?? process.env;
+  const drivers: CodexDriver[] = [];
 
-  return serve({
+  const served = serve({
     input: options.input,
     output: options.output,
     onProtocolError: options.onProtocolError,
-    driverFactory: (session, events) =>
-      new CodexDriver(
+    driverFactory: (session, events) => {
+      const driver = new CodexDriver(
         {
           cwd: session.cwd,
           ...(session.resumeSessionId === undefined
@@ -31,12 +32,18 @@ export function startLiveCodexHost(options: LiveCodexHostOptions) {
             : { resumeSessionId: session.resumeSessionId }),
           parentEnv,
           allowEnv: ['CODEX_HOME'],
+          approvalPolicy: 'never',
+          sandbox: 'read-only',
         },
         events,
         (transportOptions: CodexTransportOptions, handlers) => {
           options.onSpawnEnvironment?.(transportOptions.env);
           return new StdioCodexTransport(transportOptions, handlers);
         },
-      ),
+      );
+      drivers.push(driver);
+      return driver;
+    },
   });
+  return { ...served, stopChildren: () => Promise.all(drivers.map((driver) => driver.stop())) };
 }

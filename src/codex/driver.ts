@@ -102,6 +102,8 @@ interface Choice {
 
 interface PendingApproval {
   readonly cancel: () => void;
+  /** Codex cleared the request: settle locally without sending a second answer. */
+  readonly resolved: () => void;
 }
 
 const DEFAULT_TRANSPORT_FACTORY: CodexTransportFactory = (options, handlers) =>
@@ -116,6 +118,8 @@ const APPROVAL_METHODS = new Set([
 ]);
 const MAX_HISTORY_PAGES = 10_000;
 const DEFAULT_TURN_INACTIVITY_TIMEOUT_MS = 600_000;
+const MAX_COMMAND_OUTPUT_CHARS = 1_000_000;
+const COMMAND_OUTPUT_INTERVAL_MS = 200;
 
 /**
  * Codex driver's behavior claim, published by initialize for clients.
@@ -150,6 +154,8 @@ const KNOWN_NOTIFICATIONS = new Set([
   'turn/completed',
   'item/started',
   'item/completed',
+  'item/commandExecution/outputDelta',
+  'serverRequest/resolved',
   'item/agentMessage/delta',
   'item/reasoning/summaryTextDelta',
   'item/reasoning/textDelta',
@@ -180,6 +186,8 @@ export class CodexDriver implements AgentDriver {
   readonly #activeItemIds = new Set<string>();
   readonly #messageDeltas = new Set<string>();
   readonly #reasoningDeltas = new Set<string>();
+  readonly #commandOutputs = new Map<string, { text: string; truncated: boolean }>();
+  readonly #commandOutputTimers = new Map<string, ReturnType<typeof setTimeout>>();
   #itemSequence = 0;
   #approvalSequence = 0;
   #transport: CodexTransport | null = null;
@@ -685,9 +693,28 @@ export class CodexDriver implements AgentDriver {
     }
 
     const method = asString(object.method);
+    const params = asObject(object.params);
+    const threadId = asString(params?.threadId)
+      ?? (method === 'thread/started' && isValidCliSessionId(asObject(params?.thread)?.id)
+        ? asString(asObject(params?.thread)?.id) : undefined);
+    // App Server may report child-thread activity on the same connection. It must not complete the parent's turn
+    // or append the child's prose to the parent's answer. Keep it visible through the unmapped channel instead.
+    if (method !== undefined && threadId !== undefined && this.#threadId !== null && threadId !== this.#threadId) {
+      this.#recordUnmapped(`Codex frame belongs to another thread: ${method}`, { method });
+      if (typeof object.id === 'number' || typeof object.id === 'string') {
+        this.#sendServerReply({ jsonrpc: '2.0', id: object.id, error: { code: -32602, message: 'thread is not owned by this driver' } });
+      }
+      return;
+    }
     this.#noteTurnActivity(method, object.params);
     const hasId = typeof object.id === 'number' || typeof object.id === 'string';
     if (method !== undefined && hasId) {
+      const turnId = asString(asObject(object.params)?.turnId);
+      if (this.#activeTurn !== null && turnId !== undefined && turnId !== this.#activeTurn) {
+        this.#recordUnmapped(`Codex request belongs to another turn: ${method}`, object);
+        this.#sendServerReply({ jsonrpc: '2.0', id: object.id, error: { code: -32602, message: 'turn is not active in this driver' } });
+        return;
+      }
       if (APPROVAL_METHODS.has(method)) {
         void this.#handleApproval(object.id as string | number, method, object.params);
       } else if (method === 'mcpServer/elicitation/request') {
@@ -711,11 +738,51 @@ export class CodexDriver implements AgentDriver {
 
   #handleNotification(method: string, params: unknown): void {
     const object = asObject(params) ?? {};
+    const turnId = asString(object.turnId) ?? asString(asObject(object.turn)?.id);
+    if (this.#activeTurn !== null && turnId !== undefined && turnId !== this.#activeTurn) {
+      this.#recordUnmapped(`Codex notification belongs to another turn: ${method}`, { method, params });
+      return;
+    }
     if (!KNOWN_NOTIFICATIONS.has(method)) {
       this.#recordUnmapped(`unmapped Codex notification: ${method}`, { method, params });
       return;
     }
     switch (method) {
+      case 'serverRequest/resolved': {
+        const id = object.requestId;
+        if (typeof id === 'number' || typeof id === 'string') this.#pendingApprovals.get(String(id))?.resolved();
+        else this.#recordUnmapped('serverRequest/resolved omitted requestId', object);
+        return;
+      }
+      case 'item/commandExecution/outputDelta': {
+        const itemId = asString(object.itemId);
+        if (itemId === undefined || typeof object.delta !== 'string') {
+          this.#recordUnmapped('command output delta omitted itemId or string delta', object);
+          return;
+        }
+        // ACP content replaces the collection; it is not a delta. Bound the retained preview per command.
+        const previous = this.#commandOutputs.get(itemId);
+        const combined = (previous?.text ?? '') + object.delta;
+        const truncated = combined.length > MAX_COMMAND_OUTPUT_CHARS;
+        this.#commandOutputs.set(itemId, {
+          text: combined.slice(-MAX_COMMAND_OUTPUT_CHARS), truncated: truncated || previous?.truncated === true,
+        });
+        if (truncated && previous?.truncated !== true) {
+          this.#recordUnmapped('command output preview truncated to the last 1000000 characters', { itemId });
+        }
+        // Coalesce replacement snapshots so many small deltas cannot flood the client with the full preview.
+        if (!this.#commandOutputTimers.has(itemId)) {
+          const timer = setTimeout(() => {
+            this.#commandOutputTimers.delete(itemId);
+            const output = this.#commandOutputs.get(itemId);
+            if (output !== undefined) this.#emit({ sessionUpdate: 'tool_call_update', toolCallId: itemId,
+              content: textToolContent(output.text) });
+          }, COMMAND_OUTPUT_INTERVAL_MS);
+          timer.unref();
+          this.#commandOutputTimers.set(itemId, timer);
+        }
+        return;
+      }
       case 'model/rerouted': {
         // Codex switched model mid-session (`fromModel` -> `toModel`): the client's model is now the new one.
         const to = asString(object.toModel);
@@ -789,6 +856,7 @@ export class CodexDriver implements AgentDriver {
         }
         this.#emit({
           sessionUpdate: 'agent_message_chunk',
+          ...(typeof object.itemId === 'string' ? { messageId: object.itemId } : {}),
           content: { type: 'text', text: object.delta },
         });
         return;
@@ -835,6 +903,8 @@ export class CodexDriver implements AgentDriver {
   #mapItem(item: Record<string, unknown>, replay: boolean, completed = false): void {
     const type = asString(item.type) ?? 'unknown';
     const id = asString(item.id) ?? asString(item.itemId) ?? `codex-${type}-${++this.#itemSequence}`;
+    const finished = completed || replay;
+    const toolUpdate = completed && !replay ? 'tool_call_update' : 'tool_call';
     if (!replay) {
       if (completed) {
         this.#activeItemIds.delete(id);
@@ -844,7 +914,8 @@ export class CodexDriver implements AgentDriver {
         this.#pauseTurnDeadline();
       }
     }
-    if (completed && !['completed', 'failed', 'declined', 'canceled', 'cancelled', 'exited', 'interrupted'].includes(asString(item.status) ?? '')) {
+    // Message and reasoning items have no status field in ThreadItem; lifecycle comes from item/completed.
+    if (finished && item.status !== undefined && !['completed', 'failed', 'declined', 'canceled', 'cancelled', 'exited', 'interrupted'].includes(asString(item.status) ?? '')) {
       this.#recordUnmapped('completed Codex item had an unknown status', item);
     }
     if (type === 'userMessage') {
@@ -858,13 +929,13 @@ export class CodexDriver implements AgentDriver {
     if (type === 'agentMessage') {
       if (replay) {
         const text = asString(item.text) ?? '';
-        if (text.length > 0) this.#emit({ sessionUpdate: 'session_message', content: [{ type: 'text', text }] });
+        if (text.length > 0) this.#emit({ sessionUpdate: 'agent_message_chunk', messageId: id, content: { type: 'text', text } });
         else this.#recordUnmapped('replayed agentMessage had no text', item);
       } else if (completed) {
         const hadDeltas = this.#messageDeltas.delete(id);
         const text = asString(item.text) ?? '';
         if (!hadDeltas && text.length > 0) {
-          this.#emit({ sessionUpdate: 'session_message', content: [{ type: 'text', text }] });
+          this.#emit({ sessionUpdate: 'agent_message_chunk', messageId: id, content: { type: 'text', text } });
         } else if (!hadDeltas) {
           this.#recordUnmapped('completed agentMessage had no text or deltas', item);
         }
@@ -872,7 +943,8 @@ export class CodexDriver implements AgentDriver {
       return;
     }
     if (type === 'reasoning') {
-      const summary = Array.isArray(item.summary) ? item.summary.map(textFromContent).join('') : '';
+      const summaryText = Array.isArray(item.summary) ? item.summary.map(textFromContent).join('') : '';
+      const summary = summaryText || (Array.isArray(item.content) ? item.content.map(textFromContent).join('') : '');
       if (replay) {
         if (summary.length > 0) this.#emit({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: summary } });
         else this.#recordUnmapped('replayed reasoning item had no summary', item);
@@ -889,47 +961,73 @@ export class CodexDriver implements AgentDriver {
 
     if (type === 'commandExecution' || type === 'execCommand') {
       const command = asString(item.command) ?? '';
+      const output = asString(item.aggregatedOutput) ?? (!replay ? this.#commandOutputs.get(id)?.text : undefined);
+      if (finished && !replay) this.#clearCommandOutput(id);
       this.#emit({
-        sessionUpdate: completed ? 'tool_call_update' : 'tool_call',
+        sessionUpdate: toolUpdate,
         toolCallId: id,
         title: command.length === 0 ? 'Run command' : stripAnsiControlSequences(command).text,
         kind: 'execute',
-        status: completed ? statusOf(item.status, item.exitCode) : 'pending',
-        ...(command.length === 0 ? {} : { rawInput: { command } }),
+        status: finished ? statusOf(item.status, item.exitCode) : 'in_progress',
+        rawInput: { ...(command.length === 0 ? {} : { command }), ...(item.cwd === undefined ? {} : { cwd: item.cwd }) },
+        ...(finished ? { rawOutput: {
+          ...(output === undefined ? {} : { output }),
+          ...(item.exitCode === undefined ? {} : { exitCode: item.exitCode }),
+          ...(item.durationMs === undefined ? {} : { durationMs: item.durationMs }),
+        } } : {}),
+        ...(finished && output !== undefined ? { content: textToolContent(output) } : {}),
       });
-      if (completed && asString(item.status) === 'declined') {
-        this.#finishTurn({ stopReason: 'cancelled', isError: false, raw: 'declined' }, asString(item.turnId));
-      }
       return;
     }
 
     if (type === 'fileChange' || type === 'patchApply') {
-      if (!completed) this.#items.set(id, item);
+      if (!finished) this.#items.set(id, item);
       const changes = item.changes ?? item.fileChanges ?? item.patch;
       if (changes === undefined) this.#recordUnmapped('Codex file-change item omitted changes', item);
       this.#emit({
-        sessionUpdate: completed ? 'tool_call_update' : 'tool_call',
+        sessionUpdate: toolUpdate,
         toolCallId: id,
         title: 'Apply file changes',
         kind: 'edit',
-        status: completed ? statusOf(item.status) : 'pending',
+        status: finished ? statusOf(item.status) : 'in_progress',
         ...(changes === undefined ? {} : { rawInput: changes }),
       });
-      if (completed && asString(item.status) === 'declined') {
-        this.#finishTurn({ stopReason: 'cancelled', isError: false, raw: 'declined' }, asString(item.turnId));
-      }
       if (completed) this.#items.delete(id);
       return;
     }
 
     if (type === 'mcpToolCall' || type === 'dynamicToolCall') {
+      const output = type === 'mcpToolCall'
+        ? item.result ?? item.error
+        : { contentItems: item.contentItems ?? null, success: item.success ?? null };
+      const result = asObject(item.result);
+      const content = type === 'mcpToolCall'
+        ? result?.content
+        : Array.isArray(item.contentItems) ? item.contentItems.map((entry) => {
+          const value = asObject(entry);
+          return value?.type === 'inputText' ? { type: 'text', text: value.text } : entry;
+        }) : undefined;
+      // Only text blocks have the same shape on both protocols. Preserve all other result types in rawOutput.
+      const text = Array.isArray(content) ? content.flatMap((entry) => {
+        const value = asObject(entry);
+        return value?.type === 'text' && typeof value.text === 'string' ? textToolContent(value.text) : [];
+      }) : [];
+      const errorMessage = asString(asObject(item.error)?.message);
+      if (errorMessage !== undefined) text.push(...textToolContent(errorMessage));
       this.#emit({
-        sessionUpdate: completed ? 'tool_call_update' : 'tool_call',
+        sessionUpdate: toolUpdate,
         toolCallId: id,
         title: stripAnsiControlSequences(asString(item.tool) ?? asString(item.name) ?? 'Tool call').text,
-        status: completed ? statusOf(item.status) : 'pending',
+        status: finished ? (item.success === false || item.error != null ? 'failed' : statusOf(item.status)) : 'in_progress',
         ...(item.arguments === undefined ? {} : { rawInput: item.arguments }),
+        ...(finished && output !== undefined ? { rawOutput: output } : {}),
+        ...(finished && text.length > 0 ? { content: text } : {}),
       });
+      return;
+    }
+
+    if (type === 'contextCompaction') {
+      this.#emit({ sessionUpdate: 'compaction_update', status: finished ? 'completed' : 'in_progress' });
       return;
     }
 
@@ -952,23 +1050,34 @@ export class CodexDriver implements AgentDriver {
 
     let settle!: (result: Record<string, unknown> | null) => void;
     let settled = false;
+    let cleared = false;
     const resultPromise = new Promise<Record<string, unknown> | null>((resolve) => {
       settle = resolve;
     });
     if (this.#pendingApprovals.size === 0) this.#pauseTurnDeadline();
+    const release = () => {
+      this.#pendingApprovals.delete(approvalKey);
+      this.#resumeTurnDeadlineIfReady();
+    };
     const finish = (result: Record<string, unknown>) => {
       if (settled) return;
       settled = true;
-      this.#pendingApprovals.delete(approvalKey);
-      this.#resumeTurnDeadlineIfReady();
+      // Keep the request cancellable until its response is actually sent, including across this await.
       settle(result);
     };
     this.#pendingApprovals.set(approvalKey, {
-      cancel: () => {
-        if (settled) return;
+      resolved: () => {
+        if (cleared) return;
+        cleared = true;
         settled = true;
-        this.#pendingApprovals.delete(approvalKey);
-        this.#resumeTurnDeadlineIfReady();
+        release();
+        settle(null);
+      },
+      cancel: () => {
+        if (cleared) return;
+        cleared = true;
+        settled = true;
+        release();
         try {
           // Send before closing the socket. Resolving a promise here would let
           // shutdown close the transport before the continuation runs.
@@ -981,7 +1090,12 @@ export class CodexDriver implements AgentDriver {
     });
 
     const { request, choices } = this.#permissionRequest(method, params);
-    const permissionPromise = this.#events.onRequestPermission?.(request);
+    let permissionPromise: Promise<PermissionOutcome> | undefined;
+    try {
+      permissionPromise = this.#events.onRequestPermission?.(request);
+    } catch {
+      finish(cancelApprovalResult(method));
+    }
     if (permissionPromise === undefined) {
       finish(cancelApprovalResult(method));
     } else {
@@ -991,7 +1105,9 @@ export class CodexDriver implements AgentDriver {
     }
 
     const result = await resultPromise;
-    if (result === null) return;
+    if (result === null || cleared) return;
+    cleared = true;
+    release();
     try {
       this.#transport?.send({ jsonrpc: '2.0', id, result });
     } catch {
@@ -1013,7 +1129,7 @@ export class CodexDriver implements AgentDriver {
       decision: unknown,
       meta?: Record<string, unknown>,
     ) => {
-      const option: Record<string, unknown> = { optionId, name, kind };
+      const option: Record<string, unknown> = { optionId, name: stripAnsiControlSequences(name).text, kind };
       if (meta !== undefined) option._meta = meta;
       choices.set(optionId, { option, decision });
       options.push(option);
@@ -1027,10 +1143,19 @@ export class CodexDriver implements AgentDriver {
 
     if (method === 'item/commandExecution/requestApproval') {
       toolTitle = asString(params.command) ?? 'Run command';
+      const network = asObject(params.networkApprovalContext);
+      if (typeof network?.host === 'string' && typeof network.protocol === 'string') {
+        toolTitle = `Allow network access to ${network.host} (${network.protocol})`;
+      } else if (params.kind === 'writeStdin') {
+        toolTitle = `Send input to terminal: ${asString(params.command) ?? ''}`;
+      }
       toolCallId = asString(params.itemId) ?? toolCallId;
       rawInput = {
         ...(params.command === undefined ? {} : { command: params.command }),
         ...(params.cwd === undefined ? {} : { cwd: params.cwd }),
+        ...(params.kind === undefined ? {} : { kind: params.kind }),
+        ...(params.environmentId === undefined ? {} : { environmentId: params.environmentId }),
+        ...(params.additionalPermissions === undefined ? {} : { additionalPermissions: params.additionalPermissions }),
         ...(params.commandActions === undefined ? {} : { commandActions: params.commandActions }),
         ...(params.networkApprovalContext === undefined ? {} : { networkApprovalContext: params.networkApprovalContext }),
         ...(params.proposedNetworkPolicyAmendments === undefined
@@ -1038,7 +1163,16 @@ export class CodexDriver implements AgentDriver {
           : { proposedNetworkPolicyAmendments: params.proposedNetworkPolicyAmendments }),
       };
       const amendment = stringArray(params.proposedExecpolicyAmendment);
-      const offered = Array.isArray(params.availableDecisions) ? params.availableDecisions : [];
+      // 0.163.0's generated request omits availableDecisions: the response enum defines the standard choices. Servers can still
+      // explicitly restrict them. Never treat an empty or unknown explicit list as permission to invent grants.
+      const offered: unknown[] = params.availableDecisions === undefined || params.availableDecisions === null
+        ? ['accept', 'acceptForSession', 'decline', 'cancel',
+          ...(amendment === undefined ? [] : [{ acceptWithExecpolicyAmendment: { execpolicy_amendment: amendment } }]),
+          ...(Array.isArray(params.proposedNetworkPolicyAmendments)
+            ? params.proposedNetworkPolicyAmendments.map((rule) => ({ applyNetworkPolicyAmendment: { network_policy_amendment: rule } })) : []),
+        ]
+        : Array.isArray(params.availableDecisions) ? params.availableDecisions : [];
+      let networkChoice = 0;
       for (const decision of offered) {
         if (decision === 'accept') add('codex-accept', 'Allow once', 'allow_once', 'accept');
         else if (decision === 'acceptForSession') {
@@ -1060,6 +1194,13 @@ export class CodexDriver implements AgentDriver {
           } else {
             this.#recordUnmapped('Codex execpolicy amendment omitted its argv', { method, params });
           }
+        } else if (isObject(decision) && isObject(decision.applyNetworkPolicyAmendment)) {
+          const rule = asObject(asObject(decision.applyNetworkPolicyAmendment)?.network_policy_amendment);
+          if (typeof rule?.host === 'string' && (rule.action === 'allow' || rule.action === 'deny')) {
+            add(`codex-network-${networkChoice++}`, `${rule.action === 'allow' ? 'Allow' : 'Deny'} ${rule.host} and remember`,
+              rule.action === 'allow' ? 'allow_always' : 'reject_always',
+              { applyNetworkPolicyAmendment: { network_policy_amendment: { host: rule.host, action: rule.action } } });
+          } else this.#recordUnmapped('Codex network policy amendment omitted host or action', { method });
         } else this.#recordUnmapped('unmapped Codex command approval decision', { method, decision });
       }
     } else if (method === 'item/fileChange/requestApproval') {
@@ -1277,6 +1418,18 @@ export class CodexDriver implements AgentDriver {
     }
   }
 
+  #clearCommandOutput(itemId: string): void {
+    clearTimeout(this.#commandOutputTimers.get(itemId));
+    this.#commandOutputTimers.delete(itemId);
+    this.#commandOutputs.delete(itemId);
+  }
+
+  #clearCommandOutputs(): void {
+    for (const timer of this.#commandOutputTimers.values()) clearTimeout(timer);
+    this.#commandOutputTimers.clear();
+    this.#commandOutputs.clear();
+  }
+
   #finishTurn(outcome: TurnOutcome, turnId = this.#activeTurn): void {
     if (turnId !== null && this.#completedTurns.has(turnId)) return;
     if (turnId !== null) {
@@ -1291,10 +1444,13 @@ export class CodexDriver implements AgentDriver {
     this.#releasePendingCancel();
     this.#activeTurn = null;
     this.#turnInFlight = false;
+    // App Server clears its requests on turn completion; a delayed UI answer must never approve a later turn.
+    for (const pending of [...this.#pendingApprovals.values()]) pending.resolved();
     this.#items.clear();
     this.#activeItemIds.clear();
     this.#messageDeltas.clear();
     this.#reasoningDeltas.clear();
+    this.#clearCommandOutputs();
     this.#events.onTurnEnd?.(outcome);
   }
 
@@ -1304,6 +1460,7 @@ export class CodexDriver implements AgentDriver {
     this.#clearTurnDeadline();
     this.#releasePendingCancel();
     this.#removeImages();
+    this.#clearCommandOutputs();
     for (const pending of [...this.#pendingApprovals.values()]) pending.cancel();
     if (closeTransport) this.#transport?.close(signal);
     this.#peer?.fail(new Error('Codex driver stopped'));
@@ -1316,6 +1473,7 @@ export class CodexDriver implements AgentDriver {
     this.#clearTurnDeadline();
     this.#releasePendingCancel();
     this.#removeImages();
+    this.#clearCommandOutputs();
     for (const pending of [...this.#pendingApprovals.values()]) pending.cancel();
     this.#peer?.fail(new Error('Codex app-server exited'));
     this.#events.onExit?.(code, signal);
@@ -1478,11 +1636,15 @@ function textFromContent(value: unknown): string {
 }
 
 function statusOf(status: unknown, exitCode?: unknown): string {
-  if (status === 'completed' || (status === 'exited' && exitCode === 0)) return 'completed';
   if (status === 'failed' || status === 'declined' || (typeof exitCode === 'number' && exitCode !== 0)) {
     return 'failed';
   }
+  if (status === 'completed' || (status === 'exited' && exitCode === 0)) return 'completed';
   return 'in_progress';
+}
+
+function textToolContent(text: string): Record<string, unknown>[] {
+  return [{ type: 'content', content: { type: 'text', text } }];
 }
 
 function publicFields(value: Record<string, unknown>): Record<string, unknown> {

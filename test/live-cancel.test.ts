@@ -9,8 +9,8 @@
  * - the app-server is neither closed nor exited;
  * - the next prompt on the same thread runs to `end_turn`.
  */
-import { statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CodexDriver } from '../src/codex/driver.js';
@@ -42,9 +42,10 @@ describe.skipIf(skipReasons.length > 0)(`Codex turn cancel, real child${skipReas
     const sent: Record<string, unknown>[] = [];
     let spawns = 0;
     let closes = 0;
+    const cwd = mkdtempSync(join(tmpdir(), 'prism-acp-live-cancel-'));
 
     const driver = new CodexDriver(
-      { cwd: process.cwd(), parentEnv: process.env, allowEnv: ['CODEX_HOME'] },
+      { cwd, parentEnv: process.env, allowEnv: ['CODEX_HOME'], approvalPolicy: 'never', sandbox: 'read-only' },
       {
         onTurnEnd: (outcome) => turnEnds.push(outcome),
         onUpdate: (update) => updates.push(update),
@@ -64,6 +65,8 @@ describe.skipIf(skipReasons.length > 0)(`Codex turn cancel, real child${skipReas
             closes += 1;
             transport.close(signal);
           },
+          stop: transport.stop.bind(transport),
+          get processTree() { return transport.processTree; },
         };
       },
     );
@@ -91,14 +94,19 @@ describe.skipIf(skipReasons.length > 0)(`Codex turn cancel, real child${skipReas
       expect(exits).toEqual([]);
       expect(closes).toBe(0);
 
-      driver.prompt('Reply with exactly: ok');
+      const nextStart = updates.length;
+      driver.prompt('Do not use tools. Reply with exactly: ok');
       await until('the next turn to end', () => turnEnds.length >= 2);
       expect(turnEnds[1]).toMatchObject({ stopReason: 'end_turn', isError: false });
+      expect(updates.slice(nextStart).filter((update) => update.sessionUpdate === 'agent_message_chunk')
+        .map((update) => (update.content as { text?: string })?.text ?? '').join('')).toContain('ok');
       expect(spawns).toBe(1);
       expect(exits).toEqual([]);
       expect(problems).toEqual([]);
     } finally {
-      driver.kill();
+      const stopped = await driver.stop();
+      expect(stopped).toMatchObject({ empty: true, survivors: 0, verified: true });
+      rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }, 420_000);
 });
