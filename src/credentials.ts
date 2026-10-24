@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { restrictToCurrentUser } from './private-directory.js';
@@ -90,7 +90,13 @@ export function apiKeyHome(
   } else {
     try {
       mkdirSync(resolved, { recursive: true, mode: 0o700 });
-      restrictToCurrentUser(resolved);
+      try {
+        restrictToCurrentUser(resolved);
+      } catch (cause) {
+        // Left in place, the next start would find it existing and accept it as the app's own home, unrestricted.
+        rmSync(resolved, { recursive: true, force: true });
+        throw cause;
+      }
     } catch {
       throw new Error('credentials.home could not be created as a private directory');
     }
