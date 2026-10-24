@@ -149,6 +149,42 @@ describe('Claude: the key reaches the CLI only in API-key mode, and only through
     driver.kill();
   });
 
+  it('API-key mode never lets the key out through stderr, even split across chunks or cut off at the end', async () => {
+    const { last } = spawned();
+    const lines: string[] = [];
+    let exit = (): void => {};
+    const exited = new Promise<void>((resolve) => { exit = resolve; });
+    const driver = new ClaudeDriver({ cwd: scratch, parentEnv: INHERITED, credentials: { mode: 'apiKey', apiKey: KEY, home: join(scratch, 'tenant') } },
+      { onStderr: (line) => lines.push(line), onExit: () => exit() });
+    driver.start();
+    const { child } = last();
+    for (const chunk of ['Invalid API key: ', KEY.slice(0, 9), `${KEY.slice(9)} (check ANTHROPIC_API_KEY)\n`, 'echo ', KEY.slice(0, 15)]) {
+      child.stderr.write(chunk);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    child.stderr.end();
+    await new Promise((resolve) => setImmediate(resolve));
+    child.emit('close', 1, null);
+    await exited;
+
+    const everything = driver.stderr + lines.join('\n');
+    expect(everything).not.toContain(KEY.slice(0, 12));
+    // Lines are emitted per released chunk, as they always were; the text is what matters.
+    expect(driver.stderr).toBe('Invalid API key: [redacted] (check ANTHROPIC_API_KEY)\necho [redacted]');
+    expect(lines.join('')).toBe('Invalid API key: [redacted] (check ANTHROPIC_API_KEY)echo [redacted]');
+  });
+
+  it('subscription mode passes stderr through unchanged', async () => {
+    const { last } = spawned();
+    const lines: string[] = [];
+    const driver = new ClaudeDriver({ cwd: scratch, parentEnv: INHERITED }, { onStderr: (line) => lines.push(line) });
+    driver.start();
+    last().child.stderr.write(`diagnostic ${KEY}\n`);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lines).toEqual([`diagnostic ${KEY}`]);
+    driver.kill();
+  });
+
   it('refuses before anything starts when the home is the person\'s own', () => {
     spawned();
     const driver = new ClaudeDriver({ cwd: scratch, parentEnv: {}, credentials: { mode: 'apiKey', apiKey: KEY, home: join(homedir(), '.claude') } });

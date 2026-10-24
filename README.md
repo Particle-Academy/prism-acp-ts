@@ -139,7 +139,10 @@ not modified. Under the person's own home, Codex's API-key login would REPLACE
 their ChatGPT login, so a `home` that is their subscription home is refused.
 
 - The key is never put in argv and never logged; inherited credentials stay
-  withheld in both modes.
+  withheld in both modes. If the CLI echoes the key in a diagnostic, it is
+  replaced with `[redacted]` before it reaches `onStderr` or `driver.stderr`,
+  even when it arrives split across chunks. Codex's stderr is never forwarded
+  at all, only the length of each withheld line.
 - A `home` this package creates is restricted to the current user. Codex keeps
   the key in it (`auth.json`, plain text), so treat the directory as a secret.
 - **The agent can reach its own key.** Claude's key is in the CLI's environment,

@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { childEnv } from '../env.js';
 import { apiKeyEnvironment, apiKeyHome, type ProviderCredentials } from '../credentials.js';
 import { restrictToCurrentUser } from '../private-directory.js';
+import { SecretRedactor } from '../redact.js';
 import { claudeMcpConfig, readDisabledMcpServers, readMcpServers, type McpServer } from '../mcp.js';
 import { assertModel } from '../meta.js';
 import { ClaudeTurnFailures, type TurnFailure } from '../turn-failure.js';
@@ -353,6 +354,7 @@ export class ClaudeDriver {
   #child: ChildProcess | null = null;
   #provider: ProviderProcess | null = null;
   #stderr = '';
+  #stderrRedactor: SecretRedactor | null = null;
   #pendingOutcome: TurnOutcome | null = null;
   /** The running turn's failure reason, read from its frames; taken at its `result`. */
   readonly #failures = new ClaudeTurnFailures();
@@ -414,6 +416,7 @@ export class ClaudeDriver {
     const parentEnv = this.#options.parentEnv ?? process.env;
     // Checked before anything starts: a key with no usable home is refused here, naming the field, never the key.
     const keyed = apiKeyHome('claude', this.#options.credentials, parentEnv);
+    this.#stderrRedactor = keyed === null ? null : new SecretRedactor(keyed.apiKey);
     const { env, withheld } = childEnv(parentEnv, {
       allow: [
         // The CLI finds the user's own login through these, so they are allowed
@@ -511,6 +514,7 @@ export class ClaudeDriver {
       // Flush first: a frame can be complete without its trailing newline, and
       // the LAST frame of a turn is the `result` that carries the outcome.
       this.#emit(this.#framer.end());
+      if (this.#stderrRedactor !== null) this.#releaseStderr(this.#stderrRedactor.end());
       this.#events.onExit?.(code, signal);
     });
   }
@@ -744,10 +748,17 @@ export class ClaudeDriver {
   }
 
   #onStderr(chunk: string): void {
-    this.#stderr += chunk;
+    // API-key mode: the CLI holds the app's key and may echo it in a
+    // diagnostic. Neither the stored stderr nor a caller's log ever sees it.
+    this.#releaseStderr(this.#stderrRedactor === null ? chunk : this.#stderrRedactor.push(chunk));
+  }
+
+  #releaseStderr(text: string): void {
+    if (text === '') return;
+    this.#stderr += text;
     // Line-wise, so a caller can match on a whole message rather than on
     // whatever happened to land in one chunk.
-    const lines = chunk.split(/\r?\n/).filter((line) => line.trim().length > 0);
+    const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
     for (const line of lines) this.#events.onStderr?.(line);
   }
 }
