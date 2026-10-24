@@ -7,7 +7,7 @@ import { childEnv } from '../env.js';
 import { apiKeyEnvironment, apiKeyHome, type ProviderCredentials } from '../credentials.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
 import { codexFailureOf } from '../turn-failure.js';
-import { codexMcpConfig, readMcpServers, type McpServer, type McpToolApproval } from '../mcp.js';
+import { codexMcpConfig, codexMcpSessionConfig, codexMcpDisabledConfig, readDisabledMcpServers, readMcpServers, type McpServer, type McpToolApproval } from '../mcp.js';
 import { isValidCliSessionId } from '../session-id.js';
 import { stripAnsiControlSequences } from '../text.js';
 import { JsonRpcPeer } from '../jsonrpc.js';
@@ -55,6 +55,8 @@ export interface CodexDriverOptions {
   readonly allowEnv?: readonly string[];
   readonly resumeSessionId?: string;
   readonly mcpServers?: readonly McpServer[];
+  /** Disable inherited user/project mcp_servers entries by name for this run; other entries stay available. */
+  readonly disabledMcpServers?: readonly string[];
   readonly turnInactivityTimeoutMs?: number;
   /**
    * The model to run (`model` on `thread/start` / `thread/resume`). Omitted means Codex's own default. The model in use --
@@ -210,6 +212,8 @@ export class CodexDriver implements AgentDriver {
   #turnDeadlineRemainingMs = 0;
   readonly #turnInactivityTimeoutMs: number;
   readonly #mcpConfig: Record<string, unknown> | undefined;
+  readonly #mcpEnv: Readonly<Record<string, string>>;
+  readonly #disabledMcpServers: readonly string[];
   #sessionUpdateSent = false;
   #threadId: string | null = null;
   /** A cancel that arrived before turn/start named its turn; sent the moment the id is known. */
@@ -233,10 +237,13 @@ export class CodexDriver implements AgentDriver {
     // Keep constructor-validated settings stable across asynchronous startup.
     this.#options = { ...options };
     const servers = readMcpServers(options.mcpServers);
+    this.#disabledMcpServers = readDisabledMcpServers(options.disabledMcpServers, servers);
     if (servers.length === 0 && options.mcpToolApproval !== undefined && Object.keys(options.mcpToolApproval).length > 0) {
       codexMcpConfig(servers, options.mcpToolApproval); // refuses: it names servers that were not given
     }
-    this.#mcpConfig = servers.length === 0 ? undefined : codexMcpConfig(servers, options.mcpToolApproval);
+    const mcp = codexMcpSessionConfig(servers, options.mcpToolApproval);
+    this.#mcpConfig = mcp.config;
+    this.#mcpEnv = mcp.env;
     this.#events = events;
     this.#transportFactory = transportFactory;
     this.#turnInactivityTimeoutMs = options.turnInactivityTimeoutMs ?? DEFAULT_TURN_INACTIVITY_TIMEOUT_MS;
@@ -448,6 +455,7 @@ export class CodexDriver implements AgentDriver {
       ...(keyed === null ? {} : { set: apiKeyEnvironment('codex', keyed) }),
     });
     this.withheldCredentials = withheld;
+    Object.assign(env, this.#mcpEnv);
 
     const handlers: CodexTransportHandlers = {
       onFrame: (frame) => this.#receive(frame),
@@ -478,6 +486,15 @@ export class CodexDriver implements AgentDriver {
     });
     peer.notify('initialized');
     if (keyed !== null) await loginWithApiKey(peer, keyed.apiKey);
+    let mcpConfig = this.#mcpConfig;
+    if (this.#disabledMcpServers.length > 0) {
+      const response = asObject(await peer.request('config/read', { cwd: this.#options.cwd, includeLayers: false }));
+      const effective = asObject(response?.config);
+      if (effective === undefined) throw new Error('Codex did not return effective MCP configuration');
+      const inherited = effective.mcp_servers === undefined ? {} : asObject(effective.mcp_servers);
+      if (inherited === undefined) throw new Error('Codex returned invalid inherited MCP configuration');
+      mcpConfig = codexMcpDisabledConfig(mcpConfig, this.#disabledMcpServers, inherited);
+    }
 
     if (this.#options.resumeSessionId === undefined) {
       const result = await peer.request('thread/start', {
@@ -485,7 +502,7 @@ export class CodexDriver implements AgentDriver {
         approvalPolicy: this.#options.approvalPolicy ?? 'on-request',
         ...(this.#options.sandbox === undefined ? {} : { sandbox: this.#options.sandbox }),
         ...(this.#options.model === undefined ? {} : { model: this.#options.model }),
-        ...(this.#mcpConfig === undefined ? {} : { config: this.#mcpConfig }),
+        ...(mcpConfig === undefined ? {} : { config: mcpConfig }),
       });
       const thread = asObject(asObject(result)?.thread);
       const id = asString(thread?.id);
@@ -500,7 +517,7 @@ export class CodexDriver implements AgentDriver {
         ...(this.#options.approvalPolicy === undefined ? {} : { approvalPolicy: this.#options.approvalPolicy }),
         ...(this.#options.sandbox === undefined ? {} : { sandbox: this.#options.sandbox }),
         ...(this.#options.model === undefined ? {} : { model: this.#options.model }),
-        ...(this.#mcpConfig === undefined ? {} : { config: this.#mcpConfig }),
+        ...(mcpConfig === undefined ? {} : { config: mcpConfig }),
       });
       const thread = asObject(asObject(result)?.thread);
       const id = asString(thread?.id);

@@ -1,4 +1,5 @@
 import { RpcError, RPC_INVALID_PARAMS } from './jsonrpc.js';
+import { randomBytes } from 'node:crypto';
 
 /** ACP session MCP configuration. The client supplies explicit credentials here. */
 export interface McpNamedValue { readonly name: string; readonly value: string }
@@ -9,6 +10,20 @@ export type McpServer =
       readonly headers: readonly McpNamedValue[] };
 
 export interface McpCapabilities { readonly http: boolean; readonly sse: boolean }
+
+/** Trusted driver policy, copied and checked before asynchronous startup. Never an ACP/model argument. */
+export function readDisabledMcpServers(value: unknown, servers: readonly McpServer[]): readonly string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('disabledMcpServers must be an array of distinct non-empty names');
+  const active = new Set(servers.map((server) => server.name));
+  const seen = new Set<string>();
+  return value.map((name: unknown) => {
+    if (typeof name !== 'string' || name.trim() !== name || name.length === 0 || /[\x00-\x1f\x7f]/.test(name) || seen.has(name) || active.has(name)) {
+      throw new Error('disabledMcpServers must contain distinct valid names, separate from explicit mcpServers');
+    }
+    seen.add(name); return name;
+  });
+}
 
 /** Validate the entire list before starting any child; never drop a bad entry. */
 export function readMcpServers(value: unknown): readonly McpServer[] {
@@ -85,6 +100,56 @@ export function codexMcpConfig(
       : { url: server.url, http_headers: namedValues(server.headers) };
     return [server.name, mode === undefined ? entry : { ...entry, default_tools_approval_mode: mode }];
   })) };
+}
+
+/**
+ * Native Codex merges a session server with inherited fields. Its bearer_token_env_var outranks an explicit
+ * Authorization header. Bind each supplied bearer to a fresh variable in THIS child's environment and include
+ * that binding in thread/start AND thread/resume. Neither ambient env nor argv is modified.
+ */
+export function codexMcpSessionConfig(servers: readonly McpServer[], approval?: Readonly<Record<string, McpToolApproval>>): {
+  config: Record<string, unknown> | undefined; env: Readonly<Record<string, string>>;
+} {
+  if (servers.length === 0) return { config: undefined, env: {} };
+  const config = codexMcpConfig(servers, approval);
+  const entries = config.mcp_servers as Record<string, Record<string, unknown>>;
+  const env = new Map<string, string>();
+  for (const server of servers) {
+    if ('command' in server) continue;
+    const authorization = server.headers.find((header) => header.name.toLowerCase() === 'authorization')?.value;
+    if (authorization === undefined || !/^Bearer(?:\s|$)/i.test(authorization)) continue;
+    const token = /^Bearer[ \t]+(\S+)$/i.exec(authorization)?.[1];
+    if (!token) invalid('Bearer Authorization must contain a non-empty token without whitespace');
+    const name = `PRISM_ACP_MCP_TOKEN_${randomBytes(16).toString('hex').toUpperCase()}`;
+    env.set(name, token);
+    entries[server.name].bearer_token_env_var = name;
+    // Keep the secret out of thread config/rollout metadata. Native auth uses only the private child binding.
+    entries[server.name].http_headers = Object.fromEntries(Object.entries(entries[server.name].http_headers as Record<string, string>)
+      .filter(([header]) => header.toLowerCase() !== 'authorization'));
+  }
+  // Native shell snapshots persist exported environment values even without a shell tool call.
+  // Do not let a per-session bearer become a plaintext file in the shared CLI home.
+  if (env.size > 0) config.features = { shell_snapshot: false };
+  return { config, env: Object.fromEntries(env) };
+}
+
+/** A missing disabled entry still needs a valid native transport. Never add URL fields to an existing stdio entry. */
+export function codexMcpDisabledConfig(config: Record<string, unknown> | undefined, disabled: readonly string[], inherited: Record<string, unknown>): Record<string, unknown> {
+  const entries = Object.entries(object(config?.mcp_servers) ?? {});
+  for (const name of disabled) {
+    const present = Object.prototype.hasOwnProperty.call(inherited, name);
+    const existing = present ? object(inherited[name]) : undefined;
+    if (present && existing === undefined) throw new Error('Codex returned invalid inherited MCP configuration');
+    let transport: Record<string, unknown>;
+    if (existing === undefined) transport = { url: 'http://127.0.0.1:1' };
+    else if (typeof existing.command === 'string' && existing.command.length > 0) {
+      if (existing.args !== undefined && (!Array.isArray(existing.args) || existing.args.some((arg) => typeof arg !== 'string'))) throw new Error('Codex returned invalid inherited MCP configuration');
+      transport = { command: existing.command, ...(existing.args === undefined ? {} : { args: existing.args }) };
+    } else if (typeof existing.url === 'string' && existing.url.length > 0) transport = { url: existing.url };
+    else throw new Error('Codex returned invalid inherited MCP transport');
+    entries.push([name, { ...transport, enabled: false }]);
+  }
+  return { ...config, mcp_servers: Object.fromEntries(entries) };
 }
 
 function namedValues(values: readonly McpNamedValue[]): Record<string, string> {

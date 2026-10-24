@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { childEnv } from '../env.js';
 import { apiKeyEnvironment, apiKeyHome, type ProviderCredentials } from '../credentials.js';
 import { restrictToCurrentUser } from '../private-directory.js';
-import { claudeMcpConfig, readMcpServers, type McpServer } from '../mcp.js';
+import { claudeMcpConfig, readDisabledMcpServers, readMcpServers, type McpServer } from '../mcp.js';
 import { assertModel } from '../meta.js';
 import { ClaudeTurnFailures, type TurnFailure } from '../turn-failure.js';
 import { isValidCliSessionId } from '../session-id.js';
@@ -78,6 +78,8 @@ export interface ClaudeDriverOptions {
   readonly resumeSessionId?: string;
   /** Explicit per-session MCP servers; independent of the agent's environment. */
   readonly mcpServers?: readonly McpServer[];
+  /** Deny these inherited MCP names for this run, preserving unrelated servers and permission hooks. */
+  readonly disabledMcpServers?: readonly string[];
   readonly permissionMode?: ClaudePermissionMode;
   /**
    * The model to run (`--model`): an alias (`sonnet`, `haiku`) or a full id. Omitted means the CLI's own default. The
@@ -387,7 +389,7 @@ export class ClaudeDriver {
 
   constructor(options: ClaudeDriverOptions, events: ClaudeDriverEvents = {}) {
     this.#mcpServers = readMcpServers(options.mcpServers);
-    this.#options = { ...options, mcpServers: this.#mcpServers };
+    this.#options = { ...options, mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
     this.#events = events;
   }
 
@@ -434,15 +436,24 @@ export class ClaudeDriver {
           { mode: 0o600, flag: 'wx' });
       }
       let settingsPath: string | undefined;
-      if (this.#options.permissionPrompts !== undefined) {
+      if (this.#options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0) {
         const directory = privateMcpDirectory();
         this.#approvalDirectory = directory;
         const hookPath = join(directory, 'approve.cjs');
         settingsPath = join(directory, 'settings.json');
-        writeFileSync(hookPath, HOOK_SCRIPT, { mode: 0o600, flag: 'wx' });
-        this.#approvalFiles.push(hookPath);
-        writeFileSync(settingsPath, JSON.stringify(approvalSettings(process.execPath, hookPath, this.#options.permissionPrompts.tools)), { mode: 0o600, flag: 'wx' });
+        if (this.#options.permissionPrompts !== undefined) {
+          writeFileSync(hookPath, HOOK_SCRIPT, { mode: 0o600, flag: 'wx' });
+          this.#approvalFiles.push(hookPath);
+        }
+        const settings = {
+          ...(this.#options.permissionPrompts !== undefined ? approvalSettings(process.execPath, hookPath, this.#options.permissionPrompts.tools) : {}),
+          ...(this.#options.disabledMcpServers!.length > 0 ? { deniedMcpServers: this.#options.disabledMcpServers!.map((name) => ({ serverName: name })) } : {}),
+        };
+        writeFileSync(settingsPath, JSON.stringify(settings), { mode: 0o600, flag: 'wx' });
         this.#approvalFiles.push(settingsPath);
+      }
+      if (this.#options.permissionPrompts !== undefined) {
+        const directory = this.#approvalDirectory!;
         const socket = process.platform === 'win32' ? `\\\\.\\pipe\\prism-acp-${randomBytes(12).toString('hex')}` : join(directory, 'approve.sock');
         const ask = this.#events.onRequestPermission;
         this.#approvals = new ApprovalServer(socket, (input) => (ask ? ask(permissionRequestFor(input)) : Promise.resolve({ outcome: 'cancelled' as const })));
