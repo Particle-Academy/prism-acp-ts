@@ -527,15 +527,68 @@ entries and duplicate names refuse the whole request before spawning a child.
 An omitted or empty list retains the provider's configured MCP defaults.
 
 MCP configuration is trusted input from the ACP client: it can launch programs
-and supply server credentials. Those explicit credentials go only to the named
-MCP server's configuration; the agent's ambient environment still passes through
+and supply server credentials. The agent's ambient environment still passes through
 `childEnv`. Claude receives a private temporary config file (owner-only POSIX
 permissions, or an ACL granting only the running identity access on Windows),
 removed when its child exits or fails to spawn. If Windows ACL protection fails,
 no credentials are written and no child is spawned. Codex receives per-thread
-JSON config overrides. The
+JSON config overrides. For an explicit HTTP Bearer Authorization header, the driver
+instead gives that child a fresh environment binding and sends its name on both
+thread start and resume. This prevents an inherited `bearer_token_env_var` from
+selecting an older key, and keeps the supplied bearer out of the thread config.
+The binding belongs to that provider process. Before starting or resuming its
+thread, the driver reads the effective shell environment policy and appends an
+explicit exclusion for every binding, preserving the user's existing exclusions
+and settings. Keyed filter policies receive equivalent per-binding exclusions.
+Malformed policies, incompatible array/filter combinations, and `set` entries
+that would restore a binding are refused before a thread starts. The protection
+does not depend on Codex's default secret-name exclusions. These controls govern
+shell environment and snapshot persistence; they do not sandbox the native provider.
+For these bearer-bearing sessions, the driver disables Codex shell snapshots:
+the native snapshot otherwise writes exported bearer bindings to disk even
+without a shell tool call. The parent environment is unchanged. Other authentication schemes and unrelated
+inherited server fields retain the native provider's merge behavior. The
 package does not edit the provider's persistent MCP settings. Provider policies
 and connection failures still determine whether a forwarded server can connect.
+
+A trusted host can also pass `disabledMcpServers: ['workspace']` to either driver
+constructor to block named inherited servers for that run. This is host policy,
+not a field accepted from ACP session requests or model output. Names must be
+distinct and cannot also appear in `mcpServers`. Unrelated servers remain
+available. Claude combines the deny list and any approval hooks in one private
+settings file; separate `--settings` arguments would overwrite each other.
+Claude documents `deniedMcpServers` as a
+[managed-settings key](https://code.claude.com/docs/en/managed-mcp#policy-based-control-with-allowlists-and-denylists).
+Its use through `--settings` was measured on **Claude 2.1.310**; that measurement
+does not guarantee the same behavior on every CLI version or managed installation.
+Codex reads the effective configuration and supplies a disabled entry with a
+valid transport, including when the name was previously absent. This option
+does not provide wholesale replacement of inherited MCP configuration.
+
+`bash scripts/probe-mcp-session-auth-gate.sh` is an opt-in Linux VM check. It
+packs the proposed adapter, runs the installed Codex and Claude CLIs in an
+isolated network namespace against local fixture servers, and verifies the
+bearer and disable behavior. One turn receives a fixed response from the local
+fixture to create a persisted Codex thread for the resume check; no external
+model or inference service is used. It requires mise
+for any shimmed binaries, passwordless sudo, `ip`, and a `genie` test user. It
+also bypasses the packed bearer binding, snapshot protection, and each provider's
+deny policy and both shell exclusion forms in turn, requiring the matching assertion to fail before testing
+the restored package. It uses fixture keys and
+isolated homes rather than the user's login.
+
+Set `PRISM_MCP_PROBE_FIXTURE_ONLY=1` and `PRISM_CODEX_PROBE_BINARY` to the absolute
+native binary, then run `node scripts/probe-codex-mcp-env.mjs /path/to/packed-package`
+for native shell
+environment controls on Codex 0.163.0: hostile `inherit="all"` and
+`ignore_default_excludes=true`, preserved user exclusions and `set`, keyed filters,
+fresh bearer on resume, unrelated feature retention and CLI-home persistence scans.
+The model responses are deterministic loopback fixtures which request a real `env`
+shell call; no external inference or user login is used. This portable probe alone
+does not disable external networking. The Linux gate runs it in a loopback-only
+network namespace and mutates the packed shell guards. On Windows it requires Git's
+`C:/Program Files/Git/usr/bin/env.exe`. Dummy shell output stays in the private
+fixture home and is never printed to the probe log; the fixture directory is removed.
 
 ### Commit streamed messages at the turn boundary
 

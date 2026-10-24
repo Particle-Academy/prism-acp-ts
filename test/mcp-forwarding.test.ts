@@ -54,6 +54,7 @@ class ProviderChild extends EventEmitter {
         if (typeof request.id !== 'number') continue;
         const params = request.params as Record<string, unknown>;
         let result: unknown = {};
+        if (request.method === 'config/read') result = { config: {} };
         if (request.method === 'thread/start') result = { thread: { id: 'thread-captured' } };
         if (request.method === 'thread/resume') result = { thread: { id: params.threadId } };
         if (request.method === 'thread/turns/list') result = { data: [], nextCursor: null };
@@ -158,11 +159,14 @@ for (const provider of ['claude', 'codex'] as const) {
               frame.method === (method === 'session/new' ? 'thread/start' : 'thread/resume'));
             expect(handed?.params).toMatchObject({ config: { mcp_servers: {
               loopback: { url: 'http://127.0.0.1:43210/mcp',
-                http_headers: { Authorization: `Bearer ${TOKEN}`, 'X-Client': 'acp' } },
+                http_headers: { 'X-Client': 'acp' }, bearer_token_env_var: expect.stringMatching(/^PRISM_ACP_MCP_TOKEN_[A-F0-9]+$/) },
               local: { command: '/opt/MCP server/bin', args: SERVERS[1].args,
                 env: { MCP_TOKEN: TOKEN, EMPTY: '' } },
               second: { command: '/opt/other', args: [], env: {} },
             } } });
+            const loopback = (handed?.params as { config: { mcp_servers: { loopback: { http_headers: Record<string, string>; bearer_token_env_var: string } } } }).config.mcp_servers.loopback;
+            expect(loopback.http_headers).not.toHaveProperty('Authorization');
+            expect(vi.mocked(spawn).mock.calls[0][2]?.env?.[loopback.bearer_token_env_var]).toBe(TOKEN);
           }
           for (const call of vi.mocked(spawn).mock.calls) {
             expect(JSON.stringify(call[1])).not.toContain(TOKEN);
@@ -175,6 +179,19 @@ for (const provider of ['claude', 'codex'] as const) {
           expect(existsSync(path)).toBe(false);
           expect(existsSync(dirname(path))).toBe(false);
         }
+      });
+      it(`${method} cannot set constructor-only inherited-server policy through ACP input`, async () => {
+        const c = client(provider);
+        try {
+          const reply = await c.request(method, { cwd: '/work', disabledMcpServers: ['tynn'],
+            ...(method === 'session/load' ? { sessionId: 'thread-resumed' } : {}) });
+          expect(reply.error).toBeUndefined();
+          expect(c.problems).toEqual([]);
+          expect(vi.mocked(spawn).mock.calls[0][1]).not.toContain('--settings');
+          if (provider === 'codex') {
+            expect(c.children[0].sent.some((frame) => frame.method === 'config/read')).toBe(false);
+          }
+        } finally { await c.close(); }
       });
     }
 
@@ -210,7 +227,14 @@ for (const provider of ['claude', 'codex'] as const) {
         expect(c.children).toHaveLength(2);
         const received = provider === 'claude' ? c.configs : c.children.map((child) =>
           child.sent.find((frame) => frame.method === 'thread/start')?.params);
-        expect(JSON.stringify(received[0])).toContain(TOKEN.replace(/"/g, '\\"'));
+        if (provider === 'claude') expect(JSON.stringify(received[0])).toContain(TOKEN.replace(/"/g, '\\"'));
+        else {
+          const config = received[0] as { config: { mcp_servers: { loopback: { bearer_token_env_var: string } } } };
+          const binding = config.config.mcp_servers.loopback.bearer_token_env_var;
+          expect(vi.mocked(spawn).mock.calls[0][2]?.env?.[binding]).toBe(TOKEN);
+          expect(JSON.stringify(received[0])).not.toContain(TOKEN.replace(/"/g, '\\"'));
+          expect(JSON.stringify(vi.mocked(spawn).mock.calls[1][2]?.env)).not.toContain(TOKEN);
+        }
         expect(JSON.stringify(received[1])).not.toContain('Authorization');
         expect(JSON.stringify(received[1])).toContain('43211');
       } finally { await c.close(); }
