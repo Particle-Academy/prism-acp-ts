@@ -149,4 +149,76 @@ describe.runIf(process.env.PRISM_ACP_CODEX_NATIVE_TOOLS === '1')('native Codex t
       expect(restricted.outputs()).not.toContain('PRISM_NATIVE_EXEC_CONTROL');
     } finally { await restricted.cleanup(); }
   }, 90000);
+
+  for (const signal of ['http-header', 'event-early', 'event-late'] as const) {
+    it(`refuses a genuine ${signal} model reroute on notification, including a tool already invoked before late metadata`, async () => {
+      const probe = await openCodexToolProbe({ model: 'gpt-5.3-codex', nativeTools: 'none', rerouteSignal: signal,
+        calls: [{ type: 'function_call', namespace: 'mcp__owned', name: 'app_ping', arguments: '{}' }] });
+      try {
+        const outcome = await probe.turn({ allowError: true });
+        expect(outcome.isError).toBe(true);
+        expect(probe.problems.join(' ')).toMatch(/nativeTools.*gpt-6.1-sol/);
+        expect(probe.received.find((frame) => frame.method === 'model/rerouted')?.params).toMatchObject({
+          fromModel: 'gpt-5.3-codex', toModel: 'gpt-6.1-sol', reason: 'highRiskCyberActivity',
+        });
+        expect(() => probe.driver.prompt('cannot continue after refusal')).toThrow();
+        if (signal === 'event-late') {
+          expect(probe.lateSignalAfterTool()).toBe(true);
+          expect(probe.resources().some((row) => row.method === 'tools/call')).toBe(true);
+        }
+        console.info(JSON.stringify({ rerouteSignal: signal, refusedOnNotification: true, toolRanBeforeLateSignal: probe.lateSignalAfterTool() }));
+      } finally { await probe.cleanup(); }
+    }, 60000);
+  }
+
+  it('cannot detect a serving-model change reported only in the response envelope; restricted native calls remain refused', async () => {
+    const probe = await openCodexToolProbe({ model: 'gpt-5.3-codex', nativeTools: 'none', rerouteSignal: 'envelope', calls: [
+      { type: 'function_call', namespace: 'mcp__owned', name: 'app_ping', arguments: '{}' },
+      { type: 'function_call', namespace: 'collaboration', name: 'list_agents', arguments: '{}' },
+    ] });
+    try {
+      await probe.turn();
+      expect(probe.received.some((frame) => frame.method === 'model/rerouted')).toBe(false);
+      expect(probe.outputs()).toContain('PRISM_TOOL_owned');
+      expect(probe.outputs()).toMatch(/unsupported|unknown|not found|unavailable/i);
+      expect(probe.outputs()).not.toContain('agent_name');
+      for (const body of probe.requests) expect(advertisedTools(body)).toEqual([...CODEX_NATIVE_TOOLS_NONE.residualTools, 'mcp__owned.app_ping'].sort());
+      console.info(JSON.stringify({ responseEnvelopeModelMismatch: 'not notified by native CLI', suppliedToolRuns: true, hiddenNativeCallRefused: true }));
+    } finally { await probe.cleanup(); }
+  }, 60000);
+
+  for (const [name, call] of [
+    ['exec', { type: 'function_call', name: 'exec_command', arguments: JSON.stringify({
+      cmd: process.platform === 'win32' ? 'Write-Output PRISM_BEFORE_REROUTE_EXEC' : "printf 'PRISM_BEFORE_REROUTE_EXEC'",
+    }) }],
+    ['agent', { type: 'function_call', namespace: 'multi_agent_v1', name: 'close_agent', arguments: JSON.stringify({
+      target: '00000000-0000-0000-0000-000000000001',
+    }) }],
+  ] as const) {
+    it(`refuses unadvertised native ${name} before any reroute notice arrives`, async () => {
+      if (name === 'agent') {
+        const control = await openCodexToolProbe({ model: 'gpt-5.3-codex', executionControl: true, calls: [call] });
+        try {
+          await control.turn();
+          expect(advertisedTools(control.requests[0])).toContain('multi_agent_v1.close_agent');
+          expect(control.outputs()).toMatch(/not found|does not exist|unknown agent/i);
+          expect(control.outputs()).not.toMatch(/unsupported|missing field|invalid.*argument/i);
+          console.info(JSON.stringify({ nativeAgentControl: 'recognized close_agent on nonexistent owned-profile ID', output: control.outputs() }));
+        } finally { await control.cleanup(); }
+      }
+      const probe = await openCodexToolProbe({ model: 'gpt-5.3-codex', nativeTools: 'none', executionControl: true,
+        rerouteSignal: 'http-header', rerouteOnRequest: 2, calls: [call] });
+      try {
+        const outcome = await probe.turn({ allowError: true });
+        expect(outcome.isError).toBe(true);
+        expect(probe.requests).toHaveLength(2);
+        // The fake provider sends reroute metadata only AFTER it has received the native call's error output.
+        expect(probe.outputs()).toMatch(/unsupported|unknown|unavailable/i);
+        expect(probe.outputs()).not.toContain('PRISM_BEFORE_REROUTE_EXEC');
+        expect(probe.received.some((frame) => frame.method === 'model/rerouted')).toBe(true);
+        for (const body of probe.requests) expect(advertisedTools(body)).toEqual([...CODEX_NATIVE_TOOLS_NONE.residualTools, 'mcp__owned.app_ping'].sort());
+        console.info(JSON.stringify({ beforeRerouteNativeCall: name, refusedBeforeMetadataSent: true }));
+      } finally { await probe.cleanup(); }
+    }, 60000);
+  }
 });

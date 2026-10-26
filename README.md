@@ -613,7 +613,13 @@ when the application uses an existing one.
 
 Omitted or other models, unmeasured CLI versions, and `resumeSessionId` refuse
 with a clear error. Model selection is limited to the matrix; an unsupported
-native model reroute closes the driver. Resume is unsupported because a saved
+native model reroute closes the driver **on its `model/rerouted` notification**.
+Output and tool activity before that notification are not prevented. A local
+fake-provider probe confirmed that an owned MCP tool can execute before delayed
+reroute metadata arrives. A different `response.model` value alone produced no
+native reroute notification, so the driver cannot independently verify backend
+serving-model identity. The matrix applies to the CLI's configured model and
+advertised/callable native tools. Resume is unsupported because a saved
 thread can restore native agent tools even when its new configuration disables
 them. Supporting resume requires trustworthy session provenance in a future
 version. Ordinary-mode resume is unchanged.
@@ -639,7 +645,10 @@ in. CI runs this gate on Linux and Windows with pinned Codex `0.163.0`; it check
 both top-level `tools` and `input[].additional_tools`, rejecting unknown shapes
 and any unexpected tool. It also proves working native execution in a control
 and refusal under the supported restriction, resource scope, and model/version/
-resume refusal.
+resume refusal. Hidden native execution and agent calls are also attempted and
+refused **before** the fake provider sends a genuine reroute signal, independently
+of the driver's notification-triggered shutdown. Working native shell and
+recognized agent-tool controls distinguish removal from an invalid test call.
 
 `bash scripts/probe-mcp-session-auth-gate.sh` is an opt-in Linux VM check. It
 packs the proposed adapter, runs the installed Codex and Claude CLIs in an

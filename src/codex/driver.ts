@@ -75,6 +75,8 @@ export interface CodexDriverOptions {
    * unmeasured CLI versions refuse. Three read-only MCP resource brokers remain, scoped to the session's servers.
    * Only explicitly supplied mcpServers survive; inherited servers are disabled by ID. Fresh sessions only:
    * resumeSessionId refuses because a saved thread can restore native tools. This is not an OS sandbox.
+   * Reroutes close on native notification; preceding output/tool activity and unannounced backend model changes
+   * cannot be prevented or independently detected by this driver.
    */
   readonly nativeTools?: 'default' | 'none';
   /**

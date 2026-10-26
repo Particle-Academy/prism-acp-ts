@@ -27,6 +27,8 @@ export interface ProbeOptions {
   executionControl?: boolean;
   inheritedFeatures?: Record<string, unknown>;
   inheritedSettings?: Record<string, unknown>;
+  rerouteSignal?: 'http-header' | 'event-early' | 'event-late' | 'envelope';
+  rerouteOnRequest?: number;
 }
 
 function inside(parent: string, child: string): boolean {
@@ -61,10 +63,11 @@ export async function openCodexToolProbe(options: ProbeOptions) {
   const temporaryParent = realpathSync(tmpdir());
   const receipt = join(root, 'mcp-receipts.jsonl');
   const mcpScript = fileURLToPath(new URL('./codex-native-tools-mcp.mjs', import.meta.url));
-  const requests: Row[] = [], sent: Row[] = [], problems: string[] = [], unexpected: string[] = [], blockedConnections: string[] = [];
+  const requests: Row[] = [], sent: Row[] = [], received: Row[] = [], problems: string[] = [], unexpected: string[] = [], blockedConnections: string[] = [];
   let endTurn: ((outcome: TurnOutcome) => void) | undefined;
   let reportedAgent: string | undefined;
   let effectiveConfig: Row | undefined;
+  let lateSignalAfterTool = false;
   let driver: CodexDriver | undefined, cleaned = false;
   const server = createServer((request, response) => { void (async () => {
     try {
@@ -81,10 +84,27 @@ export async function openCodexToolProbe(options: ProbeOptions) {
       const scripted = options.calls?.[requests.length - 1];
       const item = scripted ? { id: `${nonce}-call-${requests.length}`, call_id: `${nonce}-probe-${requests.length}`, ...scripted }
         : { type: 'message', id: `${id}-message`, role: 'assistant', content: [{ type: 'output_text', text: 'Local fixture complete' }] };
-      const events = [{ type: 'response.created', response: { id } }, { type: 'response.output_item.done', item },
+      const events: Row[] = [{ type: 'response.created', response: { id } }, { type: 'response.output_item.done', item },
         { type: 'response.completed', response: { id, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } }];
-      response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.end(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''));
+      const signalNow = requests.length === (options.rerouteOnRequest ?? 1);
+      if (signalNow) {
+        if (options.rerouteSignal === 'event-early') events[0].headers = { 'openai-model': 'gpt-6.1-sol' };
+        if (options.rerouteSignal === 'event-late') events[2].headers = { 'openai-model': 'gpt-6.1-sol' };
+        if (options.rerouteSignal === 'envelope') for (const event of events) if (event.response) event.response.model = 'gpt-6.1-sol';
+      }
+      response.writeHead(200, { 'content-type': 'text/event-stream',
+        ...(signalNow && options.rerouteSignal === 'http-header' ? { 'openai-model': 'gpt-6.1-sol' } : {}) });
+      const encode = (event: Row) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+      if (signalNow && options.rerouteSignal === 'event-late') {
+        response.write(events.slice(0, 2).map(encode).join(''));
+        // Force the adverse ordering: let the owned MCP tool run before the provider supplies model metadata.
+        const until = Date.now() + 5000;
+        while (Date.now() < until) {
+          if (existsSync(receipt) && readFileSync(receipt, 'utf8').includes('"method":"tools/call"')) { lateSignalAfterTool = true; break; }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        response.end(encode(events[2]));
+      } else response.end(events.map(encode).join(''));
     } catch (error) { unexpected.push(error instanceof Error ? error.message : 'fixture error'); response.destroy(); }
   })(); });
   // Rust HTTP clients use this non-forwarding proxy; auxiliary CONNECTs are recorded and locally refused.
@@ -152,6 +172,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
     }, { onProtocolError: (problem) => problems.push(problem), onTurnEnd: (outcome) => endTurn?.(outcome) }, (launch, handlers) => {
       const real = new StdioCodexTransport(launch, { ...handlers, onFrame: (raw) => {
         const frame = raw as Row;
+        received.push(frame);
         if (frame.result?.config) effectiveConfig = frame.result.config;
         if (typeof frame.result?.userAgent === 'string') {
           reportedAgent = frame.result.userAgent;
@@ -164,15 +185,16 @@ export async function openCodexToolProbe(options: ProbeOptions) {
     });
     driver.start(); await bounded(driver.ready, 20000, 'Native fixture startup timeout');
     return {
-      driver, requests, sent, problems, unexpected, blockedConnections, home, root, cleanup,
+      driver, requests, sent, received, problems, unexpected, blockedConnections, home, root, cleanup,
+      lateSignalAfterTool: () => lateSignalAfterTool,
       resources: () => existsSync(receipt) ? readFileSync(receipt, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as Row) : [],
       outputs: () => requests.flatMap((body) => body.input.filter((item: Row) => typeof item.call_id === 'string' && item.call_id.startsWith(nonce + '-probe-') && (item.type === 'function_call_output' || item.type === 'custom_tool_call_output'))).map((item: Row) => JSON.stringify(item.output)).join('\n'),
-      turn: async () => {
+      turn: async (settings?: { allowError?: boolean }) => {
         assert.deepEqual(problems, [], 'Native startup must succeed before a probe turn');
         const done = new Promise<TurnOutcome>((resolve) => { endTurn = resolve; });
         driver!.prompt('This is an owned local fake-provider probe; return the scripted deterministic response.');
         const outcome = await bounded(done, 25000, 'Native fixture turn timeout');
-        assert.equal(outcome.isError, false, 'Native fixture turn must complete');
+        if (!settings?.allowError) assert.equal(outcome.isError, false, 'Native fixture turn must complete');
         assert.deepEqual(unexpected, [], 'All HTTP stays on the local fixture');
         assert(blockedConnections.length <= 16, 'Bounded rejected auxiliary network attempts');
         return outcome;
