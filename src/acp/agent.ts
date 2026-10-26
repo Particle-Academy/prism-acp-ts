@@ -66,6 +66,13 @@ export interface AgentDriver {
   modelState?(): Promise<SessionModelState>;
   /** Switch the live session's model. Both shipped drivers implement it (Codex applies it from the next turn). */
   setModel?(modelId: string): Promise<void>;
+  /**
+   * Re-read the account's rate limits now and emit them as the driver's usual rate-limit notice, without starting a
+   * turn. For a host holding a session on a spent window whose agent reports limits only during turns. Optional:
+   * present means the reading can be refreshed on demand. CodexDriver implements it; ClaudeDriver does not need to,
+   * because Claude's reported resets are accurate.
+   */
+  readRateLimits?(): Promise<void>;
   readonly cliSessionId: string | null;
   readonly withheldCredentials: readonly string[];
 }
