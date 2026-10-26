@@ -38,6 +38,7 @@ export {
   META_DRIVER_CAPABILITIES,
   META_EXEC_POLICY_AMENDMENT,
   META_PERMISSION_DENIED,
+  META_MCP_SERVERS,
   META_NS,
   META_PARENT_TOOL_CALL,
   META_RATE_LIMIT,
@@ -70,6 +71,8 @@ export type { SanitizedProviderText } from './text.js';
 export { ClaudeToAcp } from './claude/to-acp.js';
 export type { AcpUpdate, ToolStatus } from './claude/to-acp.js';
 
+export { claudeMcpServers, codexListedReport, codexStartupReport } from './mcp-status.js';
+export type { McpServerReport, McpServerState } from './mcp-status.js';
 export { parseRateLimit, rateLimitNotice, readRateLimit } from './claude/rate-limit.js';
 export type { ClaudeRateLimit, ClaudeRateLimitWindow, RateLimitRead } from './claude/rate-limit.js';
 

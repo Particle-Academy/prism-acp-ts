@@ -87,6 +87,13 @@ export const META_THINKING_TOKENS_ESTIMATE = metaKey('thinking_tokens_estimate')
 /** Structured rate-limit detail, alongside the human-readable notice. */
 export const META_RATE_LIMIT = metaKey('rate_limit');
 
+/**
+ * The session's MCP servers as `McpServerReport[]` (src/mcp-status.ts): name, normalised status, and how
+ * many of each server's tools are callable. Claude reports it once, from system/init; Codex every time a
+ * server's startup status changes, as the full current list.
+ */
+export const META_MCP_SERVERS = metaKey('mcp_servers');
+
 /** Refusal details for a provider-denied tool call. */
 export const META_PERMISSION_DENIED = metaKey('permission_denied');
 

@@ -20,6 +20,7 @@ import { apiKeyEnvironment, apiKeyHome, type ProviderCredentials } from '../cred
 import { restrictToCurrentUser } from '../private-directory.js';
 import { SecretRedactor } from '../redact.js';
 import { claudeMcpConfig, readDisabledMcpServers, readMcpServers, type McpServer } from '../mcp.js';
+import { claudeMcpServers, type McpServerReport } from '../mcp-status.js';
 import { assertModel } from '../meta.js';
 import { ClaudeTurnFailures, type TurnFailure } from '../turn-failure.js';
 import { isValidCliSessionId } from '../session-id.js';
@@ -389,6 +390,17 @@ export class ClaudeDriver {
    */
   cliSessionId: string | null = null;
 
+  #mcpReports: readonly McpServerReport[] | null = null;
+
+  /**
+   * The session's MCP servers as system/init reported them, with each server's callable tool count; null until
+   * init (genie#1202). A server can read `connected` with `toolCount: 0` -- the CLI's report when tools/list
+   * failed -- so a host checking for a server's tools must check both.
+   */
+  get mcpServers(): readonly McpServerReport[] | null {
+    return this.#mcpReports;
+  }
+
   constructor(options: ClaudeDriverOptions, events: ClaudeDriverEvents = {}) {
     this.#mcpServers = readMcpServers(options.mcpServers);
     this.#options = { ...options, mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
@@ -704,6 +716,9 @@ export class ClaudeDriver {
         continue;
       }
       if (cliSessionId !== null) this.cliSessionId = cliSessionId;
+      if (isObject(frame.value) && frame.value.type === 'system' && frame.value.subtype === 'init') {
+        this.#mcpReports = claudeMcpServers(frame.value) ?? this.#mcpReports;
+      }
       // The CLI's answer to this driver's own control request: handed to whatever waits on it (initialize,
       // set_model; nothing waits on interrupt, see cancel()). Not agent output, so neither mapped nor unmapped.
       if (isObject(frame.value) && frame.value.type === 'control_response') {
