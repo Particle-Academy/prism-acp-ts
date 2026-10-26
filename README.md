@@ -756,8 +756,11 @@ await provider.started;
 const verdict = await provider.stop({ graceMs: 1_000 });
 ```
 
-In this mode `provider.child` is the real supervisor process with ignored native
-stdio; use `provider.io` for provider streams. `provider.closed` resolves after
+In this mode `provider.child` is the real supervisor process; use `provider.io`
+for provider streams. Its unused native bootstrap handles reference its own
+executable opened read-only, avoiding both global stdio pipes and NUL opens
+(which some restricted Windows hosts also deny). No host stdio or writable file
+is inherited for bootstrap. `provider.closed` resolves after
 the supervisor ends and output drains, with a five-second drain bound. Byte
 streams use 64 KiB watermarks and standard Node backpressure; writers must honor
 `write()` returning `false`. Authentication has bounded headers and a deadline.

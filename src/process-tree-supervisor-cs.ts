@@ -116,6 +116,8 @@ static class Supervisor
     static extern bool DuplicateHandle(IntPtr sourceProcess, IntPtr source, IntPtr targetProcess, out IntPtr target, uint access, bool inherit, uint options);
     [DllImport("advapi32.dll", SetLastError = true)]
     static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr data, int length, out int returned);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
 
     static StreamWriter control;
     static readonly object writeLock = new object();
@@ -261,6 +263,9 @@ static class Supervisor
             ioChannels[i] = Environment.GetEnvironmentVariable("PRISM_ACP_TREE_IO_" + i);
             Environment.SetEnvironmentVariable("PRISM_ACP_TREE_IO_" + i, null);
         }
+        // Bootstrap file handles are unused and must not leak into the provider.
+        if (local) foreach (int standard in new int[] { -10, -11, -12 })
+            if (!SetHandleInformation(GetStdHandle(standard), 1, 0)) return 125;
         PipeStream pipe;
         try
         {

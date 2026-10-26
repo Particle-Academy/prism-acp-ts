@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, closeSync, openSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 const [mode, file, level = '0'] = process.argv.slice(2);
@@ -21,9 +21,12 @@ if (mode === 'stall-input') {
 } else if (mode === 'tree') {
   appendFileSync(file, process.pid + '\n');
   if (Number(level) < 2) {
-    const child = spawn(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main', fileURLToPath(import.meta.url), mode, file, String(Number(level) + 1)], {
-      stdio: 'ignore', detached: level === '1',
-    });
+    // No libuv pipe creation or NUL open: both can be denied to this token.
+    const unused = openSync(fileURLToPath(import.meta.url), 'r');
+    let child;
+    try { child = spawn(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main', fileURLToPath(import.meta.url), mode, file, String(Number(level) + 1)], {
+      stdio: [unused, unused, unused], detached: level === '1',
+    }); } finally { closeSync(unused); }
     child.unref();
   }
   setInterval(() => {}, 60_000);

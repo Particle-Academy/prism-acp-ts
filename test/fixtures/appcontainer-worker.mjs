@@ -18,7 +18,14 @@ if (mode === 'native') {
   child.once('exit', (code) => process.exit(code ?? 1));
 } else if (['inherit', 'ignore', 'pipe'].includes(mode)) {
   say('before_spawn');
-  const child = spawn(process.execPath, ['--version'], { stdio: mode === 'pipe' ? ['ignore', 'pipe', 'pipe'] : mode });
+  let child;
+  try { child = spawn(process.execPath, ['--version'], { stdio: mode === 'pipe' ? ['ignore', 'pipe', 'pipe'] : mode }); }
+  catch (error) {
+    // This is a measured baseline, not the supported transport. Some restricted
+    // Windows hosts also deny libuv's NUL open; the public path must avoid it.
+    if (mode !== 'ignore' || error.code !== 'EPERM') throw error;
+    say('ignore_refused', { code: error.code }); process.exit(0);
+  }
   say('spawn_returned');
   child.stdout?.on('data', (bytes) => say('stdout', { text: String(bytes) }));
   child.stderr?.resume();

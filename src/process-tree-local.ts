@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { closeSync, openSync } from 'node:fs';
 import { Socket } from 'node:net';
 import { PassThrough, Writable } from 'node:stream';
 import { finished } from 'node:stream/promises';
@@ -190,14 +191,20 @@ class LocalProvider implements ProviderProcess {
     env.PRISM_ACP_TREE_CHANNEL = control.path;
     env.PRISM_ACP_TREE_TOKEN = token;
     for (let i = 0; i < 3; i++) env[`PRISM_ACP_TREE_IO_${i}`] = this.#pipes[i + 1].path;
+    let bootstrap: number | undefined;
     try {
-      // 'ignore' opens NUL instead of invoking libuv's forbidden global pipe-pair creation.
-      this.child = spawn(supervisor, [], { cwd: options.cwd, env, stdio: 'ignore', windowsHide: true });
+      // Neither anonymous pipes nor NUL are universally available to restricted
+      // tokens. Reuse an already-readable trusted file, opened READ ONLY, for
+      // unused bootstrap handles. No host input/output or writable file is exposed.
+      bootstrap = openSync(supervisor, 'r');
+      this.child = spawn(supervisor, [], { cwd: options.cwd, env, stdio: [bootstrap, bootstrap, bootstrap], windowsHide: true });
     } catch (error) {
       clearTimeout(this.#deadline);
       this.#cleanup();
       const code = (error as NodeJS.ErrnoException)?.code;
       throw new ProcessTreeError(`local supervisor could not be spawned (${typeof code === 'string' && /^[A-Z_0-9]{1,40}$/.test(code) ? code : 'UNKNOWN'})`);
+    } finally {
+      if (bootstrap !== undefined) closeSync(bootstrap);
     }
     this.child.once('error', () => this.#fail('supervisor spawn failed'));
     this.child.once('close', () => {
