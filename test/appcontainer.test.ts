@@ -67,6 +67,12 @@ describe.runIf(process.platform === 'win32' && process.env.PRISM_ACP_APPCONTAINE
     expect(final, JSON.stringify(lines)).toMatchObject({ timedOut: false, workerExit: 0 });
   }, 20_000);
 
+  it.each(['inherit', 'ignore'])('launch control with %s stdio returns without global-pipe creation', async mode => {
+    const { lines, final } = await probe(mode);
+    expect(final, JSON.stringify(lines)).toMatchObject({ timedOut: false, workerExit: 0, remainingBeforeCleanup: 0 });
+    expect(lines.find(line => line.stage === 'spawn_returned')).toBeDefined();
+  }, 20_000);
+
   it('launches through the public local-pipe contract and verifies a complete stop', async () => {
     const { lines, final } = await probe('local');
     expect(final, JSON.stringify(lines)).toMatchObject({ timedOut: false, workerExit: 0 });

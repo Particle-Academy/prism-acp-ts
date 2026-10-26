@@ -196,7 +196,8 @@ class LocalProvider implements ProviderProcess {
     } catch (error) {
       clearTimeout(this.#deadline);
       this.#cleanup();
-      throw new ProcessTreeError('local supervisor could not be spawned');
+      const code = (error as NodeJS.ErrnoException)?.code;
+      throw new ProcessTreeError(`local supervisor could not be spawned (${typeof code === 'string' && /^[A-Z_0-9]{1,40}$/.test(code) ? code : 'UNKNOWN'})`);
     }
     this.child.once('error', () => this.#fail('supervisor spawn failed'));
     this.child.once('close', () => {
