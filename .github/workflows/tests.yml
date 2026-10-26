@@ -56,6 +56,11 @@ jobs:
       - run: npm run build
       - run: npx vitest run
 
+      - name: AppContainer transport (owned profiles; no model or network access)
+        run: npx vitest run test/appcontainer.test.ts
+        env:
+          PRISM_ACP_APPCONTAINER: '1'
+
   third-party:
     name: Third-party dependency allowlist
     runs-on: ubuntu-latest

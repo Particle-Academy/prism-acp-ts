@@ -120,4 +120,4 @@ export type { CodexRateLimit, CodexRateLimitRead, CodexRateLimitWindow } from '.
 export { ProcessTreeError, launchProvider, prepareProcessTree } from './process-tree.js';
 export { ModelListError, listModels } from './models.js';
 export type { AvailableModel, ListModelsOptions, SessionModelState } from './models.js';
-export type { Containment, LaunchOptions, ProcessTree, ProviderProcess, StopOptions, StopVerdict } from './process-tree.js';
+export type { Containment, LaunchOptions, ProcessTreeOptions, ProcessTree, ProviderIo, ProviderProcess, StopOptions, StopVerdict } from './process-tree.js';

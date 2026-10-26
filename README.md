@@ -716,6 +716,96 @@ driver.processTree; // { providerPid, supervisorPid, containment: { kind: 'job-o
 its script), and the current directory is never searched for the binary. To run a script as the provider, name the
 interpreter and pass the script first: `{ binary: process.execPath, binaryArgs: ['/abs/stub.mjs'] }`.
 
+### Windows AppContainer transport
+
+For a host running inside an AppContainer, opt into `windowsStdio: 'local-pipes'`.
+This uses authenticated `\\.\pipe\LOCAL\` endpoints for control and provider byte
+I/O. The existing Windows supervisor creates them with protected explicit ACLs
+granting only the launching user and its AppContainer SID (when present), then
+Node connects. A per-launch secret and nonce-bound mutual HMAC authenticate both
+ends before any launch specification or provider bytes are accepted. It keeps
+the suspended launch, Job Object containment and host-death cleanup.
+It requires no loopback exemption or network capability. The default transport
+for ordinary Windows hosts is unchanged.
+
+The embedding application creates the AppContainer and grants its profile SID
+access to the trusted executables, package files, supervisor directory and
+assigned writable workspace/home. Build the supervisor with
+`prepareProcessTree({ directory })` before entering the AppContainer, then make
+its directory read-only to the contained processes. Call the same preparation
+method in the worker to verify that prepared copy. A missing or changed copy is
+refused if it cannot be rebuilt; there is no uncontained fallback.
+
+```ts
+import { childEnv, launchProvider, prepareProcessTree } from '@particle-academy/prism-acp';
+
+// Paths, trusted command/arguments and byte handlers are supplied by the application.
+await prepareProcessTree({ directory: assignedSupervisorDirectory });
+const { env } = childEnv(process.env);
+const provider = launchProvider(trustedExecutable, trustedArguments, {
+  cwd: assignedWorkspace,
+  env,
+  windowsStdio: 'local-pipes',
+  startupTimeoutMs: 5_000,
+});
+const io = provider.io!;
+io.stdout.on('data', onProviderBytes);
+io.stderr.on('data', onProviderDiagnosticBytes);
+await provider.started;
+// Respect io.stdin.write()'s return value and wait for 'drain' when it is false.
+const verdict = await provider.stop({ graceMs: 1_000 });
+```
+
+In this mode `provider.child` is the real supervisor process; use `provider.io`
+for provider streams. Its unused native bootstrap handles reference its own
+executable opened read-only, avoiding both global stdio pipes and NUL opens
+(which some restricted Windows hosts also deny). No host stdio or writable file
+is inherited for bootstrap. `provider.closed` resolves after
+the supervisor ends and output drains, with a five-second drain bound. Byte
+streams use 64 KiB watermarks and standard Node backpressure; writers must honor
+`write()` returning `false`. Authentication has bounded headers and a deadline.
+`startupTimeoutMs` applies to the local transport's handshake/provider startup,
+defaults to 10 seconds and accepts integer values from 1 to 60,000 ms. Native
+connect/authentication is additionally capped at five seconds per channel.
+`ioTimeoutMs` bounds a pending stdin write or blocked output backpressure,
+defaults to 30 seconds and accepts the same range; idle sessions are allowed.
+Both deadline options require LOCAL mode. LOCAL mode is rejected on non-Windows
+platforms. Resolve
+trusted binaries and prepare the supervisor before a time-sensitive session;
+the deadline does not interrupt synchronous compilation or filesystem access.
+
+API-key homes must already exist with application-provisioned container ACLs;
+LOCAL mode refuses to create them through the ordinary Windows ACL helper.
+Claude's generated `mcpServers`, `disabledMcpServers` and `permissionPrompts`
+configuration is currently refused in LOCAL mode: its private-directory helper
+and approval channel need a separate AppContainer-compatible implementation.
+
+Both drivers and `listModels()` accept the same configuration through
+`processTree`. Their protocol I/O uses the selected transport automatically:
+
+```ts
+import { ClaudeDriver, CodexDriver, listModels } from '@particle-academy/prism-acp';
+
+const processTree = { windowsStdio: 'local-pipes' as const, startupTimeoutMs: 5_000 };
+new ClaudeDriver({ cwd: assignedWorkspace, processTree });
+new CodexDriver({ cwd: assignedWorkspace, processTree });
+await listModels('codex', { cwd: assignedWorkspace, processTree });
+```
+
+This option covers Prism's launch and protocol I/O. The application still owns
+sandbox provisioning, ACLs, networking, credential/profile storage and validation
+of the real CLI and any processes it starts. A CLI that creates incompatible IPC
+itself needs its own compatibility fix. Package tests exercise trusted fixture
+executables inside real AppContainers without credentials or model calls.
+On Windows run that fixture explicitly with `PRISM_ACP_APPCONTAINER=1` and
+`npx vitest run test/appcontainer.test.ts` after building. Windows CI opts in;
+other platforms and ordinary test runs visibly skip OS-profile creation.
+
+The worker must already be able to load Node and the package from its assigned
+paths. Tests stage physical paths and use Node's `--preserve-symlinks` and
+`--preserve-symlinks-main` flags to avoid a `realpath` walk through denied parent
+directories. No drive-root or machine-wide file grant is added by the package.
+
 ## Driver capabilities
 
 When the embedder identifies the selected driver, `initialize` declares its

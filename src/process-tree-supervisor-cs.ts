@@ -18,7 +18,11 @@ export const SUPERVISOR_CS = String.raw`// prism-acp process-tree supervisor (Wi
 using System;
 using System.IO;
 using System.IO.Pipes;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
@@ -106,6 +110,14 @@ static class Supervisor
     static extern bool GetExitCodeProcess(IntPtr process, out uint code);
     [DllImport("kernel32.dll")]
     static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DuplicateHandle(IntPtr sourceProcess, IntPtr source, IntPtr targetProcess, out IntPtr target, uint access, bool inherit, uint options);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr data, int length, out int returned);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
 
     static StreamWriter control;
     static readonly object writeLock = new object();
@@ -139,6 +151,99 @@ static class Supervisor
         return active;
     }
 
+    // Mutual authentication: a squatter never receives the secret or a spawn
+    // specification. Every handshake is bounded and consumes exactly its LF.
+    static string AuthMac(string token, string text)
+    {
+        using (var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(token)))
+            return BitConverter.ToString(hmac.ComputeHash(Encoding.ASCII.GetBytes(text))).Replace("-", "").ToLowerInvariant();
+    }
+
+    static bool Same(string left, string right)
+    {
+        if (left == null || left.Length != right.Length) return false;
+        int difference = 0;
+        for (int i = 0; i < right.Length; i++) difference |= left[i] ^ right[i];
+        return difference == 0;
+    }
+
+    static string AuthRead(PipeStream pipe, Stopwatch clock)
+    {
+        var line = new StringBuilder(); var one = new byte[1];
+        while (line.Length <= 192)
+        {
+            int remaining = 5000 - (int)clock.ElapsedMilliseconds;
+            if (remaining <= 0) throw new TimeoutException();
+            var pending = pipe.BeginRead(one, 0, 1, null, null);
+            using (var wait = pending.AsyncWaitHandle)
+            {
+                if (!wait.WaitOne(remaining)) throw new TimeoutException();
+                if (pipe.EndRead(pending) == 0) throw new EndOfStreamException();
+            }
+            if (one[0] == 10) return line.ToString();
+            if (one[0] < 32 || one[0] > 126) throw new FormatException();
+            line.Append((char)one[0]);
+        }
+        throw new FormatException();
+    }
+
+    static void AuthWrite(PipeStream pipe, string line, Stopwatch clock)
+    {
+        byte[] bytes = Encoding.ASCII.GetBytes(line + "\n");
+        int remaining = 5000 - (int)clock.ElapsedMilliseconds;
+        if (remaining <= 0) throw new TimeoutException();
+        var pending = pipe.BeginWrite(bytes, 0, bytes.Length, null, null);
+        using (var wait = pending.AsyncWaitHandle)
+        {
+            if (!wait.WaitOne(remaining)) throw new TimeoutException();
+            pipe.EndWrite(pending);
+        }
+    }
+
+    static NamedPipeServerStream ConnectLocal(string channel, string token, string kind)
+    {
+        const string prefix = @"\\.\pipe\LOCAL\prism-acp-";
+        if (channel == null || !channel.StartsWith(prefix, StringComparison.Ordinal)) throw new FormatException();
+        var clock = Stopwatch.StartNew();
+        // Protected from creation: no Everyone, anonymous, group, or all-apps grants.
+        var security = new PipeSecurity();
+        security.SetAccessRuleProtection(true, false);
+        using (var identity = WindowsIdentity.GetCurrent())
+        {
+            security.AddAccessRule(new PipeAccessRule(identity.User, PipeAccessRights.FullControl, AccessControlType.Allow));
+            int length;
+            GetTokenInformation(identity.Token, 31, IntPtr.Zero, 0, out length);
+            if (length <= 0) throw new IOException();
+            IntPtr data = Marshal.AllocHGlobal(length);
+            try
+            {
+                if (!GetTokenInformation(identity.Token, 31, data, length, out length)) throw new IOException();
+                IntPtr sid = Marshal.ReadIntPtr(data);
+                if (sid != IntPtr.Zero) security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(sid), PipeAccessRights.FullControl, AccessControlType.Allow));
+            }
+            finally { Marshal.FreeHGlobal(data); }
+        }
+        var pipe = new NamedPipeServerStream(channel.Substring(@"\\.\pipe\".Length), PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 65536, 65536, security);
+        try
+        {
+            var pending = pipe.BeginWaitForConnection(null, null);
+            using (var wait = pending.AsyncWaitHandle)
+            {
+                if (!wait.WaitOne(5000)) throw new TimeoutException();
+                pipe.EndWaitForConnection(pending);
+            }
+            byte[] random = new byte[32];
+            using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(random);
+            string nonce = BitConverter.ToString(random).Replace("-", "").ToLowerInvariant();
+            AuthWrite(pipe, "hello " + kind + " " + nonce, clock);
+            if (!Same(AuthRead(pipe, clock), "auth " + AuthMac(token, "host " + kind + " " + nonce))) throw new FormatException();
+            AuthWrite(pipe, "ready " + AuthMac(token, "supervisor " + kind + " " + nonce), clock);
+            return pipe;
+        }
+        catch { pipe.Dispose(); throw; }
+    }
+
     static int Main()
     {
         string channel = Environment.GetEnvironmentVariable("PRISM_ACP_TREE_CHANNEL");
@@ -151,11 +256,28 @@ static class Supervisor
         if (!channel.StartsWith(prefix)) return 125;
 
         // Overlapped: a synchronous pipe handle serialises I/O, so a write would wait behind the listener's pending read.
-        var pipe = new NamedPipeClientStream(".", channel.Substring(prefix.Length), PipeDirection.InOut, PipeOptions.Asynchronous);
-        try { pipe.Connect(10000); } catch { return 125; }
+        bool local = channel.StartsWith(@"\\.\pipe\LOCAL\prism-acp-", StringComparison.Ordinal);
+        string[] ioChannels = new string[3];
+        if (local) for (int i = 0; i < 3; i++)
+        {
+            ioChannels[i] = Environment.GetEnvironmentVariable("PRISM_ACP_TREE_IO_" + i);
+            Environment.SetEnvironmentVariable("PRISM_ACP_TREE_IO_" + i, null);
+        }
+        // No Console streams: bootstrap files are read-only. Report failures
+        // over authenticated control, or exit for the host to report its code.
+        // Bootstrap handles are unused and must not leak into the provider.
+        if (local) foreach (int standard in new int[] { -10, -11, -12 })
+            if (!SetHandleInformation(GetStdHandle(standard), 1, 0)) return 125;
+        PipeStream pipe;
+        try
+        {
+            if (local) pipe = ConnectLocal(channel, token, "control");
+            else { var ordinary = new NamedPipeClientStream(".", channel.Substring(prefix.Length), PipeDirection.InOut, PipeOptions.Asynchronous); ordinary.Connect(10000); pipe = ordinary; }
+        }
+        catch { return 125; }
         var reader = new StreamReader(pipe, new UTF8Encoding(false));
         control = new StreamWriter(pipe, new UTF8Encoding(false));
-        Say("hello " + token);
+        if (!local) Say("hello " + token);
 
         string spec = reader.ReadLine();
         if (spec == null) return 125;
@@ -181,12 +303,35 @@ static class Supervisor
         startup.hStdInput = GetStdHandle(-10);
         startup.hStdOutput = GetStdHandle(-11);
         startup.hStdError = GetStdHandle(-12);
-        ProcessInformation info;
-        // SUSPENDED, so it is in the job before it can run a single instruction or start a child.
-        if (!CreateProcessW(application, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, CREATE_SUSPENDED,
-                IntPtr.Zero, cwd, ref startup, out info))
+        ProcessInformation info = new ProcessInformation();
+        var io = new NamedPipeServerStream[3]; var inherited = new IntPtr[3];
+        bool created; int createError = 0;
+        try
         {
-            Say("failed " + Marshal.GetLastWin32Error());
+            if (local)
+            {
+                string[] kinds = { "stdin", "stdout", "stderr" };
+                for (int i = 0; i < 3; i++)
+                {
+                    io[i] = ConnectLocal(ioChannels[i], token, kinds[i]);
+                    if (!DuplicateHandle(GetCurrentProcess(), io[i].SafePipeHandle.DangerousGetHandle(), GetCurrentProcess(), out inherited[i], 0, true, 2))
+                        throw new IOException();
+                }
+                startup.hStdInput = inherited[0]; startup.hStdOutput = inherited[1]; startup.hStdError = inherited[2];
+            }
+            // SUSPENDED: assignment precedes the provider's first instruction.
+            created = CreateProcessW(application, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, CREATE_SUSPENDED,
+                IntPtr.Zero, cwd, ref startup, out info);
+            if (!created) createError = Marshal.GetLastWin32Error();
+        }
+        catch { Say("failed local-stdio"); return 125; }
+        finally
+        {
+            for (int i = 0; i < 3; i++) { if (inherited[i] != IntPtr.Zero) CloseHandle(inherited[i]); if (io[i] != null) io[i].Dispose(); }
+        }
+        if (!created)
+        {
+            Say("failed " + createError);
             return 127;
         }
         if (!AssignProcessToJobObject(job, info.hProcess))
@@ -196,7 +341,15 @@ static class Supervisor
             Say("failed " + error);
             return 126;
         }
-        ResumeThread(info.hThread);
+        uint resumed = ResumeThread(info.hThread);
+        if (local && resumed == uint.MaxValue)
+        {
+            int error = Marshal.GetLastWin32Error();
+            CloseHandle(info.hThread);
+            EndTree(job);
+            Say("failed " + error);
+            return 126;
+        }
         CloseHandle(info.hThread);
         Say("started " + info.dwProcessId);
 

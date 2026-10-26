@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { restrictToCurrentUser } from './private-directory.js';
+import type { ProcessTreeOptions } from './process-tree.js';
 
 /**
  * HOW A DRIVEN CLI AUTHENTICATES: the person's own subscription login, or an API key the app supplies.
@@ -68,6 +69,7 @@ export function apiKeyHome(
   provider: CredentialProvider,
   credentials: ProviderCredentials | undefined,
   parentEnv: Readonly<Record<string, string | undefined>> = process.env,
+  processTree?: ProcessTreeOptions,
 ): ApiKeyHome | null {
   if (credentials === undefined || credentials.mode === 'subscription') return null;
   if (credentials.mode !== 'apiKey') throw new Error('credentials.mode must be "subscription" or "apiKey"');
@@ -88,6 +90,9 @@ export function apiKeyHome(
   if (existsSync(resolved)) {
     if (!statSync(resolved).isDirectory()) throw new Error('credentials.home exists and is not a directory');
   } else {
+    // AppContainer provisioning belongs to the host. The ordinary ACL helper
+    // invokes OS tools with libuv stdio pairs, which cannot run in this mode.
+    if (processTree?.windowsStdio === 'local-pipes') throw new Error('credentials.home must already exist when using LOCAL transport');
     try {
       mkdirSync(resolved, { recursive: true, mode: 0o700 });
       try {

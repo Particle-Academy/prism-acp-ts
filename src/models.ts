@@ -3,7 +3,7 @@ import { childEnv } from './env.js';
 import { apiKeyEnvironment, apiKeyHome, type ProviderCredentials } from './credentials.js';
 import { assertModel } from './meta.js';
 import { NdjsonFramer, encodeLine } from './ndjson.js';
-import { launchProvider } from './process-tree.js';
+import { launchProvider, type ProcessTreeOptions } from './process-tree.js';
 import { stripAnsiControlSequences } from './text.js';
 
 /**
@@ -110,6 +110,7 @@ export function codexModelsOf(page: unknown, includeHidden = false): AvailableMo
 }
 
 export interface ListModelsOptions {
+  readonly processTree?: ProcessTreeOptions;
   /** The CLI to ask. Default `claude` / `codex`. */
   readonly binary?: string;
   readonly binaryArgs?: readonly string[];
@@ -134,7 +135,7 @@ export interface ListModelsOptions {
  */
 export async function listModels(provider: 'claude' | 'codex', options: ListModelsOptions = {}): Promise<SessionModelState> {
   const parentEnv = options.parentEnv ?? process.env;
-  const keyed = apiKeyHome(provider, options.credentials, parentEnv);
+  const keyed = apiKeyHome(provider, options.credentials, parentEnv, options.processTree);
   const { env } = childEnv(parentEnv, {
     allow: provider === 'claude'
       ? ['CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', ...(options.allowEnv ?? [])]
@@ -144,10 +145,11 @@ export async function listModels(provider: 'claude' | 'codex', options: ListMode
   const args = provider === 'claude'
     ? ['--print', '--output-format', 'stream-json', '--input-format', 'stream-json', '--verbose']
     : ['app-server', '--listen', 'stdio://'];
-  const child = launchProvider(options.binary ?? provider, [...(options.binaryArgs ?? []), ...args], { cwd: options.cwd ?? process.cwd(), env });
+  const child = launchProvider(options.binary ?? provider, [...(options.binaryArgs ?? []), ...args], { ...options.processTree, cwd: options.cwd ?? process.cwd(), env });
+  const io = child.io ?? child.child;
   const framer = new NdjsonFramer();
   const waiters = new Map<string, { resolve: (frame: Record<string, unknown>) => void; reject: (cause: Error) => void }>();
-  child.child.stdout?.on('data', (chunk: Buffer) => {
+  io.stdout?.on('data', (chunk: Buffer) => {
     for (const frame of framer.push(chunk)) {
       if (!frame.ok || typeof frame.value !== 'object' || frame.value === null) continue;
       const value = frame.value as Record<string, unknown>;
@@ -161,11 +163,13 @@ export async function listModels(provider: 'claude' | 'codex', options: ListMode
       }
     }
   });
-  child.child.stderr?.resume();
-  child.child.once('close', () => {
+  io.stderr?.resume();
+  const onClose = () => {
     for (const waiter of waiters.values()) waiter.reject(new ModelListError(`${provider} exited before answering the model list`));
     waiters.clear();
-  });
+  };
+  if (child.closed !== undefined) void child.closed.then(onClose);
+  else child.child.once('close', onClose);
   const deadline = options.timeoutMs ?? 30_000;
   const ask = (id: string, frame: unknown) => new Promise<Record<string, unknown>>((resolve, reject) => {
     const timer = setTimeout(() => reject(new ModelListError(`${provider} did not answer the model list within ${deadline} ms`)), deadline);
@@ -174,7 +178,7 @@ export async function listModels(provider: 'claude' | 'codex', options: ListMode
       resolve: (value) => { clearTimeout(timer); resolve(value); },
       reject: (cause) => { clearTimeout(timer); reject(cause); },
     });
-    child.child.stdin?.write(encodeLine(frame));
+    io.stdin?.write(encodeLine(frame));
   });
 
   try {
@@ -195,7 +199,7 @@ export async function listModels(provider: 'claude' | 'codex', options: ListMode
       return answer.result;
     };
     await request('initialize', { clientInfo: { name: '@particle-academy/prism-acp', version: '0' }, capabilities: {} });
-    child.child.stdin?.write(encodeLine({ jsonrpc: '2.0', method: 'initialized' }));
+    io.stdin?.write(encodeLine({ jsonrpc: '2.0', method: 'initialized' }));
     if (keyed !== null) {
       const login = await request('account/login/start', { type: 'apiKey', apiKey: keyed.apiKey }).catch(() => {
         throw new ModelListError('codex refused the API key login');

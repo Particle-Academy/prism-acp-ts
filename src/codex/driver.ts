@@ -1,4 +1,4 @@
-import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
+import type { ProcessTree, ProcessTreeOptions, StopOptions, StopVerdict } from '../process-tree.js';
 import { codexModelsOf, type AvailableModel, type SessionModelState } from '../models.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -45,6 +45,8 @@ import {
 
 export interface CodexDriverOptions {
   readonly cwd: string;
+  /** Trusted process transport configuration; AppContainer provisioning remains the embedder's responsibility. */
+  readonly processTree?: ProcessTreeOptions;
   /** Trusted configuration; must not be built from untrusted input. */
   readonly binary?: string;
   /**
@@ -452,7 +454,7 @@ export class CodexDriver implements AgentDriver {
 
   async #connect(): Promise<void> {
     const parentEnv = this.#options.parentEnv ?? process.env;
-    const keyed = apiKeyHome('codex', this.#options.credentials, parentEnv);
+    const keyed = apiKeyHome('codex', this.#options.credentials, parentEnv, this.#options.processTree);
     const { env, withheld } = childEnv(parentEnv, {
       allow: ['CODEX_HOME', 'CODEX_CONFIG_DIR', 'XDG_CONFIG_HOME', ...(this.#options.allowEnv ?? [])],
       ...(keyed === null ? {} : { set: apiKeyEnvironment('codex', keyed) }),
@@ -469,6 +471,7 @@ export class CodexDriver implements AgentDriver {
     const transport = this.#transportFactory(
       {
         cwd: this.#options.cwd,
+        ...(this.#options.processTree === undefined ? {} : { processTree: this.#options.processTree }),
         env,
         ...(this.#options.binary === undefined ? {} : { binary: this.#options.binary }),
         ...(this.#options.binaryArgs === undefined ? {} : { binaryArgs: this.#options.binaryArgs }),
