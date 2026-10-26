@@ -600,6 +600,17 @@ supplied servers. Their presence means this is not an MCP-only tool surface.
 The supplied MCP tools retain the capabilities and approval policy you give them.
 An empty `mcpServers` list in this mode disables all inherited servers.
 
+The effective home/project configuration is checked before thread creation.
+Known native feature flags are forced off. Every other enabled feature must be
+on the measured harmless-feature allowlist (`enable_request_compression`,
+`api_key_model_discovery`, `api_key_cyber_access_programs`, `auth_elicitation`,
+`mentions_v2`); an unreviewed flag such as `standalone_web_search` or `memories`
+refuses. Unmeasured tool-specific settings, custom model catalogs and native
+browser/computer/desktop/code-mode configuration refuse as well. Native web
+search and human-input/plan/image settings covered by the policy are overwritten
+with their restricted values. This avoids assuming an empty configuration home
+when the application uses an existing one.
+
 Omitted or other models, unmeasured CLI versions, and `resumeSessionId` refuse
 with a clear error. Model selection is limited to the matrix; an unsupported
 native model reroute closes the driver. Resume is unsupported because a saved

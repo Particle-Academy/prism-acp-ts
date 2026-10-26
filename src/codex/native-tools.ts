@@ -41,11 +41,50 @@ const NATIVE_FEATURES = [
   'guardian_approval', 'guardian_conversation_history_tools', 'request_permissions_tool',
 ] as const;
 
+/** Explicit feature settings measured without adding tools. Built-in defaults are pinned by the CLI matrix. */
+const HARMLESS_FEATURES = new Set([
+  'enable_request_compression', 'api_key_model_discovery', 'api_key_cyber_access_programs',
+  'auth_elicitation', 'mentions_v2',
+]);
+
+/** Refuse unmeasured home/project settings instead of assuming the finite native override list covers them. */
+export function assertRestrictedConfig(effective: Record<string, unknown>): void {
+  const features = optionalTable(effective.features, 'features');
+  for (const [name, value] of Object.entries(features)) {
+    // These entries are always overwritten with false by the final restriction config.
+    if ((NATIVE_FEATURES as readonly string[]).includes(name)) continue;
+    if (value === false || value === null || (value === true && HARMLESS_FEATURES.has(name))) continue;
+    throw new CodexNativeToolsRefused(`nativeTools:'none' refuses unmeasured feature ${safeName(name)}`);
+  }
+  const tools = optionalTable(effective.tools, 'tools');
+  for (const name of Object.keys(tools)) {
+    if (['experimental_request_user_input', 'update_plan', 'view_image'].includes(name) || tools[name] === null) continue;
+    throw new CodexNativeToolsRefused(`nativeTools:'none' refuses unmeasured tools setting ${safeName(name)}`);
+  }
+  // These native tool/model configurations were absent from the measured homes.
+  for (const name of ['model_catalog_json', 'browser_use', 'computer_use', 'desktop', 'code_mode', 'multi_agent_v2']) {
+    if (effective[name] !== undefined && effective[name] !== null) {
+      throw new CodexNativeToolsRefused(`nativeTools:'none' refuses unmeasured tool-shaping setting ${name}`);
+    }
+  }
+}
+
+function safeName(name: string): string {
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(name) ? JSON.stringify(name) : '<invalid setting name>';
+}
+
+function optionalTable(value: unknown, name: string): Record<string, unknown> {
+  if (value === null || value === undefined) return {};
+  const table = object(value);
+  if (table !== undefined) return table;
+  throw new CodexNativeToolsRefused(`nativeTools:'none' could not verify effective ${name} configuration`);
+}
+
 export function restrictedToolConfig(config: Record<string, unknown> | undefined): Record<string, unknown> {
   return {
     ...config,
     features: { ...object(config?.features), ...Object.fromEntries(NATIVE_FEATURES.map((key) => [key, false])) },
-    tools: { experimental_request_user_input: { enabled: false }, update_plan: { enabled: false } },
+    tools: { experimental_request_user_input: { enabled: false }, update_plan: { enabled: false }, view_image: false },
     cloud: { skills: { enabled: false } },
     skills: { include_instructions: false },
     web_search: 'disabled',

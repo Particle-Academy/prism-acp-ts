@@ -55,6 +55,36 @@ describe.runIf(process.env.PRISM_ACP_CODEX_NATIVE_TOOLS === '1')('native Codex t
     } finally { await probe.cleanup(); }
   }, 60000);
 
+  it('refuses a home enabling an unlisted native feature before thread/start', async () => {
+    const probe = await openCodexToolProbe({ model: 'gpt-5.3-codex', nativeTools: 'none', inheritedFeatures: { standalone_web_search: true } });
+    try {
+      expect(probe.problems.join(' ')).toContain('unmeasured feature "standalone_web_search"');
+      expect(probe.sent.some((frame) => frame.method === 'thread/start' || frame.method === 'thread/resume')).toBe(false);
+      expect(probe.requests).toHaveLength(0);
+      expect(probe.resources()).toEqual([]);
+    } finally { await probe.cleanup(); }
+  }, 60000);
+
+  it('refuses inherited tool-specific settings that were absent from measurement', async () => {
+    const probe = await openCodexToolProbe({ model: 'gpt-5.3-codex', nativeTools: 'none',
+      inheritedSettings: { tools: { web_search: { context_size: 'high' } } } });
+    try {
+      expect(probe.problems.join(' ')).toContain('unmeasured tools setting "web_search"');
+      expect(probe.sent.some((frame) => frame.method === 'thread/start')).toBe(false);
+      expect(probe.requests).toHaveLength(0);
+    } finally { await probe.cleanup(); }
+  }, 60000);
+
+  it('overrides known inherited native capabilities and top-level web search with the measured restrictions', async () => {
+    const probe = await openCodexToolProbe({ model: 'gpt-5.3-codex', nativeTools: 'none',
+      inheritedFeatures: { shell_tool: true, multi_agent: true, view_image: true, code_mode_host: true },
+      inheritedSettings: { web_search: 'live', tools: { experimental_request_user_input: { enabled: true }, update_plan: { enabled: true } } } });
+    try {
+      await probe.turn();
+      expect(advertisedTools(probe.requests[0])).toEqual([...CODEX_NATIVE_TOOLS_NONE.residualTools, 'mcp__owned.app_ping'].sort());
+    } finally { await probe.cleanup(); }
+  }, 60000);
+
   it('refuses a real existing thread in restricted mode and retains ordinary resume', async () => {
     const first = await openCodexToolProbe({ model: 'gpt-5.3-codex', suppliedForeign: true, calls: [
       { type: 'function_call', name: 'read_mcp_resource', arguments: JSON.stringify({ server: 'foreign', uri: 'fixture://owned' }) },

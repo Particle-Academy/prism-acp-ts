@@ -10,7 +10,7 @@ import { codexFailureOf } from '../turn-failure.js';
 import { codexMcpConfig, codexMcpSessionConfig, codexMcpShellPolicy, codexMcpDisabledConfig, readDisabledMcpServers, readMcpServers, type McpServer, type McpToolApproval } from '../mcp.js';
 import { isValidCliSessionId } from '../session-id.js';
 import { stripAnsiControlSequences } from '../text.js';
-import { assertRestrictedCli, assertRestrictedModel, CODEX_NATIVE_TOOLS_NONE, CodexNativeToolsRefused, restrictedToolConfig } from './native-tools.js';
+import { assertRestrictedCli, assertRestrictedConfig, assertRestrictedModel, CODEX_NATIVE_TOOLS_NONE, CodexNativeToolsRefused, restrictedToolConfig } from './native-tools.js';
 import { JsonRpcPeer } from '../jsonrpc.js';
 import {
   META_CLI_SESSION_ID,
@@ -530,6 +530,7 @@ export class CodexDriver implements AgentDriver {
         if (this.#options.nativeTools === 'none') throw new CodexNativeToolsRefused("nativeTools:'none' could not verify effective MCP configuration");
         throw new Error('Codex did not return effective MCP configuration');
       }
+      if (this.#options.nativeTools === 'none') assertRestrictedConfig(effective);
       if (this.#disabledMcpServers.length > 0 || this.#options.nativeTools === 'none') {
         const inherited = effective.mcp_servers === undefined ? {} : asObject(effective.mcp_servers);
         if (inherited === undefined) {

@@ -25,6 +25,8 @@ export interface ProbeOptions {
   replaceVersion?: string;
   calls?: readonly Row[];
   executionControl?: boolean;
+  inheritedFeatures?: Record<string, unknown>;
+  inheritedSettings?: Record<string, unknown>;
 }
 
 function inside(parent: string, child: string): boolean {
@@ -62,6 +64,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
   const requests: Row[] = [], sent: Row[] = [], problems: string[] = [], unexpected: string[] = [], blockedConnections: string[] = [];
   let endTurn: ((outcome: TurnOutcome) => void) | undefined;
   let reportedAgent: string | undefined;
+  let effectiveConfig: Row | undefined;
   let driver: CodexDriver | undefined, cleaned = false;
   const server = createServer((request, response) => { void (async () => {
     try {
@@ -99,10 +102,12 @@ export async function openCodexToolProbe(options: ProbeOptions) {
     chatgpt_base_url: origin + '/chatgpt', openai_base_url: origin + '/openai/v1',
     features: { ...(options.manualRestriction ? restrictedToolConfig(undefined).features as Row : {}),
       ...(options.codeModeHost === undefined ? {} : { code_mode_host: options.codeModeHost }),
+      ...options.inheritedFeatures,
       enable_request_compression: false, api_key_model_discovery: false },
     model_providers: { prism_fake: { name: 'Prism local fake provider', base_url: origin + '/v1', wire_api: 'responses',
       env_key: 'PRISM_FAKE_KEY', requires_openai_auth: false, supports_websockets: false, request_max_retries: 0, stream_max_retries: 0 } },
     analytics: { enabled: false }, feedback: { enabled: false },
+    ...options.inheritedSettings,
     ...(options.inheritedForeign ? { mcp_servers: { foreign: fixtureServer('foreign') } } : {}),
   };
   writeFileSync(join(home, 'config.toml'), toml(configuration));
@@ -124,7 +129,9 @@ export async function openCodexToolProbe(options: ProbeOptions) {
         const stop = await driver.stop({ graceMs: 500 });
         assert(stop.verified && stop.empty && stop.survivors === 0, 'Native process tree must be verified empty');
         console.info(JSON.stringify({ codexToolProbe: true, model: options.model, reportedAgent,
-          surface: requests.length ? advertisedTools(requests[0]) : [], blockedConnections, stop }));
+          surface: requests.length ? advertisedTools(requests[0]) : [], featureConfig: effectiveConfig?.features,
+          toolConfig: effectiveConfig?.tools, configuredFields: effectiveConfig ? Object.keys(effectiveConfig).filter((key) => effectiveConfig![key] !== null) : [],
+          problems, blockedConnections, stop }));
       }
     } finally {
       server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -145,6 +152,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
     }, { onProtocolError: (problem) => problems.push(problem), onTurnEnd: (outcome) => endTurn?.(outcome) }, (launch, handlers) => {
       const real = new StdioCodexTransport(launch, { ...handlers, onFrame: (raw) => {
         const frame = raw as Row;
+        if (frame.result?.config) effectiveConfig = frame.result.config;
         if (typeof frame.result?.userAgent === 'string') {
           reportedAgent = frame.result.userAgent;
           if (options.replaceVersion) { handlers.onFrame({ ...frame, result: { ...frame.result, userAgent: `prism-probe/${options.replaceVersion} (injected version)` } }); return; }

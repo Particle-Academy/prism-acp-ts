@@ -151,4 +151,37 @@ describe('measured Codex native-tool restriction', () => {
     expect(state.frames.some((f) => f.method === 'thread/start')).toBe(false);
     expect(state.problems.join(' ')).toMatch(/MCP configuration/);
   });
+
+  it.each([
+    { features: { standalone_web_search: true } },
+    { features: { memories: true } },
+    { features: { future_tool: { enabled: true } } },
+    { features: [] },
+    { tools: { future_tool: { enabled: false } } },
+    { tools: { web_search: { context_size: 'high' } } },
+    { tools: [] },
+    { model_catalog_json: '/hostile/catalog.json' },
+    { browser_use: { enabled: true } },
+    { computer_use: {} },
+    { code_mode: { excluded_tool_namespaces: [] } },
+  ])('refuses unmeasured inherited tool-shaping configuration %# before creating a thread', async (config) => {
+    const state = setup({ nativeTools: 'none' }, '0.163.0', config); state.driver.start(); await state.driver.ready;
+    expect(state.frames.some((frame) => frame.method === 'thread/start')).toBe(false);
+    expect(state.problems.join(' ')).toMatch(/nativeTools.*(unmeasured|could not verify)/);
+    expect(state.closes).toBe(1);
+  });
+
+  it('accepts measured harmless features and disables inherited known native capabilities last', async () => {
+    const state = setup({ nativeTools: 'none' }, '0.163.0', {
+      features: { enable_request_compression: true, api_key_model_discovery: true, shell_tool: true, future_tool: false },
+      tools: { experimental_request_user_input: { enabled: true }, view_image: true }, web_search: 'live',
+    });
+    state.driver.start(); await state.driver.ready;
+    expect(state.problems).toEqual([]);
+    const config = (state.frames.find((frame) => frame.method === 'thread/start')?.params as Record<string, any>).config;
+    expect(config.features.shell_tool).toBe(false);
+    expect(config.tools).toMatchObject({ experimental_request_user_input: { enabled: false }, view_image: false });
+    expect(config.web_search).toBe('disabled');
+    state.driver.kill();
+  });
 });
