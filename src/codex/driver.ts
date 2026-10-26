@@ -10,6 +10,7 @@ import { codexFailureOf } from '../turn-failure.js';
 import { codexMcpConfig, codexMcpSessionConfig, codexMcpShellPolicy, codexMcpDisabledConfig, readDisabledMcpServers, readMcpServers, type McpServer, type McpToolApproval } from '../mcp.js';
 import { isValidCliSessionId } from '../session-id.js';
 import { stripAnsiControlSequences } from '../text.js';
+import { assertRestrictedCli, assertRestrictedConfig, assertRestrictedModel, CODEX_NATIVE_TOOLS_NONE, CodexNativeToolsRefused, restrictedToolConfig } from './native-tools.js';
 import { JsonRpcPeer } from '../jsonrpc.js';
 import {
   META_CLI_SESSION_ID,
@@ -68,6 +69,16 @@ export interface CodexDriverOptions {
    * `_meta[particle.academy/model]`.
    */
   readonly model?: string;
+  /**
+   * Opt-in measured restriction: 'none' disables native execution, web/image/browser, agent, goal and human-input
+   * tools. Supported only on CODEX_NATIVE_TOOLS_NONE's explicit CLI/model matrix; omitted/other models and
+   * unmeasured CLI versions refuse. Three read-only MCP resource brokers remain, scoped to the session's servers.
+   * Only explicitly supplied mcpServers survive; inherited servers are disabled by ID. Fresh sessions only:
+   * resumeSessionId refuses because a saved thread can restore native tools. This is not an OS sandbox.
+   * Reroutes close on native notification; preceding output/tool activity and unannounced backend model changes
+   * cannot be prevented or independently detected by this driver.
+   */
+  readonly nativeTools?: 'default' | 'none';
   /**
    * Codex approval policy on thread/start and thread/resume. New threads default to `on-request`; on resume,
    * omitted leaves Codex's setting unchanged. Trusted configuration; never derive it from model or tool output.
@@ -205,6 +216,8 @@ export class CodexDriver implements AgentDriver {
   #peer: JsonRpcPeer | null = null;
   #started = false;
   #closed = false;
+  /** Early thread/started notifications cannot authorize turns before the restricted handshake is verified. */
+  #restrictedReady = false;
   #ready: Promise<void> = Promise.resolve();
   #queuedPrompt: readonly InputItem[] | null = null;
   /** The private directory holding this session's prompt images; created on the first, removed when it ends. */
@@ -219,6 +232,7 @@ export class CodexDriver implements AgentDriver {
   readonly #mcpConfig: Record<string, unknown> | undefined;
   readonly #mcpEnv: Readonly<Record<string, string>>;
   readonly #disabledMcpServers: readonly string[];
+  readonly #suppliedMcpServers: ReadonlySet<string>;
   #sessionUpdateSent = false;
   #threadId: string | null = null;
   /** A cancel that arrived before turn/start named its turn; sent the moment the id is known. */
@@ -233,6 +247,15 @@ export class CodexDriver implements AgentDriver {
     transportFactory: CodexTransportFactory = DEFAULT_TRANSPORT_FACTORY,
   ) {
     if (options.model !== undefined) assertModel(options.model);
+    if (options.nativeTools !== undefined && options.nativeTools !== 'default' && options.nativeTools !== 'none') {
+      throw new Error("nativeTools must be 'default' or 'none'");
+    }
+    if (options.nativeTools === 'none') {
+      assertRestrictedModel(options.model);
+      if (options.resumeSessionId !== undefined) {
+        throw new CodexNativeToolsRefused("resume is not supported with nativeTools:'none': a resumed thread can restore native tools the restriction removes");
+      }
+    }
     if (options.approvalPolicy !== undefined && !['untrusted', 'on-request', 'never'].includes(options.approvalPolicy)) {
       throw new Error('approvalPolicy must be one of: untrusted, on-request, never');
     }
@@ -242,6 +265,7 @@ export class CodexDriver implements AgentDriver {
     // Keep constructor-validated settings stable across asynchronous startup.
     this.#options = { ...options };
     const servers = readMcpServers(options.mcpServers);
+    this.#suppliedMcpServers = new Set(servers.map((server) => server.name));
     this.#disabledMcpServers = readDisabledMcpServers(options.disabledMcpServers, servers);
     if (servers.length === 0 && options.mcpToolApproval !== undefined && Object.keys(options.mcpToolApproval).length > 0) {
       codexMcpConfig(servers, options.mcpToolApproval); // refuses: it names servers that were not given
@@ -282,7 +306,11 @@ export class CodexDriver implements AgentDriver {
     }
 
     this.#ready = this.#connect().catch((cause: unknown) => {
-      this.#events.onProtocolError?.(safeError('Codex app-server startup failed', cause));
+      // Close a restricted driver before callbacks can enqueue a turn after a refusal.
+      if (this.#options.nativeTools === 'none') this.#shutdown('SIGTERM');
+      this.#events.onProtocolError?.(cause instanceof CodexNativeToolsRefused ? cause.message
+        : this.#options.nativeTools === 'none' ? 'Codex app-server startup failed while verifying nativeTools restriction'
+          : safeError('Codex app-server startup failed', cause));
       this.#finishTurn({ stopReason: null, isError: true, raw: 'app-server startup failed' });
       this.#shutdown('SIGTERM');
     });
@@ -296,7 +324,7 @@ export class CodexDriver implements AgentDriver {
     const blocks = promptBlocks(content, CODEX_DRIVER_CAPABILITIES.promptBlocks);
     const input = this.#inputItems(blocks);
     this.#turnInFlight = true;
-    if (this.#peer === null || this.#threadId === null) {
+    if (this.#peer === null || this.#threadId === null || (this.#options.nativeTools === 'none' && !this.#restrictedReady)) {
       this.#queuedPrompt = input;
       return;
     }
@@ -427,7 +455,8 @@ export class CodexDriver implements AgentDriver {
     let cursor: string | null = null;
     for (let page = 0; page < 20; page += 1) {
       const result = asObject(await peer.request('model/list', { cursor, includeHidden: false }));
-      availableModels.push(...codexModelsOf(result));
+      availableModels.push(...codexModelsOf(result).filter((model) => this.#options.nativeTools !== 'none'
+        || (CODEX_NATIVE_TOOLS_NONE.models as readonly string[]).includes(model.modelId)));
       const next = asString(result?.nextCursor);
       cursor = next === undefined || next.length === 0 ? null : next;
       if (cursor === null) break;
@@ -443,6 +472,7 @@ export class CodexDriver implements AgentDriver {
    */
   async setModel(modelId: string): Promise<void> {
     const model = assertModel(modelId);
+    if (this.#options.nativeTools === 'none') assertRestrictedModel(model);
     this.#modelOverride = model;
     this.#currentModelId = model;
   }
@@ -486,25 +516,38 @@ export class CodexDriver implements AgentDriver {
 
     await transport.start();
     const peer = this.#requirePeer();
-    await peer.request('initialize', {
+    const initialized = await peer.request('initialize', {
       clientInfo: { name: '@particle-academy/prism-acp', version: '0.4.1' },
       capabilities: {},
     });
+    if (this.#options.nativeTools === 'none') assertRestrictedCli(initialized);
     peer.notify('initialized');
     if (keyed !== null) await loginWithApiKey(peer, keyed.apiKey);
     let mcpConfig = this.#mcpConfig;
     const bindings = Object.keys(this.#mcpEnv);
-    if (this.#disabledMcpServers.length > 0 || bindings.length > 0) {
+    if (this.#disabledMcpServers.length > 0 || bindings.length > 0 || this.#options.nativeTools === 'none') {
       const response = asObject(await peer.request('config/read', { cwd: this.#options.cwd, includeLayers: false }));
       const effective = asObject(response?.config);
-      if (effective === undefined) throw new Error('Codex did not return effective MCP configuration');
-      if (this.#disabledMcpServers.length > 0) {
+      if (effective === undefined) {
+        if (this.#options.nativeTools === 'none') throw new CodexNativeToolsRefused("nativeTools:'none' could not verify effective MCP configuration");
+        throw new Error('Codex did not return effective MCP configuration');
+      }
+      if (this.#options.nativeTools === 'none') assertRestrictedConfig(effective);
+      if (this.#disabledMcpServers.length > 0 || this.#options.nativeTools === 'none') {
         const inherited = effective.mcp_servers === undefined ? {} : asObject(effective.mcp_servers);
-        if (inherited === undefined) throw new Error('Codex returned invalid inherited MCP configuration');
-        mcpConfig = codexMcpDisabledConfig(mcpConfig, this.#disabledMcpServers, inherited);
+        if (inherited === undefined) {
+          if (this.#options.nativeTools === 'none') throw new CodexNativeToolsRefused("nativeTools:'none' could not verify inherited MCP configuration");
+          throw new Error('Codex returned invalid inherited MCP configuration');
+        }
+        const disabled = new Set(this.#disabledMcpServers);
+        if (this.#options.nativeTools === 'none') {
+          for (const name of Object.keys(inherited)) if (!this.#suppliedMcpServers.has(name)) disabled.add(name);
+        }
+        mcpConfig = codexMcpDisabledConfig(mcpConfig, [...disabled], inherited);
       }
       if (bindings.length > 0) mcpConfig = codexMcpShellPolicy(mcpConfig!, bindings, effective.shell_environment_policy);
     }
+    if (this.#options.nativeTools === 'none') mcpConfig = restrictedToolConfig(mcpConfig);
 
     if (this.#options.resumeSessionId === undefined) {
       const result = await peer.request('thread/start', {
@@ -540,6 +583,8 @@ export class CodexDriver implements AgentDriver {
     }
 
     await this.#readInitialRateLimit();
+    if (this.#closed) return;
+    this.#restrictedReady = true;
     const queued = this.#queuedPrompt;
     this.#queuedPrompt = null;
     if (queued !== null) this.#startTurn(queued);
@@ -866,6 +911,15 @@ export class CodexDriver implements AgentDriver {
       case 'model/rerouted': {
         // Codex switched model mid-session (`fromModel` -> `toModel`): the client's model is now the new one.
         const to = asString(object.toModel);
+        if (this.#options.nativeTools === 'none') {
+          try { assertRestrictedModel(to); }
+          catch (cause) {
+            this.#shutdown('SIGTERM');
+            this.#events.onProtocolError?.(cause instanceof CodexNativeToolsRefused ? cause.message : safeError('Codex restriction refused a model reroute', cause));
+            this.#finishTurn({ stopReason: null, isError: true, raw: 'nativeTools restriction refused model reroute' });
+            return;
+          }
+        }
         if (to === undefined || to.length === 0) this.#recordUnmapped('model/rerouted omitted toModel', object);
         else this.#reportModel(to);
         return;
@@ -1486,6 +1540,7 @@ export class CodexDriver implements AgentDriver {
 
   /** The model in use, as Codex named it; nothing when it did not. */
   #reportModel(model: string | undefined): void {
+    if (this.#options.nativeTools === 'none') assertRestrictedModel(model);
     if (model === undefined || model.length === 0) return;
     this.#currentModelId = model;
     this.#emit(withMeta({ sessionUpdate: 'notice', notice: { level: 'debug', message: 'model' } }, { [META_MODEL]: model }));

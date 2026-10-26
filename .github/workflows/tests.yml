@@ -61,6 +61,30 @@ jobs:
         env:
           PRISM_ACP_APPCONTAINER: '1'
 
+  codex-native-tools:
+    name: Codex native tools, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    needs: third-party
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # Test tool only, not a package dependency. A changed CLI needs a new measured support matrix.
+      - run: npm install --global --ignore-scripts @openai/codex@0.163.0
+      - run: npx vitest run test/codex-native-tools-live.test.ts
+        env:
+          PRISM_ACP_CODEX_NATIVE_TOOLS: '1'
+
   third-party:
     name: Third-party dependency allowlist
     runs-on: ubuntu-latest
