@@ -539,6 +539,18 @@ export class CodexDriver implements AgentDriver {
     if (queued !== null) this.#startTurn(queued);
   }
 
+  /**
+   * Ask Codex for the account's rate limits now, and emit the reading exactly as the start-up read does (a `notice`
+   * carrying the `rate_limit` meta). Starts no turn. Codex volunteers `account/rateLimits/updated` only DURING a turn,
+   * so a session held on a spent window never hears that it cleared, and a host waiting for the window's stated reset
+   * waits days too long (genie#1195: "resets in 10080 minutes", cleared in under two days). A host can call this
+   * periodically on a held session and resume when the reading allows ordinary use. Never rejects: a failed read is
+   * reported on the session as an unmapped frame, as at start-up.
+   */
+  async readRateLimits(): Promise<void> {
+    await this.#readInitialRateLimit();
+  }
+
   async #readInitialRateLimit(): Promise<void> {
     try {
       const result = await this.#requirePeer().request('account/rateLimits/read', {});
