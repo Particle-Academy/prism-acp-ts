@@ -6,9 +6,13 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { SUPERVISOR_CS } from '../src/process-tree-supervisor-cs.js';
 
 const base = { cwd: process.cwd(), env: {} };
 describe('process transport validation before launch', () => {
+  it('keeps supervisor diagnostics independent of bootstrap Console streams', () => {
+    expect(SUPERVISOR_CS).not.toMatch(/\bConsole\s*\./);
+  });
   it.runIf(process.platform !== 'win32')('explicitly rejects LOCAL mode on other platforms', () => {
     expect(() => launchProvider('must-never-run', [], { ...base, windowsStdio: 'local-pipes' })).toThrow('requires Windows');
   });

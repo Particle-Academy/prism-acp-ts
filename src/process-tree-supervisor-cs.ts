@@ -263,7 +263,9 @@ static class Supervisor
             ioChannels[i] = Environment.GetEnvironmentVariable("PRISM_ACP_TREE_IO_" + i);
             Environment.SetEnvironmentVariable("PRISM_ACP_TREE_IO_" + i, null);
         }
-        // Bootstrap file handles are unused and must not leak into the provider.
+        // No Console streams: bootstrap files are read-only. Report failures
+        // over authenticated control, or exit for the host to report its code.
+        // Bootstrap handles are unused and must not leak into the provider.
         if (local) foreach (int standard in new int[] { -10, -11, -12 })
             if (!SetHandleInformation(GetStdHandle(standard), 1, 0)) return 125;
         PipeStream pipe;

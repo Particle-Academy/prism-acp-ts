@@ -196,6 +196,8 @@ class LocalProvider implements ProviderProcess {
       // Neither anonymous pipes nor NUL are universally available to restricted
       // tokens. Reuse an already-readable trusted file, opened READ ONLY, for
       // unused bootstrap handles. No host input/output or writable file is exposed.
+      // The supervisor must never use Console streams: diagnostics go through
+      // authenticated control or a bounded exit-code/startup-failure report.
       bootstrap = openSync(supervisor, 'r');
       this.child = spawn(supervisor, [], { cwd: options.cwd, env, stdio: [bootstrap, bootstrap, bootstrap], windowsHide: true });
     } catch (error) {
@@ -210,7 +212,7 @@ class LocalProvider implements ProviderProcess {
     this.child.once('close', () => {
       this.#gone = true;
       clearTimeout(this.#deadline);
-      if (this.#tree === null) this.#fail('supervisor ended before provider startup');
+      if (this.#tree === null) this.#fail(`supervisor ended before provider startup (exit ${this.child.exitCode ?? 'unknown'})`);
       this.#resolveGone();
       for (const pipe of this.#pipes) pipe.stopListening();
     });
@@ -229,7 +231,11 @@ class LocalProvider implements ProviderProcess {
 
   #line(line: string): void {
     const match = /^(started|exited|empty) (\d{1,10})$/.exec(line);
-    if (match === null) { this.#fail(/^failed [\w-]{1,40}$/.test(line) ? 'native launch failed' : 'invalid control frame'); return; }
+    if (match === null) {
+      const failure = /^failed ([\w-]{1,40})$/.exec(line);
+      this.#fail(failure === null ? 'invalid control frame' : `native launch failed: ${failure[1]}`);
+      return;
+    }
     const value = Number(match[2]);
     if (value > 0xffff_ffff) { this.#fail('invalid control count'); return; }
     if (match[1] === 'started') {

@@ -30,6 +30,17 @@ if (mode === 'native') {
   child.stdout?.on('data', (bytes) => say('stdout', { text: String(bytes) }));
   child.stderr?.resume();
   child.once('exit', (code) => process.exit(code ?? 1));
+} else if (mode === 'native-failure' || mode === 'early-exit') {
+  await prepareProcessTree({ directory: root + '/program/' + (mode === 'early-exit' ? 'exiting-supervisor' : 'supervisor') });
+  const time = Date.now();
+  const provider = launchProvider(mode === 'native-failure' ? root + '/program/owned-invalid.exe' : process.execPath, [], {
+    cwd: root + '/workspace', env: process.env, windowsStdio: 'local-pipes', startupTimeoutMs: 2000,
+  });
+  provider.io.stdout.resume(); provider.io.stderr.resume();
+  try { await provider.started; say('provider_started'); process.exitCode = 5; }
+  catch (error) { say('supervisor_failure', { elapsed: Date.now() - time, message: error.message }); }
+  await provider.closed;
+  say('stop', { verdict: await provider.stop({ graceMs: 0 }) });
 } else if (mode === 'deadline') {
   await prepareProcessTree({ directory: root + '/program/stalled-supervisor' });
   const started = Date.now();

@@ -34,6 +34,12 @@ describe.runIf(process.platform === 'win32' && process.env.PRISM_ACP_APPCONTAINE
     const stalledExe = join(stalled, 'prism-acp-supervisor.exe');
     await exec(csc, ['-nologo', '-target:exe', `-out:${stalledExe}`, source], { windowsHide: true, timeout: 20_000 });
     writeFileSync(stalledExe + '.sha256', createHash('sha256').update(readFileSync(stalledExe)).digest('hex'));
+    const exiting = join(root, 'program', 'exiting-supervisor'); mkdirSync(exiting);
+    const exitSource = join(exiting, 'owned-exit.cs'), exitExe = join(exiting, 'prism-acp-supervisor.exe');
+    writeFileSync(exitSource, 'static class OwnedExit { static int Main() { return 123; } }');
+    await exec(csc, ['-nologo', '-target:exe', `-out:${exitExe}`, exitSource], { windowsHide: true, timeout: 20_000 });
+    writeFileSync(exitExe + '.sha256', createHash('sha256').update(readFileSync(exitExe)).digest('hex'));
+    writeFileSync(join(root, 'program', 'owned-invalid.exe'), 'owned invalid executable; must never run');
   }, 60_000);
   afterAll(() => {
     const temporary = realpathSync(tmpdir());
@@ -137,5 +143,18 @@ describe.runIf(process.platform === 'win32' && process.env.PRISM_ACP_APPCONTAINE
     const { lines, final } = await probe(mode);
     expect(final, JSON.stringify(lines)).toMatchObject({ timedOut: false, workerExit: 0, remainingBeforeCleanup: 0 });
     expect(lines.find(line => line.stage === 'io_deadline')?.elapsed).toBeLessThan(2000);
+  }, 20_000);
+
+  it.each(['native-failure', 'early-exit'])('reports %s without bootstrap Console streams or a silent hang', async mode => {
+    const { lines, final } = await probe(mode);
+    expect(final, JSON.stringify(lines)).toMatchObject({ timedOut: false, workerExit: 0, remainingBeforeCleanup: 0 });
+    const failure = lines.find(line => line.stage === 'supervisor_failure');
+    expect(failure?.elapsed).toBeLessThan(2500);
+    if (mode === 'native-failure') {
+      // The Windows loader reports bad format or machine-type mismatch for
+      // this owned non-PE file; both are native errors carried by control.
+      expect(failure?.message).toMatch(/native launch failed: (?:193|216)\)/);
+    } else expect(failure?.message).toContain('supervisor ended before provider startup (exit 123)');
+    expect(lines.find(line => line.stage === 'provider_started')).toBeUndefined();
   }, 20_000);
 });
