@@ -16,11 +16,13 @@ import {
   META_MODEL,
   assertModel,
   META_EXEC_POLICY_AMENDMENT,
+  META_MCP_SERVERS,
   META_RATE_LIMIT,
   META_UNMAPPED_FRAME,
   META_USAGE,
   withMeta,
 } from '../meta.js';
+import { codexListedReport, codexStartupReport, type McpServerReport } from '../mcp-status.js';
 import type {
   AgentDriver,
   DriverEvents,
@@ -165,6 +167,7 @@ const KNOWN_NOTIFICATIONS = new Set([
   'turn/plan/delta',
   'thread/tokenUsage/updated',
   'account/rateLimits/updated',
+  'mcpServer/startupStatus/updated',
   'contextCompacted',
   'thread/compaction/started',
   'collabAgentSpawnBegin',
@@ -551,6 +554,47 @@ export class CodexDriver implements AgentDriver {
     await this.#readInitialRateLimit();
   }
 
+  readonly #mcpReports = new Map<string, McpServerReport>();
+
+  /**
+   * The session's MCP servers as their startup updates last reported them; null before the first update
+   * (genie#1202). Startup updates carry no tool list, so `toolCount` is null here: ask
+   * {@link mcpServerStatus} for counts.
+   */
+  get mcpServers(): readonly McpServerReport[] | null {
+    return this.#mcpReports.size === 0 ? null : [...this.#mcpReports.values()];
+  }
+
+  /**
+   * Ask Codex now for this thread's MCP servers, with live status and callable tool counts
+   * (`mcpServerStatus/list`, scoped to the thread). Scoping is what makes it useful: measured on codex-cli
+   * 0.163.0, the unscoped list leaves out servers given to the thread and reports no runtime status. Rejects if
+   * the session has no thread yet or Codex refuses the request.
+   */
+  async mcpServerStatus(): Promise<readonly McpServerReport[]> {
+    const threadId = this.#threadId;
+    if (threadId === null) throw new Error('mcpServerStatus() needs a started Codex thread');
+
+    const reports: McpServerReport[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 100; page++) {
+      const response = asObject(await this.#requirePeer().request('mcpServerStatus/list', {
+        threadId,
+        detail: 'toolsAndAuthOnly',
+        ...(cursor === undefined ? {} : { cursor }),
+      }));
+      const data = Array.isArray(response?.data) ? response.data : [];
+      for (const entry of data) {
+        const report = codexListedReport(asObject(entry) ?? {});
+        if (report !== undefined) reports.push(report);
+      }
+      cursor = asString(response?.nextCursor);
+      if (cursor === undefined || cursor.length === 0) break;
+    }
+
+    return reports;
+  }
+
   async #readInitialRateLimit(): Promise<void> {
     try {
       const result = await this.#requirePeer().request('account/rateLimits/read', {});
@@ -924,6 +968,22 @@ export class CodexDriver implements AgentDriver {
       case 'account/rateLimits/updated':
         this.#emitRateLimit(object.rateLimits);
         return;
+      case 'mcpServer/startupStatus/updated': {
+        // genie#1202. Measured on codex-cli 0.163.0: a server whose tools/list fails reports starting ->
+        // failed (with the error), retries once, and fails again. Emitted as the FULL current list, so a host
+        // never has to merge partial updates to know where every server stands.
+        const report = codexStartupReport(object);
+        if (report === undefined) {
+          this.#recordUnmapped('mcpServer/startupStatus/updated omitted a server name', object);
+          return;
+        }
+        this.#mcpReports.set(report.name, report);
+        this.#emit(withMeta(
+          { sessionUpdate: 'notice', notice: { level: report.status === 'failed' ? 'warning' : 'debug', message: `MCP server ${report.name}: ${report.status}` } },
+          { [META_MCP_SERVERS]: [...this.#mcpReports.values()] },
+        ));
+        return;
+      }
       case 'contextCompacted':
       case 'thread/compaction/started':
         this.#emit({ sessionUpdate: 'compaction_update', ...publicFields(object) });

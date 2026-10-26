@@ -42,10 +42,12 @@ import {
   META_UNMAPPED_FRAME,
   META_COMPACTION,
   META_LOCAL_COMMAND,
+  META_MCP_SERVERS,
   META_PARENT_TOOL_CALL,
   META_USAGE,
   withMeta,
 } from '../meta.js';
+import { claudeMcpServers } from '../mcp-status.js';
 import { stripAnsiControlSequences } from '../text.js';
 import { rateLimitNotice, readRateLimit } from './rate-limit.js';
 
@@ -510,10 +512,17 @@ export class ClaudeToAcp {
         // The model in use, when the CLI names it (measured: `--model haiku` -> `model: 'claude-haiku-5-5'`).
         const model = asString(input.model);
         const commands = commandsFromInit(input);
+        // genie#1202: which MCP servers came up, and with how many tools. Status alone is not enough --
+        // the CLI calls a server `connected` when its tools/list failed (see src/mcp-status.ts).
+        const mcpServers = claudeMcpServers(input);
         return [
           withMeta(
             { sessionUpdate: 'notice', notice: { level: 'debug', message: 'session started' } },
-            { [META_CLI_SESSION_ID]: cliSessionId, ...(model === undefined || model.length === 0 ? {} : { [META_MODEL]: model }) },
+            {
+              [META_CLI_SESSION_ID]: cliSessionId,
+              ...(model === undefined || model.length === 0 ? {} : { [META_MODEL]: model }),
+              ...(mcpServers === undefined ? {} : { [META_MCP_SERVERS]: mcpServers }),
+            },
           ),
           // After the notice, so the resume id stays the first thing a client learns.
           ...(commands === undefined ? [] : [commands]),
