@@ -1,0 +1,122 @@
+import { describe, expect, it } from 'vitest';
+import { CodexDriver } from '../src/codex/driver.js';
+import { CODEX_NATIVE_TOOLS_NONE } from '../src/codex/native-tools.js';
+import { advertisedTools } from './fixtures/codex-tool-surface.js';
+import { openCodexToolProbe } from './fixtures/codex-native-tools-probe.js';
+
+// Explicit opt-in: installed native CLI, empty owned homes, local fake model + stdio MCP fixtures only.
+// No real login/model/credentials; a missing CLI or changed version FAILS when opted in.
+describe.runIf(process.env.PRISM_ACP_CODEX_NATIVE_TOOLS === '1')('native Codex tool-surface regression (measured CLI 0.163.0)', () => {
+  for (const model of CODEX_NATIVE_TOOLS_NONE.models) {
+    it(`${model}: exact offered set, app tool invocation, resource scope and no inherited server`, async () => {
+      const probe = await openCodexToolProbe({ model, nativeTools: 'none', inheritedForeign: true, calls: [
+        { type: 'function_call', namespace: 'mcp__owned', name: 'app_ping', arguments: '{}' },
+        { type: 'function_call', name: 'read_mcp_resource', arguments: JSON.stringify({ server: 'owned', uri: 'fixture://owned' }) },
+        { type: 'function_call', name: 'read_mcp_resource', arguments: JSON.stringify({ server: 'foreign', uri: 'fixture://owned' }) },
+      ] });
+      try {
+        await probe.turn();
+        const expected = [...CODEX_NATIVE_TOOLS_NONE.residualTools, 'mcp__owned.app_ping'].sort();
+        expect(probe.requests).toHaveLength(4);
+        for (const body of probe.requests) expect(advertisedTools(body)).toEqual(expected);
+        expect(probe.outputs()).toContain('PRISM_TOOL_owned');
+        expect(probe.outputs()).toContain('PRISM_RESOURCE_owned');
+        expect(probe.outputs()).toMatch(/unknown MCP server 'foreign'/);
+        expect(probe.outputs()).not.toContain('PRISM_RESOURCE_foreign');
+        expect(probe.resources().some((row) => row.server === 'foreign')).toBe(false);
+        expect(probe.resources().some((row) => row.server === 'owned' && row.method === 'resources/read')).toBe(true);
+        console.info(JSON.stringify({ resourceScope: 'owned read succeeds; inherited foreign read refused', model, expected }));
+      } finally { await probe.cleanup(); }
+    }, 60000);
+  }
+
+  it('rejects unsupported/implicit models before starting an installed CLI session', () => {
+    for (const model of ['gpt-6.1-sol', 'future-model', undefined]) {
+      expect(() => new CodexDriver({ cwd: process.cwd(), nativeTools: 'none', model })).toThrow(/nativeTools.*model/);
+    }
+  });
+
+  it('offers zero tools when no MCP servers are supplied and disables the inherited server', async () => {
+    const probe = await openCodexToolProbe({ model: 'gpt-5.3-codex', nativeTools: 'none', noMcp: true, inheritedForeign: true });
+    try {
+      await probe.turn();
+      expect(probe.requests).toHaveLength(1);
+      expect(advertisedTools(probe.requests[0])).toEqual([]);
+      expect(probe.resources()).toEqual([]);
+    } finally { await probe.cleanup(); }
+  }, 60000);
+
+  it('refuses an unmeasured initialize version before thread/start (fault-injected real handshake)', async () => {
+    const probe = await openCodexToolProbe({ model: 'gpt-5.3-codex', nativeTools: 'none', replaceVersion: '0.164.0' });
+    try {
+      expect(probe.problems.join(' ')).toMatch(/nativeTools.*CLI 0\.164\.0/);
+      expect(probe.sent.some((frame) => frame.method === 'thread/start' || frame.method === 'account/login/start')).toBe(false);
+      expect(probe.requests).toHaveLength(0);
+    } finally { await probe.cleanup(); }
+  }, 60000);
+
+  it('refuses a real existing thread in restricted mode and retains ordinary resume', async () => {
+    const first = await openCodexToolProbe({ model: 'gpt-5.3-codex', suppliedForeign: true, calls: [
+      { type: 'function_call', name: 'read_mcp_resource', arguments: JSON.stringify({ server: 'foreign', uri: 'fixture://owned' }) },
+    ] });
+    let next: Awaited<ReturnType<typeof openCodexToolProbe>> | undefined;
+    try {
+      await first.turn(); expect(first.outputs()).toContain('PRISM_RESOURCE_foreign');
+      const sessionId = first.driver.cliSessionId; expect(sessionId).toBeTypeOf('string');
+      await first.cleanup(true);
+      await expect(openCodexToolProbe({ model: 'gpt-5.3-codex', nativeTools: 'none', reuseHome: first.home,
+        resumeSessionId: sessionId! })).rejects.toThrow(/resume is not supported with nativeTools:'none'/);
+      next = await openCodexToolProbe({ model: 'gpt-5.3-codex', reuseHome: first.home, resumeSessionId: sessionId!, calls: [
+        { type: 'function_call', name: 'read_mcp_resource', arguments: JSON.stringify({ server: 'owned', uri: 'fixture://owned' }) },
+      ] });
+      await next.turn();
+      expect(next.outputs()).toContain('PRISM_RESOURCE_owned');
+      expect(next.sent.some((frame) => frame.method === 'thread/resume')).toBe(true);
+    } finally { await next?.cleanup(); await first.cleanup(); }
+  }, 90000);
+
+  for (const codeModeHost of [false, true]) {
+    it(`unsupported gpt-6.1-sol advertises exec with code_mode_host=${codeModeHost} and distinguishes callable from blocked`, async () => {
+      const probe = await openCodexToolProbe({ model: 'gpt-6.1-sol', manualRestriction: true, codeModeHost, calls: [
+        { type: 'custom_tool_call', namespace: 'functions', name: 'exec', input: "text('PRISM_CODEMODE_EXECUTED')" },
+      ] });
+      try {
+        await probe.turn();
+        expect(advertisedTools(probe.requests[0])).toContain('functions.exec');
+        if (codeModeHost) expect(probe.outputs()).toContain('PRISM_CODEMODE_EXECUTED');
+        else {
+          expect(probe.outputs()).toContain('code-mode host is disabled');
+          expect(probe.outputs()).not.toContain('PRISM_CODEMODE_EXECUTED');
+        }
+        console.info(JSON.stringify({ unsupportedProfile: 'gpt-6.1-sol', nativeCall: 'exec', codeModeHost, actuallyInvoked: codeModeHost }));
+      } finally { await probe.cleanup(); }
+    }, 60000);
+  }
+
+  it('unsupported gpt-6.1-sol still invokes list_agents with the full feature policy', async () => {
+    const probe = await openCodexToolProbe({ model: 'gpt-6.1-sol', manualRestriction: true, calls: [
+      { type: 'function_call', namespace: 'collaboration', name: 'list_agents', arguments: '{}' },
+    ] });
+    try {
+      await probe.turn();
+      expect(advertisedTools(probe.requests[0])).toContain('collaboration.list_agents');
+      expect(probe.outputs()).toContain('agent_name');
+    } finally { await probe.cleanup(); }
+  }, 60000);
+
+  it('a working native shell call is refused under the same restricted model and approval policy', async () => {
+    const call = { type: 'function_call', name: 'exec_command', arguments: JSON.stringify({
+      cmd: process.platform === 'win32' ? 'Write-Output PRISM_NATIVE_EXEC_CONTROL' : "printf 'PRISM_NATIVE_EXEC_CONTROL'",
+      yield_time_ms: 1000, max_output_tokens: 1000,
+    }) };
+    const first = await openCodexToolProbe({ model: 'gpt-5.3-codex', executionControl: true, calls: [call] });
+    try { await first.turn(); expect(first.outputs()).toContain('PRISM_NATIVE_EXEC_CONTROL'); }
+    finally { await first.cleanup(); }
+    const restricted = await openCodexToolProbe({ model: 'gpt-5.3-codex', nativeTools: 'none', executionControl: true, calls: [call] });
+    try {
+      await restricted.turn();
+      expect(restricted.outputs()).toMatch(/unsupported|unknown|not found|unavailable/i);
+      expect(restricted.outputs()).not.toContain('PRISM_NATIVE_EXEC_CONTROL');
+    } finally { await restricted.cleanup(); }
+  }, 90000);
+});

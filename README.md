@@ -568,6 +568,68 @@ Codex reads the effective configuration and supplies a disabled entry with a
 valid transport, including when the name was previously absent. This option
 does not provide wholesale replacement of inherited MCP configuration.
 
+### Measured Codex native-tool restriction
+
+A trusted host can opt into `nativeTools: 'none'` on `CodexDriver` to remove
+native execution, web/image/browser, agent, goal and human-input tools. The
+default remains `'default'`. This option is host policy; ACP clients and model
+output cannot set it.
+
+```ts
+import { CodexDriver, CODEX_NATIVE_TOOLS_NONE } from '@particle-academy/prism-acp';
+
+const driver = new CodexDriver({
+  cwd: assignedWorkspace,
+  model: 'gpt-5.3-codex',
+  nativeTools: 'none',
+  mcpServers: applicationServers,
+});
+```
+
+| Requirement | Supported value |
+| --- | --- |
+| Native Codex CLI | Exactly `0.163.0`, checked during initialize |
+| Explicit model | `gpt-5.3-codex` |
+| Thread | Fresh session only |
+| MCP servers | Only explicitly supplied `mcpServers`; inherited server IDs are disabled |
+| Remaining native helpers | `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource` |
+
+`CODEX_NATIVE_TOOLS_NONE` exports the immutable measured CLI/model/residual-tool
+matrix. The three read-only resource helpers can access only the session's
+supplied servers. Their presence means this is not an MCP-only tool surface.
+The supplied MCP tools retain the capabilities and approval policy you give them.
+An empty `mcpServers` list in this mode disables all inherited servers.
+
+Omitted or other models, unmeasured CLI versions, and `resumeSessionId` refuse
+with a clear error. Model selection is limited to the matrix; an unsupported
+native model reroute closes the driver. Resume is unsupported because a saved
+thread can restore native agent tools even when its new configuration disables
+them. Supporting resume requires trustworthy session provenance in a future
+version. Ordinary-mode resume is unchanged.
+
+The limit is measured rather than inferred from configuration flags. On CLI
+`0.163.0`, `gpt-6.1-sol` still advertises native execution and collaboration tools
+through `input[].additional_tools`, and `collaboration.list_agents` remains
+callable after the feature policy is applied. That model is refused. A host
+cannot treat a hidden top-level `tools` array as proof of removal.
+
+This option governs native tool reachability; the CLI itself still runs with
+its process permissions, reads its configuration and authenticates normally.
+Use the process containment appropriate to your application.
+
+The regression suite uses an installed CLI, empty owned homes, a dummy key,
+loopback fake Responses and MCP fixtures, and a non-forwarding local proxy that
+records and rejects auxiliary CONNECT attempts. It performs no real inference
+or login and verifies that each owned process tree is empty after stop. Run
+`npx vitest run test/codex-native-tools-live.test.ts` with
+`PRISM_ACP_CODEX_NATIVE_TOOLS=1` and optionally `PRISM_ACP_CODEX_BINARY` set to
+the absolute native binary. An absent CLI or unmeasured version fails when opted
+in. CI runs this gate on Linux and Windows with pinned Codex `0.163.0`; it checks
+both top-level `tools` and `input[].additional_tools`, rejecting unknown shapes
+and any unexpected tool. It also proves working native execution in a control
+and refusal under the supported restriction, resource scope, and model/version/
+resume refusal.
+
 `bash scripts/probe-mcp-session-auth-gate.sh` is an opt-in Linux VM check. It
 packs the proposed adapter, runs the installed Codex and Claude CLIs in an
 isolated network namespace against local fixture servers, and verifies the
