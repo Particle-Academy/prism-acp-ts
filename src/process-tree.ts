@@ -4,6 +4,8 @@ import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, wri
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, extname, isAbsolute, join } from 'node:path';
+import type { Readable, Writable } from 'node:stream';
+import { launchWindowsLocal } from './process-tree-local.js';
 import { SUPERVISOR_CS } from './process-tree-supervisor-cs.js';
 
 /**
@@ -72,9 +74,13 @@ export interface StopOptions {
   readonly graceMs?: number;
 }
 
-/** A provider under supervision. `child` is the supervisor: its stdin, stdout and stderr are the provider's. */
+/** A provider under supervision. Use `io ?? child` for provider bytes; `child` is always the real supervisor. */
 export interface ProviderProcess {
   readonly child: ChildProcess;
+  /** Provider byte streams for transports that do not use ChildProcess stdio. */
+  readonly io?: ProviderIo;
+  /** Supervisor has ended and provider output has drained (bounded to five seconds). */
+  readonly closed?: Promise<void>;
   /** Resolves once the provider runs inside its tree; rejects if it could not be started. */
   readonly started: Promise<ProcessTree>;
   /** Null until started. */
@@ -85,7 +91,22 @@ export interface ProviderProcess {
   kill(signal?: NodeJS.Signals): void;
 }
 
-export interface LaunchOptions {
+export interface ProviderIo {
+  readonly stdin: Writable;
+  readonly stdout: Readable;
+  readonly stderr: Readable;
+}
+
+export interface ProcessTreeOptions {
+  /** Pending stdio writes/output backpressure deadline in LOCAL mode, 1..60000 ms. Default 30000; idle sessions are allowed. */
+  readonly ioTimeoutMs?: number;
+  /** Opt into AppContainer-compatible LOCAL pipes. No loopback/network permission is required. Windows only. */
+  readonly windowsStdio?: 'local-pipes';
+  /** Deadline for the local-pipe supervisor/provider startup; default 10000 ms, maximum 60000 ms. */
+  readonly startupTimeoutMs?: number;
+}
+
+export interface LaunchOptions extends ProcessTreeOptions {
   readonly cwd: string;
   readonly env: Readonly<Record<string, string | undefined>>;
 }
@@ -102,10 +123,24 @@ const SUPERVISOR_REPORT_MS = 10_000;
 /** Start `command args` under a supervisor that owns its whole process tree. */
 export function launchProvider(command: string, args: readonly string[], options: LaunchOptions): ProviderProcess {
   const windows = process.platform === 'win32';
+  if (options.windowsStdio !== undefined && (options.windowsStdio !== 'local-pipes' || !windows)) {
+    throw new ProcessTreeError('local-pipe stdio requires Windows');
+  }
+  const startupTimeout = options.startupTimeoutMs ?? 10_000;
+  if (!Number.isInteger(startupTimeout) || startupTimeout < 1 || startupTimeout > 60_000) {
+    throw new ProcessTreeError('startupTimeoutMs must be an integer from 1 to 60000');
+  }
+  if (options.startupTimeoutMs !== undefined && options.windowsStdio !== 'local-pipes') {
+    throw new ProcessTreeError('startupTimeoutMs requires local-pipe stdio');
+  }
+  if (options.ioTimeoutMs !== undefined && (options.windowsStdio !== 'local-pipes' || !Number.isInteger(options.ioTimeoutMs) || options.ioTimeoutMs < 1 || options.ioTimeoutMs > 60_000)) {
+    throw new ProcessTreeError('ioTimeoutMs requires local-pipe stdio and an integer from 1 to 60000');
+  }
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(options.env)) if (value !== undefined) env[key] = value;
   const spec = windows ? windowsSpawnSpec(command, args, options.cwd, env) : posixSpawnSpec(command, args, options.cwd);
   const supervisor = windows ? windowsSupervisor() : null;
+  if (options.windowsStdio === 'local-pipes') return launchWindowsLocal(supervisor!, spec, options, startupTimeout);
 
   const token = randomBytes(32).toString('hex');
   const socketDirectory = windows ? null : mkdtempSync(join(tmpdir(), 'prism-acp-tree-'));

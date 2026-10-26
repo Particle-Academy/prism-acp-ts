@@ -30,7 +30,7 @@ export type { ProblemDetail } from '../acp/agent.js';
 import { ApprovalServer, HOOK_SCRIPT, approvalSettings, permissionRequestFor } from './approvals.js';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
 import { ModelListError, claudeModelsOf, type SessionModelState } from '../models.js';
-import { ProcessTreeError, launchProvider, type ProcessTree, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
+import { ProcessTreeError, launchProvider, type ProcessTree, type ProcessTreeOptions, type ProviderIo, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
 import type { DriverCapabilities } from '../acp/agent.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
@@ -64,6 +64,8 @@ export type ClaudePermissionMode =
 export interface ClaudeDriverOptions {
   /** Working directory for the agent. */
   readonly cwd: string;
+  /** Trusted process transport configuration; LOCAL pipes support an app-provisioned Windows AppContainer. */
+  readonly processTree?: ProcessTreeOptions;
   /** Binary to run. Overridable for tests and unusual installs. */
   readonly binary?: string;
   /**
@@ -353,6 +355,7 @@ export class ClaudeDriver {
   readonly #framer = new NdjsonFramer();
   readonly #mapper = new ClaudeToAcp();
   #child: ChildProcess | null = null;
+  #io: ProviderIo | ChildProcess | null = null;
   #provider: ProviderProcess | null = null;
   #stderr = '';
   #stderrRedactor: SecretRedactor | null = null;
@@ -404,6 +407,9 @@ export class ClaudeDriver {
   constructor(options: ClaudeDriverOptions, events: ClaudeDriverEvents = {}) {
     this.#mcpServers = readMcpServers(options.mcpServers);
     this.#options = { ...options, mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
+    if (options.processTree?.windowsStdio === 'local-pipes' && (this.#mcpServers.length > 0 || options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0)) {
+      throw new ProcessTreeError('LOCAL transport does not support generated Claude MCP configuration or permission hooks');
+    }
     this.#events = events;
   }
 
@@ -427,7 +433,7 @@ export class ClaudeDriver {
 
     const parentEnv = this.#options.parentEnv ?? process.env;
     // Checked before anything starts: a key with no usable home is refused here, naming the field, never the key.
-    const keyed = apiKeyHome('claude', this.#options.credentials, parentEnv);
+    const keyed = apiKeyHome('claude', this.#options.credentials, parentEnv, this.#options.processTree);
     this.#stderrRedactor = keyed === null ? null : new SecretRedactor(keyed.apiKey);
     const { env, withheld } = childEnv(parentEnv, {
       allow: [
@@ -482,6 +488,7 @@ export class ClaudeDriver {
         ...(this.#options.binaryArgs ?? []),
         ...claudeArgs(this.#options, this.#mcpConfigPath ?? undefined, settingsPath),
       ], {
+        ...this.#options.processTree,
         cwd: this.#options.cwd,
         env,
       });
@@ -495,10 +502,12 @@ export class ClaudeDriver {
       throw new Error('failed to prepare Claude MCP configuration or spawn CLI');
     }
     this.#child = child;
+    const io = this.#provider!.io ?? child;
+    this.#io = io;
 
-    child.stdout?.on('data', (chunk: Buffer) => this.#onStdout(chunk));
-    child.stderr?.setEncoding('utf8');
-    child.stderr?.on('data', (chunk: string) => this.#onStderr(chunk));
+    io.stdout?.on('data', (chunk: Buffer) => this.#onStdout(chunk));
+    io.stderr?.setEncoding('utf8');
+    io.stderr?.on('data', (chunk: string) => this.#onStderr(chunk));
 
     child.on('error', (cause: Error) => {
       this.#removeMcpConfig();
@@ -518,7 +527,7 @@ export class ClaudeDriver {
     // Nobody may ask for the models; a refusal or an early exit must not become an unhandled rejection.
     this.#models.catch(() => {});
 
-    child.on('close', (code, signal) => {
+    const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
       for (const waiter of this.#controlWaiters.values()) waiter.reject(new ModelListError('the Claude CLI exited before answering'));
       this.#controlWaiters.clear();
       this.#removeMcpConfig();
@@ -528,14 +537,16 @@ export class ClaudeDriver {
       this.#emit(this.#framer.end());
       if (this.#stderrRedactor !== null) this.#releaseStderr(this.#stderrRedactor.end());
       this.#events.onExit?.(code, signal);
-    });
+    };
+    if (this.#provider!.closed !== undefined) void this.#provider!.closed.then(() => onClose(child.exitCode, child.signalCode));
+    else child.on('close', onClose);
   }
 
   /** Send a user turn: text, or content blocks. A block it cannot send refuses the whole turn, naming it. */
   prompt(content: PromptContent): void {
     // Encoded first, so a refused prompt throws PromptRefused whether or not the CLI is running.
     const line = promptLine(content);
-    const stdin = this.#child?.stdin;
+    const stdin = this.#io?.stdin;
     if (stdin === null || stdin === undefined) {
       throw new Error('driver is not started, or its stdin has closed');
     }
@@ -566,7 +577,7 @@ export class ClaudeDriver {
    * control_response, whose shape was not captured. No turn running: nothing is sent.
    */
   cancel(): Promise<void> {
-    const stdin = this.#child?.stdin;
+    const stdin = this.#io?.stdin;
     if (this.#turnsInFlight === 0 || stdin === null || stdin === undefined || stdin.destroyed) {
       return Promise.resolve();
     }
@@ -609,7 +620,7 @@ export class ClaudeDriver {
 
   /** Send one control request and resolve with the CLI's control_response (its `response` object). */
   #control(request: Record<string, unknown>, timeoutMs = 30_000): Promise<Record<string, unknown>> {
-    const stdin = this.#child?.stdin;
+    const stdin = this.#io?.stdin;
     if (stdin === null || stdin === undefined || stdin.destroyed) return Promise.reject(new Error('driver is not started, or its stdin has closed'));
     this.#controlSequence += 1;
     const id = `prism-acp-control-${this.#controlSequence}`;
@@ -629,7 +640,7 @@ export class ClaudeDriver {
 
   /** Close stdin, which tells the CLI no more turns are coming. */
   endInput(): void {
-    this.#child?.stdin?.end();
+    this.#io?.stdin?.end();
   }
 
   /** End the CLI and every process it started, now. */

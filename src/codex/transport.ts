@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
-import { launchProvider, type ProcessTree, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
+import { launchProvider, type ProcessTree, type ProcessTreeOptions, type ProviderIo, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
 
 export interface CodexTransportHandlers {
   readonly onFrame: (frame: unknown) => void;
@@ -20,6 +20,7 @@ export interface CodexTransport {
 
 export interface CodexTransportOptions {
   readonly cwd: string;
+  readonly processTree?: ProcessTreeOptions;
   readonly env: Readonly<Record<string, string>>;
   readonly binary?: string;
   /** Arguments placed before `app-server ...`, for a binary that is an interpreter (see CodexDriverOptions). */
@@ -32,6 +33,7 @@ export class StdioCodexTransport implements CodexTransport {
   readonly #handlers: CodexTransportHandlers;
   readonly #framer = new NdjsonFramer();
   #child: ChildProcess | null = null;
+  #io: ProviderIo | ChildProcess | null = null;
   #provider: ProviderProcess | null = null;
   #stderrBuffer = '';
   #closed = false;
@@ -51,30 +53,35 @@ export class StdioCodexTransport implements CodexTransport {
 
     // Under a supervisor that owns the whole process tree, and never through a shell (see process-tree.ts).
     const provider = launchProvider(this.#options.binary ?? 'codex', [...(this.#options.binaryArgs ?? []), 'app-server', '--listen', 'stdio://'], {
+      ...this.#options.processTree,
       cwd: this.#options.cwd,
       env: { ...this.#options.env },
     });
     this.#provider = provider;
     const child = provider.child;
     this.#child = child;
+    const io = provider.io ?? child;
+    this.#io = io;
 
-    child.stdout?.on('data', (chunk: Buffer) => {
+    io.stdout?.on('data', (chunk: Buffer) => {
       for (const frame of this.#framer.push(chunk)) {
         if (frame.ok) this.#handlers.onFrame(frame.value);
         else this.#handlers.onProblem(frame.error.message, { recoverable: true });
       }
     });
-    child.stderr?.setEncoding('utf8');
-    child.stderr?.on('data', (chunk: string) => this.#onStderr(chunk));
+    io.stderr?.setEncoding('utf8');
+    io.stderr?.on('data', (chunk: string) => this.#onStderr(chunk));
     child.on('error', (cause: Error) => this.#handlers.onProblem(`failed to spawn Codex (${cause.name})`));
-    child.on('close', (code, signal) => {
+    const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
       this.#closed = true;
       for (const frame of this.#framer.end()) {
         if (frame.ok) this.#handlers.onFrame(frame.value);
         else this.#handlers.onProblem(frame.error.message, { recoverable: true });
       }
       this.#handlers.onExit(code, signal);
-    });
+    };
+    if (provider.closed !== undefined) void provider.closed.then(() => onClose(child.exitCode, child.signalCode));
+    else child.on('close', onClose);
 
     await new Promise<void>((resolve, reject) => {
       provider.started.then(() => resolve(), (cause: Error) => reject(new Error(`Codex app-server spawn failed (${cause.name})`)));
@@ -83,7 +90,7 @@ export class StdioCodexTransport implements CodexTransport {
   }
 
   send(frame: unknown): void {
-    const stdin = this.#child?.stdin;
+    const stdin = this.#io?.stdin;
     if (stdin === null || stdin === undefined || stdin.destroyed || this.#closed) {
       throw new Error('Codex app-server stdin is not open');
     }
@@ -93,7 +100,7 @@ export class StdioCodexTransport implements CodexTransport {
   close(signal: NodeJS.Signals = 'SIGTERM'): void {
     if (this.#closed) return;
     this.#closed = true;
-    this.#child?.stdin?.end();
+    this.#io?.stdin?.end();
     this.#provider?.kill(signal);
   }
 
