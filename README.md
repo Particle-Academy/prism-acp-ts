@@ -634,6 +634,16 @@ This option governs native tool reachability; the CLI itself still runs with
 its process permissions, reads its configuration and authenticates normally.
 Use the process containment appropriate to your application.
 
+With supplied MCP servers that expose no filesystem route, the package removes
+the model's native routes to the scoped home's auth/config/session files. The
+CLI itself retains normal trusted authentication reads and writes. A synthetic
+home regression seeds three distinct sentinels, attempts hidden shell/file/image/
+agent and MCP resource routes, and scans tool results, model input and outgoing
+requests for disclosure. Native `account/read` must still recognize the dummy
+auth file. Deliberately re-enabling the shell makes the disclosure assertion
+fail, proving the check detects actual file access. This is a package tool-route
+guarantee; the host owns OS isolation and MCP server authority.
+
 The regression suite uses an installed CLI, empty owned homes, a dummy key,
 loopback fake Responses and MCP fixtures, and a non-forwarding local proxy that
 records and rejects auxiliary CONNECT attempts. It performs no real inference

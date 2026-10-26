@@ -11,6 +11,10 @@ import type { TurnOutcome } from '../../src/claude/driver.js';
 import { advertisedTools } from './codex-tool-surface.js';
 
 type Row = Record<string, any>;
+export const PROTECTED_HOME_SENTINELS = Object.freeze({
+  auth: 'PRISM_SYNTHETIC_AUTH_SENTINEL_725ac3', config: 'PRISM_SYNTHETIC_CONFIG_SENTINEL_118e9b',
+  session: 'PRISM_SYNTHETIC_SESSION_SENTINEL_4dc271',
+});
 export interface ProbeOptions {
   model: string;
   nativeTools?: CodexDriverOptions['nativeTools'];
@@ -23,12 +27,15 @@ export interface ProbeOptions {
   resumeSessionId?: string;
   reuseHome?: string;
   replaceVersion?: string;
-  calls?: readonly Row[];
+  calls?: readonly Row[] | ((home: string) => readonly Row[]);
   executionControl?: boolean;
   inheritedFeatures?: Record<string, unknown>;
   inheritedSettings?: Record<string, unknown>;
   rerouteSignal?: 'http-header' | 'event-early' | 'event-late' | 'envelope';
   rerouteOnRequest?: number;
+  protectedHome?: boolean;
+  /** Deliberate mutation: bypass exactly the final shell_tool=false override at the native transport boundary. */
+  enableShellMutation?: boolean;
 }
 
 function inside(parent: string, child: string): boolean {
@@ -59,6 +66,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
   const root = mkdtempSync(join(parent, 'run-'));
   const nonce = basename(root);
   const home = options.reuseHome ?? join(root, 'home'); mkdirSync(home, { recursive: true });
+  const calls = typeof options.calls === 'function' ? options.calls(home) : options.calls;
   const cwd = mkdtempSync(join(tmpdir(), 'prism-codex-tools-cwd-'));
   const temporaryParent = realpathSync(tmpdir());
   const receipt = join(root, 'mcp-receipts.jsonl');
@@ -68,6 +76,8 @@ export async function openCodexToolProbe(options: ProbeOptions) {
   let reportedAgent: string | undefined;
   let effectiveConfig: Row | undefined;
   let lateSignalAfterTool = false;
+  let nativeSend: ((frame: Row) => void) | undefined;
+  let accountAnswer: ((frame: Row) => void) | undefined;
   let driver: CodexDriver | undefined, cleaned = false;
   const server = createServer((request, response) => { void (async () => {
     try {
@@ -81,7 +91,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Row;
       requests.push(body); assert(requests.length <= 8, 'Model fixture retry bound');
       const id = `prism-response-${requests.length}`;
-      const scripted = options.calls?.[requests.length - 1];
+      const scripted = calls?.[requests.length - 1];
       const item = scripted ? { id: `${nonce}-call-${requests.length}`, call_id: `${nonce}-probe-${requests.length}`, ...scripted }
         : { type: 'message', id: `${id}-message`, role: 'assistant', content: [{ type: 'output_text', text: 'Local fixture complete' }] };
       const events: Row[] = [{ type: 'response.created', response: { id } }, { type: 'response.output_item.done', item },
@@ -125,12 +135,17 @@ export async function openCodexToolProbe(options: ProbeOptions) {
       ...options.inheritedFeatures,
       enable_request_compression: false, api_key_model_discovery: false },
     model_providers: { prism_fake: { name: 'Prism local fake provider', base_url: origin + '/v1', wire_api: 'responses',
-      env_key: 'PRISM_FAKE_KEY', requires_openai_auth: false, supports_websockets: false, request_max_retries: 0, stream_max_retries: 0 } },
+      env_key: 'PRISM_FAKE_KEY', requires_openai_auth: options.protectedHome === true, supports_websockets: false, request_max_retries: 0, stream_max_retries: 0 } },
     analytics: { enabled: false }, feedback: { enabled: false },
     ...options.inheritedSettings,
     ...(options.inheritedForeign ? { mcp_servers: { foreign: fixtureServer('foreign') } } : {}),
   };
-  writeFileSync(join(home, 'config.toml'), toml(configuration));
+  writeFileSync(join(home, 'config.toml'), toml(configuration) + (options.protectedHome ? `\n# ${PROTECTED_HOME_SENTINELS.config}\n` : ''));
+  if (options.protectedHome) {
+    writeFileSync(join(home, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'prism-dummy-not-a-real-api-key', synthetic_fixture: PROTECTED_HOME_SENTINELS.auth }));
+    mkdirSync(join(home, 'sessions'), { recursive: true });
+    writeFileSync(join(home, 'sessions', 'protected.jsonl'), JSON.stringify({ synthetic_fixture: PROTECTED_HOME_SENTINELS.session }) + '\n');
+  }
   const parentEnv: Record<string, string> = {};
   for (const key of ['SystemRoot', 'WINDIR', 'PATH', 'PATHEXT', 'TEMP', 'TMP', 'ComSpec']) if (process.env[key]) parentEnv[key] = process.env[key]!;
   Object.assign(parentEnv, { CODEX_HOME: home, HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home,
@@ -173,6 +188,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
       const real = new StdioCodexTransport(launch, { ...handlers, onFrame: (raw) => {
         const frame = raw as Row;
         received.push(frame);
+        if (frame.id === 'prism-owned-account-read') { accountAnswer?.(frame); return; }
         if (frame.result?.config) effectiveConfig = frame.result.config;
         if (typeof frame.result?.userAgent === 'string') {
           reportedAgent = frame.result.userAgent;
@@ -180,13 +196,29 @@ export async function openCodexToolProbe(options: ProbeOptions) {
         }
         handlers.onFrame(raw);
       } });
-      return { start: () => real.start(), send: (raw) => { sent.push(raw as Row); real.send(raw); },
+      nativeSend = (frame) => real.send(frame);
+      return { start: () => real.start(), send: (raw) => {
+        let frame = raw as Row;
+        if (options.enableShellMutation && frame.method === 'thread/start') {
+          frame = { ...frame, params: { ...frame.params, config: { ...frame.params.config,
+            features: { ...frame.params.config.features, shell_tool: true } } } };
+        }
+        sent.push(frame); real.send(frame);
+      },
         close: (signal) => real.close(signal), stop: (settings) => real.stop(settings), get processTree() { return real.processTree; } };
     });
     driver.start(); await bounded(driver.ready, 20000, 'Native fixture startup timeout');
     return {
       driver, requests, sent, received, problems, unexpected, blockedConnections, home, root, cleanup,
       lateSignalAfterTool: () => lateSignalAfterTool,
+      trustedAccount: async () => {
+        const answer = new Promise<Row>((resolve) => { accountAnswer = resolve; });
+        nativeSend!({ id: 'prism-owned-account-read', method: 'account/read', params: { refreshToken: false } });
+        const result = await bounded(answer, 5000, 'Owned trusted account/read timeout');
+        assert(!result.error, 'Trusted CLI account read must work');
+        return result.result;
+      },
+      protectedFiles: () => Object.fromEntries(['auth.json', 'config.toml', 'sessions/protected.jsonl'].map((name) => [name, readFileSync(join(home, name), 'utf8')])),
       resources: () => existsSync(receipt) ? readFileSync(receipt, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as Row) : [],
       outputs: () => requests.flatMap((body) => body.input.filter((item: Row) => typeof item.call_id === 'string' && item.call_id.startsWith(nonce + '-probe-') && (item.type === 'function_call_output' || item.type === 'custom_tool_call_output'))).map((item: Row) => JSON.stringify(item.output)).join('\n'),
       turn: async (settings?: { allowError?: boolean }) => {

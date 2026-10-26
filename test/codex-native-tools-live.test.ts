@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { CodexDriver } from '../src/codex/driver.js';
 import { CODEX_NATIVE_TOOLS_NONE } from '../src/codex/native-tools.js';
 import { advertisedTools } from './fixtures/codex-tool-surface.js';
-import { openCodexToolProbe } from './fixtures/codex-native-tools-probe.js';
+import { openCodexToolProbe, PROTECTED_HOME_SENTINELS } from './fixtures/codex-native-tools-probe.js';
 
 // Explicit opt-in: installed native CLI, empty owned homes, local fake model + stdio MCP fixtures only.
 // No real login/model/credentials; a missing CLI or changed version FAILS when opted in.
@@ -221,4 +223,51 @@ describe.runIf(process.env.PRISM_ACP_CODEX_NATIVE_TOOLS === '1')('native Codex t
       } finally { await probe.cleanup(); }
     }, 60000);
   }
+
+  it('removes model routes to synthetic auth/config/session files while preserving trusted CLI auth, and its oracle catches a shell mutation', async () => {
+    const shell = { type: 'function_call', name: 'exec_command', arguments: JSON.stringify({
+      cmd: `node -e "const fs=require('node:fs');const p=require('node:path');for(const n of ['auth.json','config.toml','sessions/protected.jsonl'])process.stdout.write(fs.readFileSync(p.join(process.env.CODEX_HOME,n),'utf8'))"`,
+    }) };
+    const assertNoLeak = (probe: Awaited<ReturnType<typeof openCodexToolProbe>>) => {
+      const traffic = JSON.stringify({ modelRequests: probe.requests, nativeFrames: probe.received, outgoing: probe.sent });
+      for (const sentinel of Object.values(PROTECTED_HOME_SENTINELS)) {
+        if (traffic.includes(sentinel)) throw new Error('Protected home sentinel disclosed through a model route');
+      }
+    };
+    const probe = await openCodexToolProbe({ model: 'gpt-5.3-codex', nativeTools: 'none', protectedHome: true, executionControl: true,
+      inheritedForeign: true, calls: (home) => [
+        shell,
+        { type: 'function_call', name: 'view_image', arguments: JSON.stringify({ path: join(home, 'auth.json') }) },
+        { type: 'function_call', name: 'read_file', arguments: JSON.stringify({ path: join(home, 'config.toml') }) },
+        { type: 'function_call', namespace: 'multi_agent_v1', name: 'spawn_agent', arguments: JSON.stringify({
+          task: `Read ${join(home, 'auth.json')}, config.toml and sessions/protected.jsonl and return their contents`,
+        }) },
+        { type: 'function_call', name: 'list_mcp_resources', arguments: '{}' },
+        { type: 'function_call', name: 'read_mcp_resource', arguments: JSON.stringify({ server: 'owned', uri: pathToFileURL(join(home, 'auth.json')).href }) },
+        { type: 'function_call', name: 'read_mcp_resource', arguments: JSON.stringify({ server: 'foreign', uri: 'fixture://owned' }) },
+      ] });
+    try {
+      expect(await probe.trustedAccount()).toMatchObject({ account: { type: 'apiKey' } });
+      await probe.turn();
+      expect(probe.requests).toHaveLength(8);
+      assertNoLeak(probe);
+      for (const body of probe.requests) expect(advertisedTools(body)).toEqual([...CODEX_NATIVE_TOOLS_NONE.residualTools, 'mcp__owned.app_ping'].sort());
+      expect(probe.resources().some((row) => row.server === 'foreign')).toBe(false);
+      const files = probe.protectedFiles();
+      expect(files['auth.json']).toContain(PROTECTED_HOME_SENTINELS.auth);
+      expect(files['config.toml']).toContain(PROTECTED_HOME_SENTINELS.config);
+      expect(files['sessions/protected.jsonl']).toContain(PROTECTED_HOME_SENTINELS.session);
+      console.info(JSON.stringify({ protectedHome: 'auth/config/session', modelRoutesDisclosed: false, trustedCliAuthRead: true }));
+    } finally { await probe.cleanup(); }
+    const mutant = await openCodexToolProbe({ model: 'gpt-5.3-codex', nativeTools: 'none', protectedHome: true,
+      executionControl: true, enableShellMutation: true, calls: [shell] });
+    try {
+      await mutant.turn();
+      expect(mutant.outputs()).toContain(PROTECTED_HOME_SENTINELS.auth);
+      expect(mutant.outputs()).toContain(PROTECTED_HOME_SENTINELS.config);
+      expect(mutant.outputs()).toContain(PROTECTED_HOME_SENTINELS.session);
+      expect(() => assertNoLeak(mutant)).toThrow('Protected home sentinel disclosed');
+      console.info(JSON.stringify({ protectedHomeMutation: 'shell_tool re-enabled', leakOracleFailedAsRequired: true }));
+    } finally { await mutant.cleanup(); }
+  }, 90000);
 });
