@@ -39,6 +39,9 @@ describe.skipIf(process.platform !== 'win32')('restrictToCurrentUser', () => {
   beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'prism-acp-private-')); });
   afterEach(() => rmSync(directory, { recursive: true, force: true }));
 
+  // G137: 30 hosted full-suite samples (run 40556608228), 210 successful native calls.
+  // Nearest-rank p99/max 3330.13ms; earlier hosted timeout completed in 6504ms.
+  // Budget = ceil(max(p99, 6504) * 1.5 / 1000) seconds = 10000ms; all ACL assertions stay.
   it('leaves the current user as the only grant, even when an explicit Everyone grant was there first', () => {
     execFileSync(join(system32, 'icacls.exe'), [directory, '/grant', `*${EVERYONE}:(OI)(CI)RX`], { stdio: 'pipe', windowsHide: true });
     expect(rules(directory).some((rule) => rule.startsWith(`${EVERYONE}|False|`))).toBe(true); // the planted grant is real
@@ -46,7 +49,7 @@ describe.skipIf(process.platform !== 'win32')('restrictToCurrentUser', () => {
     restrictToCurrentUser(directory);
 
     expect(rules(directory)).toEqual(['protected=True', `${currentSid()}|False|Allow`]);
-  });
+  }, 10_000);
 
   it('does the same for a directory with only its inherited grants', () => {
     restrictToCurrentUser(directory);
