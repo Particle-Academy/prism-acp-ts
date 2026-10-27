@@ -2,15 +2,18 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { compiledDigests, compilerAttempts } from './supervisor-compiler-observer.mjs';
-const [moduleUrl,cache,go,ready,cwd]=process.argv.slice(2);
+import { compiledDigests, compilerAttempts, configureColdSchedule, finishColdPreparation, scheduleEvents } from './supervisor-compiler-observer.mjs';
+const [moduleUrl,cache,go,ready,cwd,coordination,role]=process.argv.slice(2);
+configureColdSchedule(coordination,cache,role);
 const {prepareProcessTree,launchProvider,windowsApprovalAdapter}=await import(moduleUrl);
 if([prepareProcessTree,launchProvider,windowsApprovalAdapter].some(value=>typeof value!=='function'))throw Error('cold worker API import is incomplete');
 writeFileSync(ready,'ready');
 while(!existsSync(go))await new Promise(r=>setTimeout(r,5));
 let provider;
 try{
- await prepareProcessTree({directory:cache});
+ let prepared=false;
+ try{await prepareProcessTree({directory:cache});prepared=true;}
+ finally{finishColdPreparation(prepared);}
  const adapter=windowsApprovalAdapter();
  const digest=createHash('sha256').update(readFileSync(adapter)).digest('hex');
  const namedDigest=/prism-acp-supervisor-([0-9a-f]{64})\.exe$/.exec(adapter)?.[1];
@@ -30,7 +33,7 @@ try{
  await new Promise(r=>setTimeout(r,200));
  const stop=await provider.stop({graceMs:0});
  if(!stop.verified||!stop.empty||stop.survivors!==0)throw Error('inner provider tree was not verified empty');
- console.log(JSON.stringify({coldWorker:true,success:true,approval:{allowExit:allowed.status,denyExit:denied.status,hashVerified:true},compiledDigests,compilerAttempts,generationDigest:digest,stop}));
+ console.log(JSON.stringify({coldWorker:true,success:true,approval:{allowExit:allowed.status,denyExit:denied.status,hashVerified:true},compiledDigests,compilerAttempts,generationDigest:digest,stop,schedule:coordination?{role:Number(role),events:scheduleEvents}:null}));
 }catch(cause){console.log(JSON.stringify({coldWorker:true,success:false,name:cause?.name,message:cause?.message,
- code:cause?.code,observedSha256:cause?.observedSha256,recordedSha256:cause?.recordedSha256,compiledDigests,compilerAttempts}));process.exitCode=1;}
+ code:cause?.code,observedSha256:cause?.observedSha256,recordedSha256:cause?.recordedSha256,compiledDigests,compilerAttempts,schedule:coordination?{role:Number(role),events:scheduleEvents}:null}));process.exitCode=1;}
 finally{if(provider)await provider.stop({graceMs:0});}
