@@ -76,7 +76,9 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Released producer must fail; current producer must pass the same 20x8 oracle
-        run: node scripts/check-supervisor-cold-cache.mjs
+        run: |
+          node --test scripts/supervisor-cold-evidence.check.mjs
+          node scripts/check-supervisor-cold-cache.mjs
       - name: Preserve cold-cache measurements
         if: always()
         uses: actions/upload-artifact@v4
