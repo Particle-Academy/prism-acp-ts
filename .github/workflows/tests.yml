@@ -78,7 +78,9 @@ jobs:
       - name: Released producer must fail; current producer must pass the same 20x8 oracle
         run: |
           node --test scripts/supervisor-cold-evidence.check.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/check-supervisor-cold-cache.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Preserve cold-cache measurements
         if: always()
         uses: actions/upload-artifact@v4
