@@ -535,12 +535,23 @@ export function windowsApprovalAdapter(): string {
 export function createWindowsPrivateDirectory(directory: string): void {
   if (process.platform !== 'win32') throw new ProcessTreeError('Windows private directory protection is unavailable');
   if (!isAbsolute(directory)) throw new ProcessTreeError('private directory must be absolute');
+  let helper: string;
+  try { helper = windowsSupervisor(); }
+  catch (cause) {
+    throw new ProcessTreeError(`cannot prepare private directory helper: ${cause instanceof ProcessTreeError ? cause.message : 'native adapter verification failed'}`);
+  }
   try {
-    execFileSync(windowsSupervisor(), ['--create-private-directory', directory], {
+    execFileSync(helper, ['--create-private-directory', directory], {
       stdio: 'inherit', windowsHide: true, timeout: 5_000,
     });
   } catch (cause) {
     const status = (cause as { status?: unknown }).status;
+    if (typeof status === 'number' && Number.isInteger(status) && status > 0x10000 && status <= 0x1ffff) {
+      const error = status - 0x10000;
+      const reason = error === 3 ? 'parent path not found' : error === 5 ? 'access denied' : error === 183 ? 'path already exists' : 'native directory creation failed';
+      throw new ProcessTreeError(`failed to protect the private directory for this Windows identity: CreateDirectoryW failed: ${reason} (Win32 ${error})${error === 3 ? '; the host must provision the private directory parent' : ''}`);
+    }
+    if ((cause as { code?: unknown }).code === 'ETIMEDOUT') throw new ProcessTreeError('private directory helper timed out');
     throw new ProcessTreeError(`failed to protect the private directory for this Windows identity${Number.isInteger(status) ? ` (exit ${String(status)})` : ''}`);
   }
 }

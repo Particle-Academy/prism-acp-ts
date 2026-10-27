@@ -178,6 +178,9 @@ static class AppContainerHost
             Grant(Path.GetDirectoryName(foreign),new SecurityIdentifier(foreignSid),FileSystemRights.ReadAndExecute);
             var identity=new SecurityIdentifier(sid); Grant(root,identity,FileSystemRights.ReadAndExecute);
             string cwd=Path.Combine(root,"workspace"),home=Path.Combine(root,"home");
+            bool retarget=mode=="private-temp-missing"||mode=="private-temp-retargeted";
+            string hostHome=retarget?Path.Combine(home,"provider"):home;
+            Directory.CreateDirectory(hostHome);
             Grant(cwd,identity,FileSystemRights.Modify); Grant(home,identity,FileSystemRights.Modify);
             Grant(cwd,WindowsIdentity.GetCurrent().User,FileSystemRights.FullControl); Grant(home,WindowsIdentity.GetCurrent().User,FileSystemRights.FullControl);
             Low(cwd); Low(home);
@@ -185,6 +188,7 @@ static class AppContainerHost
             // the supplied environment named cwd. Provision that effective
             // temp under the assigned home; all grants inherit unchanged.
             Directory.CreateDirectory(Path.Combine(home,"Packages",name,"AC","Temp"));
+            if(mode=="private-temp-retargeted") Directory.CreateDirectory(Path.Combine(hostHome,"Packages",name,"AC","Temp"));
             job=CreateJobObjectW(IntPtr.Zero,null); Check(job!=IntPtr.Zero,"job"); var limits=new ExtendedLimit(); limits.basic.flags=0x2000;
             Check(SetInformationJobObject(job,9,ref limits,Marshal.SizeOf(typeof(ExtendedLimit))),"job limits");
             IntPtr size=IntPtr.Zero; InitializeProcThreadAttributeList(IntPtr.Zero,1,0,ref size); list=Marshal.AllocHGlobal(size);
@@ -193,7 +197,7 @@ static class AppContainerHost
             Check(UpdateProcThreadAttribute(list,0,new IntPtr(0x20009),capsMemory,new IntPtr(Marshal.SizeOf(typeof(SecurityCapabilities))),IntPtr.Zero,IntPtr.Zero),"capabilities");
             var startup=new StartupEx(); startup.startup.cb=Marshal.SizeOf(typeof(StartupEx)); startup.attributes=list;
             startup.startup.flags=0x100; startup.startup.input=GetStdHandle(-10); startup.startup.output=GetStdHandle(-11); startup.startup.error=GetStdHandle(-12);
-            string env="HOME="+home+"\0LOCALAPPDATA="+home+"\0PATH="+Path.GetDirectoryName(node)+"\0PRISM_FIXTURE_NATIVE="+System.Reflection.Assembly.GetExecutingAssembly().Location+"\0SystemRoot="+Environment.GetEnvironmentVariable("SystemRoot")+"\0TEMP="+cwd+"\0TMP="+cwd+"\0USERPROFILE="+home+"\0\0";
+            string env="HOME="+hostHome+"\0LOCALAPPDATA="+hostHome+"\0PATH="+Path.GetDirectoryName(node)+"\0PRISM_FIXTURE_NATIVE="+System.Reflection.Assembly.GetExecutingAssembly().Location+"\0SystemRoot="+Environment.GetEnvironmentVariable("SystemRoot")+"\0TEMP="+cwd+"\0TMP="+cwd+"\0USERPROFILE="+hostHome+"\0\0";
             environment=Marshal.StringToHGlobalUni(env);
             // Physical fixture paths: avoid Node's realpath walk through denied
             // ancestors; grant no permission to the drive root or other repos.

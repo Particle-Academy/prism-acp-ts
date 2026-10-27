@@ -663,6 +663,13 @@ created or widened by this operation. Configuration is removed when the driver
 stops or startup fails. `cancel()` interrupts the turn; `stop()` ends the process
 tree and removes its configuration.
 
+The LOCAL restricted driver refuses a missing or inaccessible effective temp
+parent before starting the private-directory helper. Retargeting the host's
+`LOCALAPPDATA`/home can change that effective profile temp path; provision the new
+path before launch. Helper preparation errors remain distinct from native
+`CreateDirectoryW` failures, which report their Windows error number and cause
+without printing paths. The library never creates a missing parent as a fallback.
+
 The native regression uses a synthetic key, `claude-sonnet-4-6` request shape and
 owned loopback model/MCP servers. It proves a supplied MCP call, refusals of forced
 Bash/Read/Write/WebFetch/inherited-MCP calls, and cancel/stop cleanup. Its
