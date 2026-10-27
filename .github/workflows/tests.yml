@@ -77,6 +77,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run build
       - run: npx vitest run
         env:
           PRISM_ACP_ACL_TIMING: '1'
