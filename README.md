@@ -316,6 +316,30 @@ drivers because their measured resume behavior differs. Codex thread ids are
 the provider's own captured ids and are the same ids accepted by its resume
 method; ACP-minted ids are refused.
 
+Codex replay is enabled by default. Every update projected from saved history,
+including its single debug summary notice, has
+`_meta['particle.academy/replay'] === true` (`META_REPLAY`). Live notifications
+keep their normal metadata even when they arrive while a history page is loading.
+Replayed reasoning carries the source item id as `messageId`; replayed
+compaction carries it as `itemId`.
+
+To keep your own transcript without projecting the saved one again, set the
+trusted `CodexDriverOptions.replayHistory` option to `false` in your driver
+factory. This skips both `thread/turns/list` and `thread/items/list`, including
+the replay summary. It still resumes the native thread with its saved model
+context, so the next prompt can use that conversation. This does not enable
+resume with `nativeTools: 'none'`, whose provenance restriction still applies.
+
+The summary's `_meta['particle.academy/replay_summary']`
+(`META_REPLAY_SUMMARY`) contains `turns`, `items`, `diagnostics`, `reasons`
+(`{ reason, count }` entries), `omittedDiagnostics`, and `complete`. It replaces
+per-item replay diagnostics without copying raw historical frames into notices.
+At most 32 reason strings are retained, each sanitized and limited to 200
+characters; excess occurrences count toward `omittedDiagnostics`. `complete`
+reports whether pagination finished without an RPC or pagination failure;
+invalid entries and unmapped item types still count as diagnostics. Live unmapped-frame diagnostics
+are unchanged.
+
 Codex assistant text uses `agent_message_chunk` with a single content object
 during streaming, history replay, and completion without streamed deltas.
 `messageId` carries the Codex item id, so clients can distinguish adjacent

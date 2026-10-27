@@ -9,6 +9,8 @@ import {
   META_EXEC_POLICY_AMENDMENT,
   META_PERMISSION_REASON,
   META_UNMAPPED_FRAME,
+  META_REPLAY,
+  META_REPLAY_SUMMARY,
 } from '../src/meta.js';
 import { encodeLine } from '../src/ndjson.js';
 import { readCodexRateLimit } from '../src/codex/rate-limit.js';
@@ -24,6 +26,10 @@ class FakeTransport implements CodexTransport {
   interruptError: { code: number; message: string } | null = null;
   /** When set, thread/turns/list is answered with this JSON-RPC error. */
   turnsListError: { code: number; message: string } | null = null;
+  turnsListOverride: unknown = undefined;
+  itemsListOverride: unknown = undefined;
+  holdHistory = false;
+  readonly heldHistory: unknown[] = [];
   #handlers: CodexTransportHandlers;
   #turnPage = 0;
   #historyItems: readonly Record<string, unknown>[];
@@ -113,7 +119,16 @@ class FakeTransport implements CodexTransport {
         }
         break;
     }
-    queueMicrotask(() => this.#handlers.onFrame({ jsonrpc: '2.0', id: frame.id, result }));
+    if(frame.method==='thread/turns/list'&&this.turnsListOverride!==undefined)result=this.turnsListOverride;
+    if(frame.method==='thread/items/list'&&this.itemsListOverride!==undefined)result=this.itemsListOverride;
+    const response={jsonrpc:'2.0',id:frame.id,result};
+    if(this.holdHistory&&(frame.method==='thread/turns/list'||frame.method==='thread/items/list'))this.heldHistory.push(response);
+    else queueMicrotask(() => this.#handlers.onFrame(response));
+  }
+
+  releaseHistory():void {
+    this.holdHistory=false;
+    for(const frame of this.heldHistory.splice(0))this.#handlers.onFrame(frame);
   }
 
   close(): void {
@@ -153,6 +168,113 @@ function setup(
 async function settle(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+describe('Codex history replay provenance and opt-out',()=>{
+  const summary=(state:ReturnType<typeof setup>)=>state.updates.filter(u=>(u._meta as Record<string,unknown>|undefined)?.[META_REPLAY_SUMMARY]!==undefined);
+  const meta=(update:Record<string,unknown>)=>update._meta as Record<string,any>|undefined;
+  const items=[
+    {type:'userMessage',id:'user-history',content:[{type:'text',text:'old prompt'}]},
+    {type:'agentMessage',id:'agent-history',text:'old response'},
+    {type:'reasoning',id:'reason-history',summary:['old reasoning']},
+    {type:'commandExecution',id:'exec-history',command:'echo old',status:'completed',exitCode:0,aggregatedOutput:'old output'},
+    {type:'fileChange',id:'file-history',status:'completed',changes:[]},
+    {type:'mcpToolCall',id:'mcp-history',status:'completed',tool:'owned',result:{content:[{type:'text',text:'old MCP output'}]}},
+    {type:'dynamicToolCall',id:'dynamic-history',success:true,name:'owned',contentItems:[{type:'inputText',text:'old dynamic output'}]},
+    {type:'contextCompaction',id:'compact-history'},
+    {type:'future-history',id:'unknown-history',privatePayload:'DO_NOT_COPY_INTO_DIAGNOSTIC'},
+  ];
+
+  for(const replayHistory of [undefined,true])it(`default/explicit replay marks every projected update and one summary (${String(replayHistory)})`,async()=>{
+    const state=setup({resumeSessionId:'thread-captured',...(replayHistory===undefined?{}:{replayHistory})},{},items,true);
+    state.driver.start();await state.driver.ready;
+    const projected=state.updates.filter(u=>u.sessionUpdate!=='notice');
+    expect(projected).toHaveLength(8);
+    for(const update of projected)expect(meta(update)?.[META_REPLAY]).toBe(true);
+    expect(projected.find(u=>u.sessionUpdate==='agent_thought_chunk')).toMatchObject({messageId:'reason-history'});
+    expect(projected.find(u=>u.sessionUpdate==='compaction_update')).toMatchObject({itemId:'compact-history',status:'completed'});
+    expect(summary(state)).toHaveLength(1);
+    expect(meta(summary(state)[0])?.[META_REPLAY]).toBe(true);
+    expect(meta(summary(state)[0])?.[META_REPLAY_SUMMARY]).toMatchObject({turns:1,items:9,diagnostics:1,omittedDiagnostics:0,complete:true});
+    expect(JSON.stringify(summary(state))).not.toContain('DO_NOT_COPY_INTO_DIAGNOSTIC');
+    expect(state.updates.filter(u=>meta(u)?.[META_UNMAPPED_FRAME]!==undefined)).toHaveLength(0);
+  });
+
+  it('false skips both history RPC families, keeps resume and accepts the next live turn',async()=>{
+    const state=setup({resumeSessionId:'thread-captured',replayHistory:false});
+    state.driver.start();state.transport.turnsListError={code:-32600,message:'history RPC must not be called'};
+    await state.driver.ready;
+    expect(state.transport.sent.some(f=>f.method==='thread/resume')).toBe(true);
+    expect(state.transport.sent.some(f=>f.method==='thread/turns/list'||f.method==='thread/items/list')).toBe(false);
+    expect(state.updates.some(u=>meta(u)?.[META_REPLAY])).toBe(false);
+    expect(summary(state)).toHaveLength(0);expect(state.driver.cliSessionId).toBe('thread-captured');
+    state.driver.prompt('new live turn');await settle();
+    expect(state.transport.sent.filter(f=>f.method==='turn/start')).toHaveLength(1);
+    state.transport.frame({jsonrpc:'2.0',method:'item/agentMessage/delta',params:{threadId:'thread-captured',itemId:'new-live',delta:'fresh'}});
+    const live=state.updates.find(u=>(u.content as {text?:string}|undefined)?.text==='fresh');
+    expect(live).toBeDefined();expect(meta(live!)?.[META_REPLAY]).toBeUndefined();
+  });
+
+  it('bounds thousands of historical diagnostics to one summary with conserved counts',async()=>{
+    const history=Array.from({length:3000},(_,i)=>({type:'future-'+String(i%80),id:'future-'+String(i),privatePayload:'DIAGNOSTIC_PRIVATE_PAYLOAD'}));
+    const state=setup({resumeSessionId:'thread-captured'},{},history,true);state.driver.start();await state.driver.ready;
+    expect(summary(state)).toHaveLength(1);
+    const stats=meta(summary(state)[0])![META_REPLAY_SUMMARY];
+    expect(stats.items).toBe(3000);expect(stats.diagnostics).toBe(3000);expect(stats.reasons.length).toBeLessThanOrEqual(32);
+    expect(stats.reasons.reduce((sum:number,v:{count:number})=>sum+v.count,0)+stats.omittedDiagnostics).toBe(3000);
+    expect(JSON.stringify(summary(state)).length).toBeLessThan(20000);
+    expect(JSON.stringify(state.updates)).not.toContain('DIAGNOSTIC_PRIVATE_PAYLOAD');
+    expect(state.updates.filter(u=>meta(u)?.[META_UNMAPPED_FRAME]!==undefined)).toHaveLength(0);
+  });
+
+  it('live chunks and notices interleaved with an awaited history page stay live',async()=>{
+    const state=setup({resumeSessionId:'thread-captured'},{},[{type:'future-history',id:'old'}],true);
+    state.driver.start();state.transport.holdHistory=true;await settle();
+    expect(state.transport.heldHistory.length).toBeGreaterThan(0);
+    state.transport.frame({jsonrpc:'2.0',method:'item/agentMessage/delta',params:{threadId:'thread-captured',itemId:'live-now',delta:'live while waiting'}});
+    state.transport.frame({jsonrpc:'2.0',method:'item/completed',params:{threadId:'thread-captured',item:{type:'future-live',id:'live-unknown'}}});
+    const live=state.updates.find(u=>(u.content as {text?:string}|undefined)?.text==='live while waiting');
+    const liveDiagnostic=state.updates.find(u=>meta(u)?.[META_UNMAPPED_FRAME]!==undefined);
+    expect(live).toBeDefined();expect(liveDiagnostic).toBeDefined();
+    expect(meta(live!)?.[META_REPLAY]).toBeUndefined();expect(meta(liveDiagnostic!)?.[META_REPLAY]).toBeUndefined();
+    state.transport.releaseHistory();await state.driver.ready;
+    expect(meta(summary(state)[0])?.[META_REPLAY_SUMMARY]).toMatchObject({diagnostics:1});
+    expect(JSON.stringify(summary(state))).not.toContain('future-live');
+  });
+
+  it('sanitizes and caps provider-controlled diagnostic reason strings',async()=>{
+    const state=setup({resumeSessionId:'thread-captured'},{},[{type:'\u001b[31m'+('x'.repeat(1000))+'\n',id:'unknown'}],true);
+    state.driver.start();await state.driver.ready;
+    const stats=meta(summary(state)[0])![META_REPLAY_SUMMARY];
+    expect(stats.diagnostics).toBe(1);expect(stats.reasons).toHaveLength(1);
+    expect(stats.reasons[0].reason.length).toBeLessThanOrEqual(200);
+    expect(stats.reasons[0].reason).not.toContain('\u001b');
+  });
+
+  for(const fault of ['items-data','turns-data','cursor-repeat','cursor-type'])it(`reports an incomplete replay once on ${fault}`,async()=>{
+    const state=setup({resumeSessionId:'thread-captured'},{},[],true);state.driver.start();
+    if(fault==='items-data')state.transport.itemsListOverride={data:null,nextCursor:null};
+    if(fault==='turns-data')state.transport.turnsListOverride={data:null,nextCursor:null};
+    if(fault==='cursor-repeat')state.transport.turnsListOverride={data:[{id:'turn-history'}],nextCursor:'repeat'};
+    if(fault==='cursor-type')state.transport.turnsListOverride={data:[{id:'turn-history'}],nextCursor:42};
+    await state.driver.ready;
+    expect(summary(state)).toHaveLength(1);expect(meta(summary(state)[0])?.[META_REPLAY]).toBe(true);
+    expect(meta(summary(state)[0])?.[META_REPLAY_SUMMARY]).toMatchObject({complete:false,diagnostics:1});
+    expect(state.updates.filter(u=>meta(u)?.[META_UNMAPPED_FRAME]!==undefined)).toHaveLength(0);
+  });
+
+  it('an RPC refusal emits one marked partial summary and preserves startup failure',async()=>{
+    const errors:string[]=[];const state=setup({resumeSessionId:'thread-captured'},{onProtocolError:e=>errors.push(e)});
+    state.driver.start();state.transport.turnsListError={code:-32000,message:'fixture history refused'};await state.driver.ready;
+    expect(errors.join(' ')).toMatch(/startup failed/);expect(state.transport.closes).toBeGreaterThan(0);
+    expect(summary(state)).toHaveLength(1);expect(meta(summary(state)[0])?.[META_REPLAY_SUMMARY]).toMatchObject({complete:false});
+  });
+
+  it('new sessions have no replay summary and invalid option values refuse',async()=>{
+    const state=setup({replayHistory:false});state.driver.start();await state.driver.ready;
+    expect(summary(state)).toHaveLength(0);expect(state.transport.sent.some(f=>f.method==='thread/start')).toBe(true);
+    expect(()=>setup({replayHistory:'false' as never})).toThrow(/replayHistory.*boolean/);
+  });
+});
 
 async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 8; index += 1) await Promise.resolve();
@@ -860,6 +982,7 @@ describe('CodexDriver', () => {
     expect(userMessages[0]).toEqual({
       sessionUpdate: 'user_message_chunk',
       content: { type: 'text', text: 'remembered client prompt' },
+      _meta: { [META_REPLAY]: true },
     });
   });
 

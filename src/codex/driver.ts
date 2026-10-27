@@ -19,6 +19,8 @@ import {
   META_EXEC_POLICY_AMENDMENT,
   META_MCP_SERVERS,
   META_RATE_LIMIT,
+  META_REPLAY,
+  META_REPLAY_SUMMARY,
   META_UNMAPPED_FRAME,
   META_USAGE,
   withMeta,
@@ -59,6 +61,8 @@ export interface CodexDriverOptions {
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   readonly allowEnv?: readonly string[];
   readonly resumeSessionId?: string;
+  /** Project saved history into ACP on resume (default true). False keeps native context and skips history-list RPCs. */
+  readonly replayHistory?: boolean;
   readonly mcpServers?: readonly McpServer[];
   /** Disable inherited user/project mcp_servers entries by name for this run; other entries stay available. */
   readonly disabledMcpServers?: readonly string[];
@@ -123,6 +127,15 @@ interface PendingApproval {
   readonly resolved: () => void;
 }
 
+interface ReplayState {
+  turns: number;
+  items: number;
+  diagnostics: number;
+  reasons: Map<string, number>;
+  omittedDiagnostics: number;
+  incomplete: boolean;
+}
+
 const DEFAULT_TRANSPORT_FACTORY: CodexTransportFactory = (options, handlers) =>
   new StdioCodexTransport(options, handlers);
 
@@ -134,6 +147,7 @@ const APPROVAL_METHODS = new Set([
   'execCommandApproval',
 ]);
 const MAX_HISTORY_PAGES = 10_000;
+const MAX_REPLAY_DIAGNOSTIC_REASONS = 32;
 const DEFAULT_TURN_INACTIVITY_TIMEOUT_MS = 600_000;
 const MAX_COMMAND_OUTPUT_CHARS = 1_000_000;
 const COMMAND_OUTPUT_INTERVAL_MS = 200;
@@ -256,6 +270,7 @@ export class CodexDriver implements AgentDriver {
         throw new CodexNativeToolsRefused("resume is not supported with nativeTools:'none': a resumed thread can restore native tools the restriction removes");
       }
     }
+    if (options.replayHistory !== undefined && typeof options.replayHistory !== 'boolean') throw new Error('replayHistory must be a boolean');
     if (options.approvalPolicy !== undefined && !['untrusted', 'on-request', 'never'].includes(options.approvalPolicy)) {
       throw new Error('approvalPolicy must be one of: untrusted, on-request, never');
     }
@@ -579,7 +594,7 @@ export class CodexDriver implements AgentDriver {
       }
       this.#setThreadId(id);
       this.#reportModel(asString(asObject(result)?.model));
-      await this.#replayHistory();
+      if (this.#options.replayHistory !== false) await this.#replayHistory();
     }
 
     await this.#readInitialRateLimit();
@@ -658,92 +673,100 @@ export class CodexDriver implements AgentDriver {
   async #replayHistory(): Promise<void> {
     const threadId = this.#threadId;
     if (threadId === null) return;
-    let cursor: string | undefined;
-    const seenCursors = new Set<string>();
-    do {
-      if (seenCursors.size >= MAX_HISTORY_PAGES) {
-        this.#recordUnmapped('thread/turns/list exceeded the 10000-page safety limit', { method: 'thread/turns/list' });
-        return;
-      }
-      const response = asObject(
-        await this.#requirePeer().request('thread/turns/list', {
-          threadId,
-          sortDirection: 'asc',
-          // TurnItemsView in codex-cli 0.163.0's schema is 'notLoaded' | 'summary' | 'full'. 'none' is refused with
-          // -32600 (measured live), which killed every graceful restart (thread/resume) of a Codex agent. 'notLoaded' asks for the
-          // turns only: each turn's items are fetched with thread/items/list below.
-          itemsView: 'notLoaded',
-          limit: 100,
-          ...(cursor === undefined ? {} : { cursor }),
-        }),
-      );
-      if (!Array.isArray(response?.data)) {
-        this.#recordUnmapped('thread/turns/list response omitted data array', response);
-        return;
-      }
-      const turns = response.data;
-      for (const entry of turns) {
-        const turn = asObject(entry);
-        const turnId = asString(turn?.id);
-        if (turnId === undefined) {
-          this.#recordUnmapped('thread/turns/list entry omitted id', entry);
-          continue;
+    const replay: ReplayState = { turns: 0, items: 0, diagnostics: 0, reasons: new Map(), omittedDiagnostics: 0, incomplete: false };
+    let complete = false;
+    try {
+      let cursor: string | undefined;
+      const seenCursors = new Set<string>();
+      do {
+        if (seenCursors.size >= MAX_HISTORY_PAGES) {
+          this.#recordUnmapped('thread/turns/list exceeded the 10000-page safety limit', { method: 'thread/turns/list' }, replay);
+          return;
         }
-        await this.#replayTurnItems(turnId);
-      }
-      cursor = this.#nextCursor(response, 'thread/turns/list', seenCursors);
-    } while (cursor !== undefined);
+        const response = asObject(await this.#requirePeer().request('thread/turns/list', {
+          threadId, sortDirection: 'asc',
+          // Native0.163.0: 'notLoaded' requests only turns; fetch items separately below. 'none' is refused.
+          itemsView: 'notLoaded', limit: 100,
+          ...(cursor === undefined ? {} : { cursor }),
+        }));
+        if (!Array.isArray(response?.data)) {
+          this.#recordUnmapped('thread/turns/list response omitted data array', response, replay);
+          return;
+        }
+        for (const entry of response.data) {
+          const turnId = asString(asObject(entry)?.id);
+          if (turnId === undefined) {
+            this.#recordUnmapped('thread/turns/list entry omitted id', entry, replay);
+            continue;
+          }
+          replay.turns++;
+          await this.#replayTurnItems(turnId, replay);
+        }
+        cursor = this.#nextCursor(response, 'thread/turns/list', seenCursors, replay);
+      } while (cursor !== undefined);
+      complete = true;
+    } finally {
+      complete = complete && !replay.incomplete;
+      this.#emit(withMeta({
+        sessionUpdate: 'notice',
+        notice: { level: 'debug', message: complete ? 'Codex history replay finished' : 'Codex history replay stopped' },
+      }, {
+        [META_REPLAY]: true,
+        [META_REPLAY_SUMMARY]: {
+          turns: replay.turns, items: replay.items, diagnostics: replay.diagnostics,
+          reasons: [...replay.reasons].map(([reason, count]) => ({ reason, count })),
+          omittedDiagnostics: replay.omittedDiagnostics, complete,
+        },
+      }));
+    }
   }
 
-  async #replayTurnItems(turnId: string): Promise<void> {
+  async #replayTurnItems(turnId: string, replay: ReplayState): Promise<void> {
     const threadId = this.#threadId;
     if (threadId === null) return;
     let cursor: string | undefined;
     const seenCursors = new Set<string>();
     do {
       if (seenCursors.size >= MAX_HISTORY_PAGES) {
-        this.#recordUnmapped('thread/items/list exceeded the 10000-page safety limit', {
-          method: 'thread/items/list',
-        });
+        replay.incomplete = true;
+        this.#recordUnmapped('thread/items/list exceeded the 10000-page safety limit', { method: 'thread/items/list' }, replay);
         return;
       }
-      const response = asObject(
-        await this.#requirePeer().request('thread/items/list', {
-          threadId,
-          turnId,
-          sortDirection: 'asc',
-          limit: 100,
-          ...(cursor === undefined ? {} : { cursor }),
-        }),
-      );
+      const response = asObject(await this.#requirePeer().request('thread/items/list', {
+        threadId, turnId, sortDirection: 'asc', limit: 100,
+        ...(cursor === undefined ? {} : { cursor }),
+      }));
       if (!Array.isArray(response?.data)) {
-        this.#recordUnmapped('thread/items/list response omitted data array', response);
+        replay.incomplete = true;
+        this.#recordUnmapped('thread/items/list response omitted data array', response, replay);
         return;
       }
-      const entries = response.data;
-      for (const entry of entries) {
+      for (const entry of response.data) {
+        replay.items++;
         const object = asObject(entry);
         if (object === undefined) {
-          this.#recordUnmapped('thread/items/list entry was not an object', entry);
+          this.#recordUnmapped('thread/items/list entry was not an object', entry, replay);
           continue;
         }
-        this.#mapItem(asObject(object.item) ?? object, true);
+        this.#mapItem(asObject(object.item) ?? object, replay);
       }
-      cursor = this.#nextCursor(response, 'thread/items/list', seenCursors);
+      cursor = this.#nextCursor(response, 'thread/items/list', seenCursors, replay);
     } while (cursor !== undefined);
   }
 
-  #nextCursor(response: Record<string, unknown> | undefined, method: string, seen: Set<string>): string | undefined {
+  #nextCursor(response: Record<string, unknown> | undefined, method: string, seen: Set<string>, replay: ReplayState): string | undefined {
     if (response?.nextCursor === undefined || response.nextCursor === null) return undefined;
     if (typeof response.nextCursor === 'string' && response.nextCursor.length > 0) {
       if (seen.has(response.nextCursor)) {
-        this.#recordUnmapped(`${method} repeated a page cursor`, { method });
+        replay.incomplete = true;
+        this.#recordUnmapped(`${method} repeated a page cursor`, { method }, replay);
         return undefined;
       }
       seen.add(response.nextCursor);
       return response.nextCursor;
     }
-    this.#recordUnmapped(`${method} nextCursor expected a non-empty string or null`, response);
+    replay.incomplete = true;
+    this.#recordUnmapped(`${method} nextCursor expected a non-empty string or null`, response, replay);
     return undefined;
   }
 
@@ -973,7 +996,7 @@ export class CodexDriver implements AgentDriver {
       }
       case 'item/started':
       case 'item/completed':
-        this.#mapItem(asObject(object.item) ?? {}, false, method === 'item/completed');
+        this.#mapItem(asObject(object.item) ?? {}, undefined, method === 'item/completed');
         return;
       case 'item/agentMessage/delta':
         {
@@ -1050,7 +1073,11 @@ export class CodexDriver implements AgentDriver {
     }
   }
 
-  #mapItem(item: Record<string, unknown>, replay: boolean, completed = false): void {
+  #mapItem(item: Record<string, unknown>, replayState?: ReplayState, completed = false): void {
+    const replay = replayState !== undefined;
+    // This context is explicit/synchronous; live notifications during awaited history reads keep their own provenance.
+    const emit = (update: AcpUpdate) => this.#emit(replay ? withMeta(update, { [META_REPLAY]: true }) : update);
+    const diagnostic = (reason: string, frame: unknown) => this.#recordUnmapped(reason, frame, replayState);
     const type = asString(item.type) ?? 'unknown';
     const id = asString(item.id) ?? asString(item.itemId) ?? `codex-${type}-${++this.#itemSequence}`;
     const finished = completed || replay;
@@ -1066,28 +1093,28 @@ export class CodexDriver implements AgentDriver {
     }
     // Message and reasoning items have no status field in ThreadItem; lifecycle comes from item/completed.
     if (finished && item.status !== undefined && !['completed', 'failed', 'declined', 'canceled', 'cancelled', 'exited', 'interrupted'].includes(asString(item.status) ?? '')) {
-      this.#recordUnmapped('completed Codex item had an unknown status', item);
+      diagnostic('completed Codex item had an unknown status', item);
     }
     if (type === 'userMessage') {
       if (replay || completed) {
         const text = textFromContent(item.content);
-        if (text.length > 0) this.#emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text } });
-        else this.#recordUnmapped('Codex userMessage had no text content', item);
+        if (text.length > 0) emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text } });
+        else diagnostic('Codex userMessage had no text content', item);
       }
       return;
     }
     if (type === 'agentMessage') {
       if (replay) {
         const text = asString(item.text) ?? '';
-        if (text.length > 0) this.#emit({ sessionUpdate: 'agent_message_chunk', messageId: id, content: { type: 'text', text } });
-        else this.#recordUnmapped('replayed agentMessage had no text', item);
+        if (text.length > 0) emit({ sessionUpdate: 'agent_message_chunk', messageId: id, content: { type: 'text', text } });
+        else diagnostic('replayed agentMessage had no text', item);
       } else if (completed) {
         const hadDeltas = this.#messageDeltas.delete(id);
         const text = asString(item.text) ?? '';
         if (!hadDeltas && text.length > 0) {
-          this.#emit({ sessionUpdate: 'agent_message_chunk', messageId: id, content: { type: 'text', text } });
+          emit({ sessionUpdate: 'agent_message_chunk', messageId: id, content: { type: 'text', text } });
         } else if (!hadDeltas) {
-          this.#recordUnmapped('completed agentMessage had no text or deltas', item);
+          diagnostic('completed agentMessage had no text or deltas', item);
         }
       }
       return;
@@ -1096,14 +1123,14 @@ export class CodexDriver implements AgentDriver {
       const summaryText = Array.isArray(item.summary) ? item.summary.map(textFromContent).join('') : '';
       const summary = summaryText || (Array.isArray(item.content) ? item.content.map(textFromContent).join('') : '');
       if (replay) {
-        if (summary.length > 0) this.#emit({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: summary } });
-        else this.#recordUnmapped('replayed reasoning item had no summary', item);
+        if (summary.length > 0) emit({ sessionUpdate: 'agent_thought_chunk', messageId: id, content: { type: 'text', text: summary } });
+        else diagnostic('replayed reasoning item had no summary', item);
       } else if (completed) {
         const hadDeltas = this.#reasoningDeltas.delete(id);
         if (!hadDeltas && summary.length > 0) {
-          this.#emit({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: summary } });
+          emit({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: summary } });
         } else if (!hadDeltas) {
-          this.#recordUnmapped('completed reasoning item had no summary or deltas', item);
+          diagnostic('completed reasoning item had no summary or deltas', item);
         }
       }
       return;
@@ -1113,7 +1140,7 @@ export class CodexDriver implements AgentDriver {
       const command = asString(item.command) ?? '';
       const output = asString(item.aggregatedOutput) ?? (!replay ? this.#commandOutputs.get(id)?.text : undefined);
       if (finished && !replay) this.#clearCommandOutput(id);
-      this.#emit({
+      emit({
         sessionUpdate: toolUpdate,
         toolCallId: id,
         title: command.length === 0 ? 'Run command' : stripAnsiControlSequences(command).text,
@@ -1133,8 +1160,8 @@ export class CodexDriver implements AgentDriver {
     if (type === 'fileChange' || type === 'patchApply') {
       if (!finished) this.#items.set(id, item);
       const changes = item.changes ?? item.fileChanges ?? item.patch;
-      if (changes === undefined) this.#recordUnmapped('Codex file-change item omitted changes', item);
-      this.#emit({
+      if (changes === undefined) diagnostic('Codex file-change item omitted changes', item);
+      emit({
         sessionUpdate: toolUpdate,
         toolCallId: id,
         title: 'Apply file changes',
@@ -1164,7 +1191,7 @@ export class CodexDriver implements AgentDriver {
       }) : [];
       const errorMessage = asString(asObject(item.error)?.message);
       if (errorMessage !== undefined) text.push(...textToolContent(errorMessage));
-      this.#emit({
+      emit({
         sessionUpdate: toolUpdate,
         toolCallId: id,
         title: stripAnsiControlSequences(asString(item.tool) ?? asString(item.name) ?? 'Tool call').text,
@@ -1177,14 +1204,14 @@ export class CodexDriver implements AgentDriver {
     }
 
     if (type === 'contextCompaction') {
-      this.#emit({ sessionUpdate: 'compaction_update', status: finished ? 'completed' : 'in_progress' });
+      emit({ sessionUpdate: 'compaction_update', ...(replay ? { itemId: id } : {}), status: finished ? 'completed' : 'in_progress' });
       return;
     }
 
     // Deliberately record both lifecycle points: their payloads differ,
     // because completion adds status and exitCode; unknown types need both.
     // This is useful evidence precisely because the item type is unknown.
-    this.#recordUnmapped(`unmapped Codex item: ${type}`, item);
+    diagnostic(`unmapped Codex item: ${type}`, item);
   }
 
   async #handleApproval(id: string | number, method: string, value: unknown): Promise<void> {
@@ -1546,7 +1573,16 @@ export class CodexDriver implements AgentDriver {
     this.#emit(withMeta({ sessionUpdate: 'notice', notice: { level: 'debug', message: 'model' } }, { [META_MODEL]: model }));
   }
 
-  #recordUnmapped(reason: string, frame: unknown): void {
+  #recordUnmapped(reason: string, frame: unknown, replay?: ReplayState): void {
+    if (replay !== undefined) {
+      replay.diagnostics++;
+      // Keep summary size independent of history length and never copy historical payloads into diagnostic metadata.
+      const key = stripAnsiControlSequences(reason).text.slice(0, 200);
+      const count = replay.reasons.get(key);
+      if (count !== undefined || replay.reasons.size < MAX_REPLAY_DIAGNOSTIC_REASONS) replay.reasons.set(key, (count ?? 0) + 1);
+      else replay.omittedDiagnostics++;
+      return;
+    }
     const safeFrame = stripPrivateIdentifiers(frame);
     this.#emit(
       withMeta(

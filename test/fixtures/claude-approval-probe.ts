@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { ClaudeDriver } from '../../src/claude/driver.js';
 
 type Row = Record<string, any>;
-export type ApprovalScenario = 'allow' | 'deny' | 'cancel' | 'callback-crash' | 'channel-hang' | 'runtime-empty' | 'runtime-crash' | 'runtime-hang' | 'runtime-invalid' | 'worker-empty' | 'worker-crash' | 'worker-extra' | 'worker-invalid' | 'worker-signal';
+export type ApprovalScenario = 'allow' | 'deny' | 'cancel' | 'callback-crash' | 'channel-hang' | 'runtime-empty' | 'runtime-crash' | 'runtime-hang' | 'runtime-invalid' | 'runtime-allow-zero' | 'runtime-allow-two' | 'worker-empty' | 'worker-crash' | 'worker-extra' | 'worker-invalid' | 'worker-signal';
 export const ALLOW_REASON = "Allowed é ' & % $ ` \\ by owned probe";
 export const DENY_REASON = 'The application refused: fixture shell limit é.';
 export type ApprovalMutation = 'drop-wrapper' | 'allow-silent-zero' | 'leak-electron';
@@ -26,7 +26,7 @@ function cleanParent(root: string): Record<string, string> {
 }
 
 /** Native CLI is pinned; every request is answered locally. No real login, API key, account or model call. */
-export async function probeClaudeApproval(options: { binary: string; electron: string; silentZeroAdapter?: string; parentProbe?: string; scenario: ApprovalScenario; mutation?: ApprovalMutation; nodeOverride?: boolean; captureLauncher?: boolean; legacyShell?: boolean; versionFault?: 'missing' | 'old' | 'malformed' | 'error' | 'timeout' | 'init-missing' | 'init-changed' }) {
+export async function probeClaudeApproval(options: { binary: string; electron: string; silentZeroAdapter?: string; parentProbe?: string; scenario: ApprovalScenario; mutation?: ApprovalMutation; nodeOverride?: boolean; captureLauncher?: boolean; legacyShell?: boolean; directHookExit?: 0|2; directHookStderr?: boolean; directHookOnFailure?: 'block'|'continue'; versionFault?: 'missing' | 'old' | 'malformed' | 'error' | 'timeout' | 'init-missing' | 'init-changed' }) {
   assert.match(execFileSync(options.binary, ['--version'], { encoding:'utf8', windowsHide:true }).trim(), /^2\.1\.310 \(Claude Code\)$/);
   const root = mkdtempSync(join(tmpdir(), 'prism-native-approval-'));
   const home = join(root, 'home'); mkdirSync(home);

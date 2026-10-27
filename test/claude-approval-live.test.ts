@@ -40,7 +40,7 @@ describe.runIf(process.env.PRISM_ACP_CLAUDE_APPROVAL === '1')('native Claude2.1.
     console.info(JSON.stringify({nativeApprovalLegacyShell:r.launcher}).replace(/[^\x20-\x7e]/g,c=>'\\u'+c.charCodeAt(0).toString(16).padStart(4,'0')));
   },60000);
 
-  for(const scenario of ['deny','cancel','callback-crash','channel-hang','runtime-empty','runtime-crash','runtime-hang','runtime-invalid','worker-empty','worker-crash','worker-extra','worker-invalid','worker-signal'] satisfies ApprovalScenario[]) {
+  for(const scenario of ['deny','cancel','callback-crash','channel-hang','runtime-empty','runtime-crash','runtime-hang','runtime-invalid','runtime-allow-zero','runtime-allow-two','worker-empty','worker-crash','worker-extra','worker-invalid','worker-signal'] satisfies ApprovalScenario[]) {
     it(`${scenario}: no Bash command runs`,async()=>{
       const r=await probeClaudeApproval({binary,electron,scenario});
       assertApprovalResult(r,false);
@@ -50,6 +50,20 @@ describe.runIf(process.env.PRISM_ACP_CLAUDE_APPROVAL === '1')('native Claude2.1.
       console.info(JSON.stringify({nativeApproval:scenario,executed:r.executed,asked:r.asked,requests:r.requests}));
     },60000);
   }
+
+  for(const control of [{stderr:true,onFailure:'block'},{stderr:false,onFailure:'block'},{stderr:false,onFailure:'continue'}] as const){
+    it(`G139 precedence: direct allow JSON + exit2 denies (stderr=${control.stderr},onFailure=${control.onFailure})`,async()=>{
+      const r=await probeClaudeApproval({binary,electron,scenario:'allow',directHookExit:2,directHookStderr:control.stderr,directHookOnFailure:control.onFailure});
+      assertApprovalResult(r,false);expect(r.asked).toBe(0);
+      if(control.stderr)expect(JSON.stringify(r.toolResults)).toContain('OWN_DIRECT_BLOCK');
+      console.info(JSON.stringify({allowStdoutExitTwo:{direct:true,stderr:control.stderr,onFailure:control.onFailure,executed:r.executed,toolError:r.toolResults.some((v:Record<string,unknown>)=>v.is_error===true)}}));
+    },60000);
+  }
+  it('G139 precedence CONTROL: the same direct allow JSON + exit0 runs the tool',async()=>{
+    const r=await probeClaudeApproval({binary,electron,scenario:'allow',directHookExit:0});
+    expect(r.nativeCode).toBe(0);expect(r.requests).toBe(2);expect(r.executed).toBe(true);expect(r.asked).toBe(0);
+    console.info(JSON.stringify({allowStdoutExitZeroControl:true,executed:r.executed}));
+  },60000);
 
   for(const mutation of ['drop-wrapper','allow-silent-zero','leak-electron'] as const){
     it(`MUTATION CONTROL: ${mutation} makes the same safety oracle fail`,async()=>{
