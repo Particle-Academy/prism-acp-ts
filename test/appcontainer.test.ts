@@ -24,6 +24,11 @@ describe.runIf(process.platform === 'win32' && process.env.PRISM_ACP_APPCONTAINE
     cpSync(resolve(here, '../dist'), join(root, 'program', 'dist'), { recursive: true });
     copyFileSync(join(here, 'fixtures', 'appcontainer-worker.mjs'), join(root, 'program', 'worker.mjs'));
     copyFileSync(join(here, 'fixtures', 'appcontainer-target.mjs'), join(root, 'program', 'target.mjs'));
+    if (process.env.PRISM_ACP_CLAUDE_RESTRICTED === '1') {
+      if (!process.env.PRISM_ACP_CLAUDE_BINARY) throw new Error('Set PRISM_ACP_CLAUDE_BINARY to native Claude2.1.311');
+      copyFileSync(process.env.PRISM_ACP_CLAUDE_BINARY, join(root, 'program', 'claude.exe'));
+      for (const file of ['claude-restricted-loopback.mjs', 'claude-restricted-mcp.mjs']) copyFileSync(join(here, 'fixtures', file), join(root, 'program', file));
+    }
     executable = join(root, 'program', 'fixture-host.exe');
     const csc = join(process.env.SystemRoot!, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
     await exec(csc, ['-nologo', '-optimize+', '-target:exe', `-out:${executable}`, join(here, 'fixtures', 'appcontainer-host.cs')], { windowsHide: true, timeout: 20_000 });
@@ -54,10 +59,10 @@ describe.runIf(process.platform === 'win32' && process.env.PRISM_ACP_APPCONTAINE
     }
   });
 
-  async function probe(mode: string) {
+  async function probe(mode: string, timeout = 5000) {
     for (const file of ['tree-pids', 'proof-pids', 'proof-ack']) rmSync(join(root, 'workspace', file), { force: true });
-    const result = await exec(executable, [root, join(root, 'program', 'node.exe'), join(root, 'program', 'worker.mjs'), mode, join(foreign, 'owned-secret'), '5000'], {
-      timeout: 15_000, maxBuffer: 128_000, windowsHide: true,
+    const result = await exec(executable, [root, join(root, 'program', 'node.exe'), join(root, 'program', 'worker.mjs'), mode, join(foreign, 'owned-secret'), String(timeout)], {
+      timeout: timeout + 10_000, maxBuffer: 128_000, windowsHide: true,
     });
     const lines = result.stdout.split(/\r?\n/).filter((line) => line.startsWith('{')).map((line) => JSON.parse(line));
     expect(lines.find((line) => line.fixture === 'identity')?.appContainer).toBe(true);
@@ -75,6 +80,30 @@ describe.runIf(process.platform === 'win32' && process.env.PRISM_ACP_APPCONTAINE
     expect(lines.filter((line) => line.stage === 'native_pipe' && !line.local).map((line) => line.error)).toEqual([5, 5, 5]);
     expect(lines.filter((line) => line.stage === 'native_pipe' && line.local).map((line) => line.error)).toEqual([0, 0, 0]);
     expect(final, JSON.stringify(lines)).toMatchObject({ timedOut: false, workerExit: 0 });
+  }, 20_000);
+
+  it.runIf(process.env.PRISM_ACP_CLAUDE_RESTRICTED === '1')('starts native Claude2.1.311 with supplied stdio MCP inside the unchanged zero-capability container', async () => {
+    const { lines, final } = await probe('claude-native-mcp', 15_000);
+    expect(final, JSON.stringify(lines)).toMatchObject({ timedOut: false, workerExit: 0, remainingBeforeCleanup: 0, descendantsVerified: 3 });
+    expect(lines.find(line => line.stage === 'native_mcp_reports')?.reports).toEqual([{ name: 'owned', status: 'connected', toolCount: 1 }]);
+    expect(lines.find(line => line.stage === 'native_mcp_protocol')?.methods).toEqual(expect.arrayContaining(['initialize', 'tools/list']));
+    expect(lines.find(line => line.stage === 'stop')?.verdict).toMatchObject({ verified: true, empty: true, survivors: 0 });
+  }, 30_000);
+
+  it('protects generated configuration with only the user and actual container SID, without shell-outs', async () => {
+    const { lines, final } = await probe('private-config');
+    expect(final, JSON.stringify(lines)).toMatchObject({ timedOut: false, workerExit: 0, remainingBeforeCleanup: 0 });
+    expect(lines.find(line => line.stage === 'private_config_created')).toBeDefined();
+    expect(lines.find(line => line.fixture === 'private_acl')).toMatchObject({ protected: true, principals: 2 });
+    expect(lines.find(line => line.fixture === 'private_file_acl')).toMatchObject({ inherited: true, principals: 2 });
+    expect(lines.find(line => line.fixture === 'private_foreign_access')).toMatchObject({ readableControl: true, privateDenied: true });
+    expect(lines.find(line => line.fixture === 'private_foreign_identity')).toMatchObject({ appContainer: true });
+  }, 20_000);
+
+  it('diagnoses a native private operation under inherited fixture stdio', async () => {
+    const { lines, final } = await probe('private-probe');
+    expect(final, JSON.stringify(lines)).toMatchObject({ timedOut: false, workerExit: 0, remainingBeforeCleanup: 0 });
+    expect(lines.find(line => line.stage === 'native_private_diagnostic')).toMatchObject({ status: 0 });
   }, 20_000);
 
   it.each(['inherit', 'ignore'])('measures %s stdio without global-pipe creation', async mode => {

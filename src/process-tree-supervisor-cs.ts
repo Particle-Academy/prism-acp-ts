@@ -118,6 +118,10 @@ static class Supervisor
     static extern bool DuplicateHandle(IntPtr sourceProcess, IntPtr source, IntPtr targetProcess, out IntPtr target, uint access, bool inherit, uint options);
     [DllImport("advapi32.dll", SetLastError = true)]
     static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr data, int length, out int returned);
+    [StructLayout(LayoutKind.Sequential)]
+    struct PrivateDirectoryAttributes { public uint length; public IntPtr descriptor; public int inherit; }
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateDirectoryW(string path, ref PrivateDirectoryAttributes attributes);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -325,8 +329,79 @@ static class Supervisor
         return 2;
     }
 
+    // Create with a protected DACL from birth. An assigned parent may grant
+    // Modify without WRITE_DAC: never widen it just to retrofit a child's ACL.
+    // No global pipes, NUL or shell-outs; never print paths or diagnostics.
+    static int CreatePrivateDirectory(string path)
+    {
+        int phase = 0;
+        bool created = false;
+        try
+        {
+            if (!Path.IsPathRooted(path)) return 126;
+            var directory = new DirectoryInfo(path);
+            if (directory.Exists || File.Exists(path)) return 126;
+            phase = 1;
+            using (var identity = WindowsIdentity.GetCurrent())
+            {
+                var principals = new HashSet<string>();
+                principals.Add(identity.User.Value);
+                int length;
+                GetTokenInformation(identity.Token, 31, IntPtr.Zero, 0, out length);
+                if (length <= 0) return 126;
+                IntPtr data = Marshal.AllocHGlobal(length);
+                try
+                {
+                    if (!GetTokenInformation(identity.Token, 31, data, length, out length)) return 126;
+                    IntPtr sid = Marshal.ReadIntPtr(data);
+                    if (sid != IntPtr.Zero) principals.Add(new SecurityIdentifier(sid).Value);
+                }
+                finally { Marshal.FreeHGlobal(data); }
+                phase = 2;
+                var security = new DirectorySecurity();
+                security.SetOwner(identity.User);
+                security.SetAccessRuleProtection(true, false);
+                foreach (string principal in principals)
+                    security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(principal), FileSystemRights.FullControl,
+                        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                phase = 3;
+                byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
+                IntPtr memory = Marshal.AllocHGlobal(descriptor.Length);
+                try
+                {
+                    Marshal.Copy(descriptor, 0, memory, descriptor.Length);
+                    var attributes = new PrivateDirectoryAttributes();
+                    attributes.length = (uint)Marshal.SizeOf(typeof(PrivateDirectoryAttributes));
+                    attributes.descriptor = memory;
+                    attributes.inherit = 0;
+                    if (!CreateDirectoryW(path, ref attributes)) return 133;
+                    created = true;
+                }
+                finally { Marshal.FreeHGlobal(memory); }
+                phase = 4;
+                var actual = directory.GetAccessControl();
+                if (!actual.AreAccessRulesProtected || !actual.GetOwner(typeof(SecurityIdentifier)).Equals(identity.User)) throw new IOException();
+                var seen = new HashSet<string>();
+                foreach (FileSystemAccessRule rule in actual.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+                {
+                    if (rule.IsInherited || rule.AccessControlType != AccessControlType.Allow || !principals.Contains(rule.IdentityReference.Value)
+                        || (rule.FileSystemRights & FileSystemRights.FullControl) != FileSystemRights.FullControl) throw new IOException();
+                    seen.Add(rule.IdentityReference.Value);
+                }
+                if (!seen.SetEquals(principals)) throw new IOException();
+            }
+            return 0;
+        }
+        catch
+        {
+            if (created) { try { Directory.Delete(path, false); } catch {} }
+            return 140 + phase;
+        }
+    }
+
     static int Main(string[] args)
     {
+        if (args.Length == 2 && args[0] == "--create-private-directory") return CreatePrivateDirectory(args[1]);
         if (args.Length > 0) return Approval(args);
         string channel = Environment.GetEnvironmentVariable("PRISM_ACP_TREE_CHANNEL");
         string token = Environment.GetEnvironmentVariable("PRISM_ACP_TREE_TOKEN");

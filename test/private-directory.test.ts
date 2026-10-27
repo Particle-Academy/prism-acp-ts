@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { restrictToCurrentUser } from '../src/private-directory.js';
-import { prepareProcessTree, windowsApprovalAdapter } from '../src/process-tree.js';
+import { prepareProcessTree, windowsApprovalAdapter, createWindowsPrivateDirectory } from '../src/process-tree.js';
 
 /*
  * A private directory is readable by the current user and NOBODY else, whatever grants it started with. Removing
@@ -52,6 +52,44 @@ describe.skipIf(process.platform !== 'win32')('restrictToCurrentUser', () => {
     restrictToCurrentUser(directory);
 
     expect(rules(directory)).toEqual(['protected=True', `${currentSid()}|False|Allow`]);
+  });
+
+  it('creates a private child using the quiet native path and independently reads back only this user', async () => {
+    await prepareProcessTree({ directory: join(directory, 'owned-supervisor') });
+    const child = join(directory, 'owned-created');
+    createWindowsPrivateDirectory(child);
+    expect(rules(child)).toEqual(['protected=True', `${currentSid()}|False|Allow`]);
+  });
+
+  it('refuses existing directories and files without changing their contents or grants', async () => {
+    await prepareProcessTree({ directory: join(directory, 'owned-supervisor') });
+    const existing = join(directory, 'owned-existing'); mkdirSync(existing);
+    const marker = join(existing, 'owned-marker'); writeFileSync(marker, 'owned');
+    const before = rules(existing);
+    expect(() => createWindowsPrivateDirectory(existing)).toThrow('failed to protect');
+    expect(rules(existing)).toEqual(before);
+    expect(readFileSync(marker, 'utf8')).toBe('owned');
+    expect(() => createWindowsPrivateDirectory(marker)).toThrow('failed to protect');
+    expect(readFileSync(marker, 'utf8')).toBe('owned');
+  });
+
+  it('refuses a planted junction without modifying its target', async () => {
+    await prepareProcessTree({ directory: join(directory, 'owned-supervisor') });
+    const target = join(directory, 'owned-target'); mkdirSync(target);
+    const marker = join(target, 'marker'); writeFileSync(marker, 'owned');
+    const junction = join(directory, 'owned-link'); symlinkSync(target, junction, 'junction');
+    try {
+      expect(() => createWindowsPrivateDirectory(junction)).toThrow('failed to protect');
+      expect(readFileSync(marker, 'utf8')).toBe('owned');
+    } finally { unlinkSync(junction); }
+  });
+
+  it('refuses relative paths and missing parents without creating partial directories', async () => {
+    await prepareProcessTree({ directory: join(directory, 'owned-supervisor') });
+    expect(() => createWindowsPrivateDirectory('owned-relative')).toThrow('must be absolute');
+    const absent = join(directory, 'absent');
+    expect(() => createWindowsPrivateDirectory(join(absent, 'child'))).toThrow('failed to protect');
+    expect(existsSync(absent)).toBe(false);
   });
 
   it('supervisor generations and their atomic pointer inherit only the private cache owner', async () => {

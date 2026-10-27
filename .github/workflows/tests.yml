@@ -150,6 +150,46 @@ jobs:
           PRISM_ACP_CLAUDE_APPROVAL: '1'
           PRISM_ACP_CLAUDE_BINARY: ${{ github.workspace }}/.claude-native-cli/node_modules/@anthropic-ai/claude-code-${{ matrix.platform }}/${{ matrix.binary }}
 
+  claude-restricted:
+    name: Claude app MCP only, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    needs: third-party
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            binary: claude
+          - os: windows-latest
+            platform: win32-x64
+            binary: claude.exe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # Exact native test executable; no install scripts, real login or model traffic.
+      - run: npm install --prefix .claude-restricted-cli --ignore-scripts --no-package-lock @anthropic-ai/claude-code-${{ matrix.platform }}@2.1.311
+      - name: Native restricted catalog and hostile tool calls
+        run: npx vitest run test/claude-restricted-native.test.ts
+        env:
+          PRISM_ACP_CLAUDE_RESTRICTED: '1'
+          PRISM_ACP_CLAUDE_BINARY: ${{ github.workspace }}/.claude-restricted-cli/node_modules/@anthropic-ai/claude-code-${{ matrix.platform }}/${{ matrix.binary }}
+      - name: Native startup and stdio MCP discovery in a zero-capability AppContainer
+        if: runner.os == 'Windows'
+        run: npx vitest run test/appcontainer.test.ts
+        env:
+          PRISM_ACP_APPCONTAINER: '1'
+          PRISM_ACP_CLAUDE_RESTRICTED: '1'
+          PRISM_ACP_CLAUDE_BINARY: ${{ github.workspace }}/.claude-restricted-cli/node_modules/@anthropic-ai/claude-code-${{ matrix.platform }}/${{ matrix.binary }}
+
   third-party:
     name: Third-party dependency allowlist
     runs-on: ubuntu-latest

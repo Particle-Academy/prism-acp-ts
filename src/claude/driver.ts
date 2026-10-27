@@ -30,7 +30,7 @@ export type { ProblemDetail } from '../acp/agent.js';
 import { ApprovalServer, approvalCliVersion, approvalHookScript, approvalSettings, permissionRequestFor } from './approvals.js';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
 import { ModelListError, claudeModelsOf, type SessionModelState } from '../models.js';
-import { ProcessTreeError, launchProvider, windowsApprovalAdapter, type ProcessTree, type ProcessTreeOptions, type ProviderIo, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
+import { ProcessTreeError, launchProvider, windowsApprovalAdapter, createWindowsPrivateDirectory, type ProcessTree, type ProcessTreeOptions, type ProviderIo, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
 import type { DriverCapabilities } from '../acp/agent.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
@@ -107,6 +107,11 @@ export interface ClaudeDriverOptions {
   readonly allowedTools?: readonly string[];
   readonly disallowedTools?: readonly string[];
   /**
+   * App MCP only on measured Claude2.1.311 fresh sessions: remove native execution/file/web tools and inherited
+   * settings/MCP. Trusted embedder policy, never a model argument. Requires private generated configuration.
+   */
+  readonly nativeTools?: 'none';
+  /**
    * How the CLI authenticates: the person's subscription login (the default), or an API key the app supplies, with
    * an app- or tenant-owned configuration home so the person's own login is never touched. See credentials.ts. App or
    * tenant configuration; never built from what an ACP client sends.
@@ -167,6 +172,7 @@ export interface ClaudeDriverEvents {
 // ClaudeDriver supplies a private, temporary config file. Custom spawners using
 // this helper must supply their own file path for non-empty mcpServers.
 export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string, settingsPath?: string): string[] {
+  const restricted = nativeToolsDisabled(options);
   const args = [
     '--print',
     '--output-format',
@@ -180,13 +186,14 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
   if (options.resumeSessionId !== undefined) args.push('--resume', options.resumeSessionId);
   if (options.permissionMode !== undefined) args.push('--permission-mode', options.permissionMode);
   if (options.model !== undefined) args.push('--model', assertModel(options.model));
+  if (restricted) args.push('--tools', '', '--strict-mcp-config', '--setting-sources', '', '--restricted');
   if (options.allowedTools !== undefined && options.allowedTools.length > 0) {
     args.push('--allowed-tools', options.allowedTools.join(','));
   }
   if (options.disallowedTools !== undefined && options.disallowedTools.length > 0) {
     args.push('--disallowed-tools', options.disallowedTools.join(','));
   }
-  if ((options.mcpServers?.length ?? 0) > 0 && mcpConfigPath === undefined) {
+  if (((options.mcpServers?.length ?? 0) > 0 || restricted) && mcpConfigPath === undefined) {
     throw new Error('claudeArgs requires an MCP config file path when mcpServers is non-empty');
   }
   // Plain paths on every platform. No shell runs the CLI any more (process-tree.ts quotes the argv itself), so the
@@ -195,6 +202,33 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
   if (settingsPath !== undefined) args.push('--settings', settingsPath);
 
   return args;
+}
+
+function nativeToolsDisabled(options: ClaudeDriverOptions): boolean {
+  if (options.nativeTools !== undefined && options.nativeTools !== 'none') throw new Error('nativeTools must be "none" when set');
+  if (options.nativeTools === 'none' && options.permissionMode === 'bypassPermissions') throw new Error('nativeTools restriction cannot use bypassPermissions');
+  if (options.nativeTools === 'none' && options.resumeSessionId !== undefined) throw new Error('nativeTools restriction requires a fresh Claude session');
+  return options.nativeTools === 'none';
+}
+
+// The restriction is an opt-in capability claim. Unknown CLI semantics refuse
+// before a queued user turn; expand this matrix only after measuring it.
+const RESTRICTED_CLAUDE_VERSION = '2.1.311';
+
+/** Check the CLI's actual catalog as well as the flags requested from it. */
+function restrictedInitMatches(frame: Record<string, unknown>, servers: readonly McpServer[]): boolean {
+  if (frame.claude_code_version !== RESTRICTED_CLAUDE_VERSION || !Array.isArray(frame.tools) || !Array.isArray(frame.mcp_servers)) return false;
+  const names = new Set(servers.map(server => server.name));
+  const seen = new Set<string>();
+  for (const server of frame.mcp_servers) {
+    if (!isObject(server) || typeof server.name !== 'string' || !names.has(server.name) || seen.has(server.name)) return false;
+    seen.add(server.name);
+  }
+  if (seen.size !== names.size) return false;
+  return frame.tools.every(tool => typeof tool === 'string' && (tool === 'EndConversation' || servers.some(server => {
+    const prefix = `mcp__${server.name}__`;
+    return tool.startsWith(prefix) && tool.length > prefix.length;
+  })));
 }
 
 /**
@@ -315,7 +349,12 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 /** Protect the directory before a credential is written, including Windows ACLs. */
-function privateMcpDirectory(): string {
+function privateMcpDirectory(transport?: ProcessTreeOptions): string {
+  if (process.platform === 'win32' && transport?.windowsStdio === 'local-pipes') {
+    const directory = join(tmpdir(), `prism-acp-mcp-${randomBytes(24).toString('hex')}`);
+    createWindowsPrivateDirectory(directory);
+    return directory;
+  }
   const directory = mkdtempSync(join(tmpdir(), 'prism-acp-mcp-'));
   try {
     // File modes are ignored on Windows: only this process identity may read or write the directory.
@@ -379,6 +418,8 @@ export class ClaudeDriver {
   #models: Promise<SessionModelState['availableModels']> | null = null;
   /** The model this session uses: the `model` option, then whatever setModel() chose. Null = the CLI's default. */
   #currentModelId: string | null = null;
+  #restrictedInitialized = false;
+  #restrictedSessionAnnounced = false;
   readonly #mcpServers: readonly McpServer[];
   #mcpConfigDirectory: string | null = null;
   #mcpConfigPath: string | null = null;
@@ -417,12 +458,13 @@ export class ClaudeDriver {
   }
 
   constructor(options: ClaudeDriverOptions, events: ClaudeDriverEvents = {}) {
+    const restricted = nativeToolsDisabled(options);
     if (options.permissionPrompts?.nodePath !== undefined && !isAbsolute(options.permissionPrompts.nodePath)) {
       throw new Error('permissionPrompts.nodePath must be an absolute executable path');
     }
     this.#mcpServers = readMcpServers(options.mcpServers);
     this.#options = { ...options, ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
-    if (options.processTree?.windowsStdio === 'local-pipes' && (this.#mcpServers.length > 0 || options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0)) {
+    if (options.processTree?.windowsStdio === 'local-pipes' && ((!restricted && this.#mcpServers.length > 0) || options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0)) {
       throw new ProcessTreeError('LOCAL transport does not support generated Claude MCP configuration or permission hooks');
     }
     this.#events = events;
@@ -467,8 +509,8 @@ export class ClaudeDriver {
 
     let child: ChildProcess;
     try {
-      if (this.#mcpServers.length > 0) {
-        this.#mcpConfigDirectory = privateMcpDirectory();
+      if (this.#mcpServers.length > 0 || this.#options.nativeTools === 'none') {
+        this.#mcpConfigDirectory = privateMcpDirectory(this.#options.processTree);
         this.#mcpConfigPath = join(this.#mcpConfigDirectory, 'mcp.json');
         writeFileSync(this.#mcpConfigPath, JSON.stringify(claudeMcpConfig(this.#mcpServers)),
           { mode: 0o600, flag: 'wx' });
@@ -545,8 +587,18 @@ export class ClaudeDriver {
     this.#currentModelId = this.#options.model ?? null;
     this.#models = this.#control({ subtype: 'initialize' }).then((response) => {
       // The control_response's `response` is the envelope ({ subtype, request_id, response }); the models are inside.
+      if (this.#options.nativeTools === 'none' && (this.#approvalFailure !== null || this.#approvalStopped)) throw new ModelListError('restricted Claude initialization has stopped');
       if (response.subtype !== 'success') throw new ModelListError('the Claude CLI refused the initialize request');
+      if (this.#options.nativeTools === 'none' && (!isObject(response.response) || response.response.claude_code_version !== RESTRICTED_CLAUDE_VERSION)) {
+        throw new ModelListError('Claude app MCP only requires measured CLI version 2.1.311');
+      }
       const availableModels = claudeModelsOf(response.response);
+      if (this.#options.nativeTools === 'none') {
+        if (!isObject(response.response) || !Array.isArray(response.response.models) || availableModels.length !== response.response.models.length) {
+          throw new ModelListError('Claude app MCP only requires a valid initialize model list');
+        }
+        this.#restrictedInitialized = true;
+      }
       if (this.#options.permissionPrompts !== undefined) {
         const version = approvalCliVersion(isObject(response.response) ? response.response.claude_code_version : undefined);
         if (version === null || (this.#approvalInitVersion !== null && version !== this.#approvalInitVersion)) {
@@ -559,8 +611,13 @@ export class ClaudeDriver {
           if (this.#heldEndInput) this.#io?.stdin?.end();
         }
       }
+      if (this.#options.nativeTools === 'none' && this.#options.permissionPrompts === undefined && !this.#approvalStopped && this.#approvalFailure === null) {
+        for (const line of this.#heldPrompts.splice(0)) this.#io?.stdin?.write(line);
+        if (this.#heldEndInput) this.#io?.stdin?.end();
+      }
       return availableModels;
     }).catch((cause: unknown) => {
+      if (this.#options.nativeTools === 'none' && !this.#approvalStopped) this.#refuseApprovals('Claude app MCP only refused: initialize failed or reported an unsupported version');
       if (this.#options.permissionPrompts !== undefined) this.#refuseApprovals('Claude permission prompts refused: initialize failed, timed out or reported an unsupported version');
       throw cause;
     });
@@ -568,6 +625,7 @@ export class ClaudeDriver {
     this.#models.catch(() => {});
 
     const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (this.#options.nativeTools === 'none' && !this.#restrictedInitialized && !this.#approvalStopped) this.#refuseApprovals('Claude exited before restricted initialization completed');
       if (this.#options.permissionPrompts !== undefined && this.#approvalVersion === null) this.#refuseApprovals('Claude exited before permission-hook initialization completed');
       this.#approvalStopped = true;
       for (const waiter of this.#controlWaiters.values()) waiter.reject(new ModelListError('the Claude CLI exited before answering'));
@@ -593,8 +651,10 @@ export class ClaudeDriver {
       throw new Error('driver is not started, or its stdin has closed');
     }
     if (this.#approvalFailure !== null) throw new Error(this.#approvalFailure);
-    if (this.#options.permissionPrompts !== undefined && this.#approvalVersion === null) {
+    if (this.#options.nativeTools === 'none' && this.#approvalStopped) throw new Error('restricted Claude session has stopped');
+    if ((this.#options.permissionPrompts !== undefined && this.#approvalVersion === null) || (this.#options.nativeTools === 'none' && !this.#restrictedInitialized)) {
       if (this.#approvalStopped) throw new Error('Claude permission-hook initialization has stopped');
+      if (this.#options.nativeTools === 'none' && this.#heldPrompts.length >= 1) throw new Error('restricted Claude startup accepts only one pending prompt');
       this.#heldPrompts.push(line);
     } else stdin.write(line);
     this.#turnsInFlight += 1;
@@ -693,7 +753,7 @@ export class ClaudeDriver {
 
   /** Close stdin, which tells the CLI no more turns are coming. */
   endInput(): void {
-    if (this.#options.permissionPrompts !== undefined && this.#approvalVersion === null && !this.#approvalStopped) {
+    if (((this.#options.permissionPrompts !== undefined && this.#approvalVersion === null) || (this.#options.nativeTools === 'none' && !this.#restrictedInitialized)) && !this.#approvalStopped) {
       this.#heldEndInput = true;
       return;
     }
@@ -790,8 +850,29 @@ export class ClaudeDriver {
     for (const frame of frames) {
       if (this.#approvalFailure !== null) continue;
       if (!frame.ok) {
+        if (this.#options.nativeTools === 'none') {
+          this.#refuseApprovals('Claude app MCP only refused a malformed protocol frame');
+          continue;
+        }
         acceptedFrames.push(frame);
         continue;
+      }
+
+      if (this.#options.nativeTools === 'none') {
+        if (!isObject(frame.value) || typeof frame.value.type !== 'string') {
+          this.#refuseApprovals('Claude app MCP only refused a malformed protocol message');
+          continue;
+        }
+        if (frame.value.type === 'system' && frame.value.subtype === 'init') {
+          if (!restrictedInitMatches(frame.value, this.#mcpServers)) {
+            this.#refuseApprovals('Claude app MCP only refused an unexpected system/init version or tool catalog');
+            continue;
+          }
+          this.#restrictedSessionAnnounced = true;
+        } else if (!this.#restrictedSessionAnnounced && ['assistant', 'stream_event', 'user', 'result'].includes(frame.value.type)) {
+          this.#refuseApprovals('Claude app MCP only refused turn output before system/init');
+          continue;
+        }
       }
 
       if (this.#options.permissionPrompts !== undefined && isObject(frame.value) && frame.value.type === 'system' && frame.value.subtype === 'init') {
@@ -806,6 +887,10 @@ export class ClaudeDriver {
       const cliSessionId = cliSessionIdOf(frame.value);
       if (isObject(frame.value) && frame.value.type === 'system' && frame.value.subtype === 'init' &&
           'session_id' in frame.value && !isValidCliSessionId(cliSessionId)) {
+        if (this.#options.nativeTools === 'none') {
+          this.#refuseApprovals('Claude app MCP only refused an invalid CLI session id');
+          continue;
+        }
         this.#events.onProtocolError?.('invalid session_id: rejected Claude CLI session id shape');
         // The mapper independently publishes init ids in _meta; do not pass it a rejected frame.
         continue;
@@ -841,6 +926,7 @@ export class ClaudeDriver {
       }
     }
 
+    if (this.#options.nativeTools === 'none' && this.#approvalFailure !== null) return;
     const { updates, problems } = updatesFromFrames(acceptedFrames, this.#mapper);
     // A frame that could not be read is ONE lost frame; the stream after it is mapped as normal.
     for (const problem of problems) this.#events.onProtocolError?.(problem, { recoverable: true });
