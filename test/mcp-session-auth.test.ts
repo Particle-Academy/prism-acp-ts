@@ -4,8 +4,13 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ClaudeDriver, CodexDriver, encodeLine, type CodexDriverOptions, type ClaudeDriverOptions, type McpServer } from '../src/index.js';
+import { measureNativeCase, measuring } from './fixtures/windows-native-timing.mjs';
 
-vi.mock('node:child_process', async () => ({ ...await vi.importActual<typeof import('node:child_process')>('node:child_process'), spawn: vi.fn() }));
+vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  const { timedExecFileSync } = await import('./fixtures/windows-native-timing.mjs');
+  return { ...actual, spawn: vi.fn(), execFileSync: (...args: any[]) => timedExecFileSync(actual.execFileSync, ...args) };
+});
 vi.mock('../src/process-tree.js', async () => ({
   ...await vi.importActual<typeof import('../src/process-tree.js')>('../src/process-tree.js'),
   launchProvider: (await import('./fake-launch.js')).fakeLaunch,
@@ -171,7 +176,8 @@ class Child extends EventEmitter {
 
 describe('Claude selective MCP deny shares its final private settings with approval hooks', () => {
   for (const hooks of [false, true]) {
-    it(`${hooks ? 'with' : 'without'} hooks: writes one settings source, preserves hook approval and removes it at exit`, () => {
+    for (let sample = 1; sample <= (measuring && hooks && process.env.PRISM_ACP_NATIVE_VARIANT === 'full-suite' ? 30 : 1); sample++) {
+    it(`${hooks ? 'with' : 'without'} hooks: writes one settings source, preserves hook approval and removes it at exit${measuring ? ` sample ${sample}` : ''}`, () => measureNativeCase(sample, () => {
       let args: readonly string[] = []; let settings: any; let path: string | undefined;
       vi.mocked(spawn).mockImplementation((_binary, argv) => {
         args = argv as string[]; const index = args.indexOf('--settings'); path = index >= 0 ? args[index + 1] : undefined;
@@ -185,7 +191,8 @@ describe('Claude selective MCP deny shares its final private settings with appro
       if (hooks) expect(settings.hooks.PreToolUse).toHaveLength(1);
       if (process.platform !== 'win32') expect(statSync(path!).mode & 0o777).toBe(0o600);
       driver.kill(); expect(existsSync(path!)).toBe(false);
-    });
+    }), measuring ? 120_000 : undefined);
+    }
   }
 });
 

@@ -9,6 +9,43 @@ permissions:
   contents: read
 
 jobs:
+  native-startup-measurement:
+    name: G150 measurement, ${{ matrix.mode }}
+    runs-on: windows-latest
+    needs: third-party
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [full-suite, fresh-workers]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Thirty assertion bodies in the ordinary concurrent suite
+        if: matrix.mode == 'full-suite'
+        run: npx vitest run
+        env:
+          PRISM_ACP_NATIVE_TIMING: '1'
+          PRISM_ACP_NATIVE_VARIANT: full-suite
+      - name: Thirty fresh workers per fresh and prepared cache
+        if: matrix.mode == 'fresh-workers'
+        run: node scripts/measure-windows-native-startup.mjs
+      - name: Preserve native timings, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: g150-native-startup-${{ matrix.mode }}
+          path: .native-timing-evidence/
+          include-hidden-files: true
+          if-no-files-found: error
+
   test:
     name: node ${{ matrix.node }}
     runs-on: ubuntu-latest

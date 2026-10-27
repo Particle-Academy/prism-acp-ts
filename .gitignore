@@ -4,3 +4,4 @@ dist/
 .claude-native-cli/
 .claude-restricted-cli/
 .cold-cache-evidence/
+.native-timing-evidence/
