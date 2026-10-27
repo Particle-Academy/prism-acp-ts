@@ -25,6 +25,7 @@ export interface ProbeOptions {
   suppliedForeign?: boolean;
   noMcp?: boolean;
   resumeSessionId?: string;
+  replayHistory?: boolean;
   reuseHome?: string;
   replaceVersion?: string;
   calls?: readonly Row[] | ((home: string) => readonly Row[]);
@@ -71,7 +72,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
   const temporaryParent = realpathSync(tmpdir());
   const receipt = join(root, 'mcp-receipts.jsonl');
   const mcpScript = fileURLToPath(new URL('./codex-native-tools-mcp.mjs', import.meta.url));
-  const requests: Row[] = [], sent: Row[] = [], received: Row[] = [], problems: string[] = [], unexpected: string[] = [], blockedConnections: string[] = [];
+  const requests: Row[] = [], sent: Row[] = [], received: Row[] = [], updates: Row[] = [], problems: string[] = [], unexpected: string[] = [], blockedConnections: string[] = [];
   let endTurn: ((outcome: TurnOutcome) => void) | undefined;
   let reportedAgent: string | undefined;
   let effectiveConfig: Row | undefined;
@@ -184,7 +185,8 @@ export async function openCodexToolProbe(options: ProbeOptions) {
       mcpServers: servers, mcpToolApproval: Object.fromEntries(servers.map((entry) => [entry.name, 'approve' as const])),
       approvalPolicy: options.executionControl ? 'never' : 'untrusted', sandbox: options.executionControl ? 'danger-full-access' : 'read-only', turnInactivityTimeoutMs: 15000,
       ...(options.resumeSessionId === undefined ? {} : { resumeSessionId: options.resumeSessionId }),
-    }, { onProtocolError: (problem) => problems.push(problem), onTurnEnd: (outcome) => endTurn?.(outcome) }, (launch, handlers) => {
+      ...(options.replayHistory === undefined ? {} : { replayHistory: options.replayHistory }),
+    }, { onUpdate:update=>updates.push(update), onProtocolError: (problem) => problems.push(problem), onTurnEnd: (outcome) => endTurn?.(outcome) }, (launch, handlers) => {
       const real = new StdioCodexTransport(launch, { ...handlers, onFrame: (raw) => {
         const frame = raw as Row;
         received.push(frame);
@@ -209,7 +211,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
     });
     driver.start(); await bounded(driver.ready, 20000, 'Native fixture startup timeout');
     return {
-      driver, requests, sent, received, problems, unexpected, blockedConnections, home, root, cleanup,
+      driver, requests, sent, received, updates, problems, unexpected, blockedConnections, home, root, cleanup,
       lateSignalAfterTool: () => lateSignalAfterTool,
       trustedAccount: async () => {
         const answer = new Promise<Row>((resolve) => { accountAnswer = resolve; });

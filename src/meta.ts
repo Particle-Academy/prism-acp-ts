@@ -94,6 +94,11 @@ export const META_RATE_LIMIT = metaKey('rate_limit');
  */
 export const META_MCP_SERVERS = metaKey('mcp_servers');
 
+/** An update projected from saved history rather than newly produced activity. */
+export const META_REPLAY = metaKey('replay');
+/** Bounded counts/diagnostics for one history replay. */
+export const META_REPLAY_SUMMARY = metaKey('replay_summary');
+
 /** Refusal details for a provider-denied tool call. */
 export const META_PERMISSION_DENIED = metaKey('permission_denied');
 

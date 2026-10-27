@@ -30,6 +30,12 @@ if(config.legacyShell){
  script=script.replace('process.exit(allow ? 42 : 2);','process.exit(allow ? 0 : 2);');
 }
 writeFileSync(scriptPath,script);
+if(config.directHookExit!==undefined){
+ const output=JSON.stringify({hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'allow',permissionDecisionReason:'Synthetic direct approval.'}})+'\n';
+ hook.command=process.execPath;
+ hook.args=['-e',`process.stdout.write(${JSON.stringify(output)},()=>{${config.directHookStderr?"process.stderr.write('OWN_DIRECT_BLOCK\\n');":''}process.exit(${config.directHookExit});});`];
+ hook.onFailure=config.directHookOnFailure??'block';
+}
 if(config.scenario==='runtime-hang')hook.timeout=1;
 if(config.mutation==='drop-wrapper'){hook.command=config.electron;hook.args=[scriptPath];}
 if(config.mutation==='allow-silent-zero'){
