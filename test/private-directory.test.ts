@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { restrictToCurrentUser } from '../src/private-directory.js';
 import { prepareProcessTree, windowsApprovalAdapter, createWindowsPrivateDirectory } from '../src/process-tree.js';
+import { measureAcl, timingEnabled } from './fixtures/acl-native-timing.mjs';
 
 /*
  * A private directory is readable by the current user and NOBODY else, whatever grants it started with. Removing
@@ -39,14 +40,16 @@ describe.skipIf(process.platform !== 'win32')('restrictToCurrentUser', () => {
   beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'prism-acp-private-')); });
   afterEach(() => rmSync(directory, { recursive: true, force: true }));
 
-  it('leaves the current user as the only grant, even when an explicit Everyone grant was there first', () => {
+  for (let sample = 1; sample <= (timingEnabled ? 30 : 1); sample++) {
+  it('leaves the current user as the only grant, even when an explicit Everyone grant was there first' + (timingEnabled ? ` [sample ${sample}]` : ''), () => measureAcl(sample, () => {
     execFileSync(join(system32, 'icacls.exe'), [directory, '/grant', `*${EVERYONE}:(OI)(CI)RX`], { stdio: 'pipe', windowsHide: true });
     expect(rules(directory).some((rule) => rule.startsWith(`${EVERYONE}|False|`))).toBe(true); // the planted grant is real
 
     restrictToCurrentUser(directory);
 
     expect(rules(directory)).toEqual(['protected=True', `${currentSid()}|False|Allow`]);
-  });
+  }), timingEnabled ? 120000 : undefined); // Diagnostic-only budget; ordinary test still uses the unchanged 5000ms default.
+  }
 
   it('does the same for a directory with only its inherited grants', () => {
     restrictToCurrentUser(directory);
