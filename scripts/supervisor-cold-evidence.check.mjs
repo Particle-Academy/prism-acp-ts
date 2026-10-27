@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { coldHashFailureKind } from './supervisor-cold-evidence.mjs';
+import { coldBaselineConfig, coldHashFailureKind } from './supervisor-cold-evidence.mjs';
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { digest, ownedProducer } from './supervisor-cold-owned.mjs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const mismatch = { coldWorker: true, success: false, name: 'Error', code: 'adapter_receipt_hash_mismatch', observedSha256: 'a'.repeat(64), recordedSha256: 'b'.repeat(64) };
 
@@ -45,5 +47,30 @@ test('arbitrary failures and unproven or equal digests cannot satisfy the negati
     { coldWorker: true, success: false, name: 'Error', message: 'owned cold workers deadline' },
     { coldWorker: true, success: false, name: 'Error', message: 'native approval adapter did not preserve allow42/deny0 outcomes' }]) {
     assert.equal(coldHashFailureKind(receipt), null);
+  }
+});
+
+test('released producer compilation excludes unrelated new consumers and still checks its dependencies', () => {
+  const root = mkdtempSync(join(tmpdir(), 'cold-compiler-check-'));
+  try {
+    const source = join(root, 'src'); mkdirSync(source);
+    writeFileSync(join(source, 'process-tree.ts'), 'import { marker } from "./dependency.js"; export const launchProvider = marker;\n');
+    writeFileSync(join(source, 'dependency.ts'), 'export const marker: string = "owned";\n');
+    writeFileSync(join(source, 'new-consumer.ts'), 'import { createWindowsPrivateDirectory } from "./process-tree.js"; void createWindowsPrivateDirectory;\n');
+    writeFileSync(join(root, 'package.json'), '{"type":"module"}\n');
+    const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+    let config = { ...coldBaselineConfig(root, projectRoot), include: [join(source, '**', '*.ts')] };
+    const configPath = join(root, 'tsconfig.json');
+    const compile = () => { writeFileSync(configPath, JSON.stringify(config)); return spawnSync(process.execPath, [join(projectRoot, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', configPath], { encoding: 'utf8', timeout: 20_000, windowsHide: true }); };
+    const mixed = compile();
+    assert.equal(mixed.status, 2); assert.match(mixed.stdout, /has no exported member 'createWindowsPrivateDirectory'/);
+    config = coldBaselineConfig(root, projectRoot);
+    assert.equal(compile().status, 0, 'producer compiles without newer consumers');
+    writeFileSync(join(source, 'dependency.ts'), 'export const marker: string = 123;\n');
+    const invalidDependency = compile();
+    assert.equal(invalidDependency.status, 2); assert.match(invalidDependency.stdout, /not assignable to type 'string'/);
+  } finally {
+    assert.equal(dirname(realpathSync(root)), realpathSync(tmpdir()));
+    rmSync(root, { recursive: true, force: true });
   }
 });
