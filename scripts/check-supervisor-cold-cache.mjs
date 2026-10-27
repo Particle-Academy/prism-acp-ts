@@ -45,7 +45,9 @@ function measure(label,moduleUrl){
   return kind?[{kind,...(kind==='adapter-receipt'?{observedSha256:failure.observedSha256,recordedSha256:failure.recordedSha256}:{})}]:[];
  });
  const varianceValid=batches.every(batch=>Array.isArray(batch.workerCompiledDigests)&&batch.workerCompiledDigests.length===8&&batch.workerCompiledDigests.every(worker=>Array.isArray(worker)&&worker.every(value=>typeof value==='string'&&/^[0-9a-f]{64}$/.test(value)))&&new Set(batch.workerCompiledDigests.flat()).size>=2&&batch.compilerGenerations===new Set(batch.workerCompiledDigests.flat()).size);
- return{exit:result.status,...summary,varianceValid,hashRefusals:hashEvidence.length,hashEvidence};
+ const scheduleValid=batches[0].scheduledPair?.verified===true;
+ const scheduledHashRefusals=batches[0].failures.filter(failure=>failure.schedule?.role===0&&failure.schedule.events.includes('prepared-failed')&&!failure.schedule.events.includes('prepared-ok')&&coldHashFailureKind(failure)).length;
+ return{exit:result.status,...summary,varianceValid,scheduleValid,scheduledHashRefusals,hashRefusals:hashEvidence.length,hashEvidence};
 }
 let oldSource=run('git',['show',baseline+':src/process-tree.ts']);
 if(oldSource.status!==0){
@@ -73,8 +75,8 @@ try{
  const productionUnchanged=hash(readFileSync(source))===originalHash&&hash(readFileSync(supervisorSource))===originalSupervisorHash;
  writeFileSync(join(logs,'summary.json'),JSON.stringify({baselineRef:baseline,baselineSourceSha256:hash(Buffer.from(oldSource.stdout)),currentSourceSha256:originalHash,supervisorSourceSha256:originalSupervisorHash,restored:productionUnchanged,productionUnchanged,before,after,baselineError,currentError},null,2)+'\n');
  if(!productionUnchanged)throw Error('Production publisher or supervisor source changed during the cold oracle');
- if(baselineError||!before||!before.varianceValid||before.exit!==1||before.failed<1||before.hashRefusals<1)throw Error('The old producer did not reproduce a proven hash refusal under valid compiler variance');
- if(currentError||!after||!after.varianceValid||after.exit!==0||after.failed!==0||after.approvalVerified!==160)throw Error('Current producer failed the cold-cache/approval oracle or compiler-variance precondition');
+ if(baselineError||!before||!before.varianceValid||!before.scheduleValid||before.scheduledHashRefusals!==1||before.exit!==1||before.failed<1||before.hashRefusals<1)throw Error('The old producer did not reproduce a proven hash refusal under valid compiler variance and the native publication schedule');
+ if(currentError||!after||!after.varianceValid||!after.scheduleValid||after.exit!==0||after.failed!==0||after.approvalVerified!==160)throw Error('Current producer failed the cold-cache/approval oracle, publication schedule or compiler-variance precondition');
  console.log('Windows cold-cache regression verified: baseline '+before.failed+'/160 refusals; current 0/160; 160 approval adapters verified.');
 }finally{
  const unchanged=hash(readFileSync(source))===originalHash&&hash(readFileSync(supervisorSource))===originalSupervisorHash;

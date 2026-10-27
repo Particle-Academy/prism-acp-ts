@@ -19,6 +19,7 @@ describe.runIf(process.platform==='win32'&&process.env.PRISM_ACP_SUPERVISOR_COLD
    await prepareProcessTree({directory:join(root,'host-cache')}); // The outer harness has its own separate cache.
    for(let round=0;round<20;round++){
     const dir=join(root,'round-'+round);mkdirSync(dir);const cache=join(dir,'cache');const go=join(dir,'go');
+    const coordination=round===0?join(dir,'coordination'):'';if(coordination)mkdirSync(coordination);
     const providers:ProviderProcess[]=[],outputs:string[]=[],closed:Promise<unknown>[]=[];
     try{
      for(let i=0;i<8;i++){
@@ -26,7 +27,7 @@ describe.runIf(process.platform==='win32'&&process.env.PRISM_ACP_SUPERVISOR_COLD
       const producer=ownedProducer(rootModule,join(dir,'producer-'+i),round+'-'+i);
       expect(producer.publisherSha256).toBe(digest(productionPublisher));
       expect(producer.originalSupervisorSha256).toBe(digest(productionSupervisor));
-      const provider=launchProvider(process.execPath,[worker,producer.moduleUrl,cache,go,ready,dir],{cwd:dir,env:process.env});providers.push(provider);
+      const provider=launchProvider(process.execPath,[worker,producer.moduleUrl,cache,go,ready,dir,coordination,String(i)],{cwd:dir,env:process.env});providers.push(provider);
       provider.child.stdout?.on('data',chunk=>{outputs[i]+=chunk.toString();});provider.child.stderr?.resume();
       closed.push(new Promise(resolve=>provider.child.once('close',resolve)));
      }
@@ -48,7 +49,14 @@ describe.runIf(process.platform==='win32'&&process.env.PRISM_ACP_SUPERVISOR_COLD
      });
      const compilerGenerations=new Set(workerCompiledDigests.flat()).size;
      const approvalVerified=result.filter(receipt=>receipt.approval?.allowExit===0&&receipt.approval?.denyExit===2&&receipt.approval?.hashVerified===true).length;
-     rows.push({round,launches:8,failed:failures.length,approvalVerified,workerCompiledDigests,compilerGenerations,failures});
+     const scheduledPair=round===0?{
+      verified:result[0].schedule?.role===0&&result[1].schedule?.role===1
+       &&['compiled','published','observed-peer-prepared'].every(event=>result[0].schedule?.events.includes(event))
+       &&result[1].schedule?.events.includes('prepared-ok')
+       &&workerCompiledDigests[0].length>0&&workerCompiledDigests[1].length>0&&workerCompiledDigests[0][0]!==workerCompiledDigests[1][0],
+      first:result[0].schedule,second:result[1].schedule,
+     }:null;
+     rows.push({round,launches:8,failed:failures.length,approvalVerified,workerCompiledDigests,compilerGenerations,failures,scheduledPair});
      console.info(JSON.stringify({supervisorColdBatch:rows.at(-1)}));
     }finally{
      const stops=await Promise.all(providers.map(provider=>provider.stop({graceMs:0})));
@@ -60,7 +68,7 @@ describe.runIf(process.platform==='win32'&&process.env.PRISM_ACP_SUPERVISOR_COLD
    const minCompilerGenerations=Math.min(...rows.map(row=>Number(row.compilerGenerations)));
    console.info(JSON.stringify({supervisorColdSummary:{batches:rows.length,parallelism:8,launches:rows.length*8,failed,approvalVerified,
      cache:'empty task-owned directory each batch, shared across8 processes',compilerVariance:'owned inert assembly description per worker',minCompilerGenerations,osCachesPurged:false}}));
-   expect(rows).toHaveLength(20);expect(minCompilerGenerations).toBeGreaterThanOrEqual(2);expect(failed).toBe(0);expect(approvalVerified).toBe(160);
+   expect(rows).toHaveLength(20);expect((rows[0].scheduledPair as {verified:boolean}).verified).toBe(true);expect(minCompilerGenerations).toBeGreaterThanOrEqual(2);expect(failed).toBe(0);expect(approvalVerified).toBe(160);
   }finally{
    const publisherUnchanged=digest(readFileSync(fileURLToPath(rootModule)))===digest(productionPublisher);
    const supervisorUnchanged=digest(readFileSync(new URL('./process-tree-supervisor-cs.js',rootModule)))===digest(productionSupervisor);
