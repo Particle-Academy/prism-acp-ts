@@ -656,6 +656,19 @@ search and human-input/plan/image settings covered by the policy are overwritten
 with their restricted values. This avoids assuming an empty configuration home
 when the application uses an existing one.
 
+Restricted launches also disable `features.plugins` and `features.remote_plugin`
+before starting App Server, using its measured `-c` overrides. A thread-only
+policy arrives too late: native `0.163.0` can acquire a plugin marketplace during
+startup before the first prompt. The driver requires both startup features to
+be explicitly `false` in `config/read` before creating a thread. These launch
+overrides apply only to `nativeTools: 'none'`; other feature settings and ordinary
+launches keep their configured behavior. Owned-profile native tests wait ten
+seconds for delayed acquisition, preserve an unrelated feature, then invoke the
+supplied MCP tool. The positive control detects native plugin-source attempts at
+a rejecting local proxy; CI never downloads those plugins or sends real model
+requests. This prevents the measured startup acquisition path, without claiming
+general filesystem isolation for the CLI.
+
 Omitted or other models, unmeasured CLI versions, and `resumeSessionId` refuse
 with a clear error. Model selection is limited to the matrix; an unsupported
 native model reroute closes the driver **on its `model/rerouted` notification**.

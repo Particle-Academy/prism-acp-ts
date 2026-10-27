@@ -26,6 +26,8 @@ export interface ProbeOptions {
   noMcp?: boolean;
   resumeSessionId?: string;
   replayHistory?: boolean;
+  /** Deliberate mutation: remove only the measured plugin launch overrides at the transport boundary. */
+  removeStartupPluginArgs?: boolean;
   reuseHome?: string;
   replaceVersion?: string;
   calls?: readonly Row[] | ((home: string) => readonly Row[]);
@@ -187,7 +189,10 @@ export async function openCodexToolProbe(options: ProbeOptions) {
       ...(options.resumeSessionId === undefined ? {} : { resumeSessionId: options.resumeSessionId }),
       ...(options.replayHistory === undefined ? {} : { replayHistory: options.replayHistory }),
     }, { onUpdate:update=>updates.push(update), onProtocolError: (problem) => problems.push(problem), onTurnEnd: (outcome) => endTurn?.(outcome) }, (launch, handlers) => {
-      const real = new StdioCodexTransport(launch, { ...handlers, onFrame: (raw) => {
+      const actualLaunch=options.removeStartupPluginArgs ? { ...launch, binaryArgs:(launch.binaryArgs??[]).filter((arg,i,args)=>
+        !(arg==='-c'&&['features.plugins=false','features.remote_plugin=false'].includes(args[i+1]??''))
+        &&!['features.plugins=false','features.remote_plugin=false'].includes(arg)) } : launch;
+      const real = new StdioCodexTransport(actualLaunch, { ...handlers, onFrame: (raw) => {
         const frame = raw as Row;
         received.push(frame);
         if (frame.id === 'prism-owned-account-read') { accountAnswer?.(frame); return; }
@@ -213,6 +218,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
     return {
       driver, requests, sent, received, updates, problems, unexpected, blockedConnections, home, root, cleanup,
       lateSignalAfterTool: () => lateSignalAfterTool,
+      startupConfig: () => effectiveConfig,
       trustedAccount: async () => {
         const answer = new Promise<Row>((resolve) => { accountAnswer = resolve; });
         nativeSend!({ id: 'prism-owned-account-read', method: 'account/read', params: { refreshToken: false } });

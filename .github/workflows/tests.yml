@@ -81,7 +81,7 @@ jobs:
       - run: npm ci
       # Test tool only, not a package dependency. A changed CLI needs a new measured support matrix.
       - run: npm install --global --ignore-scripts @openai/codex@0.163.0
-      - run: npx vitest run test/codex-native-tools-live.test.ts test/codex-replay-live.test.ts
+      - run: npx vitest run test/codex-native-tools-live.test.ts test/codex-replay-live.test.ts test/codex-plugin-startup-live.test.ts
         env:
           PRISM_ACP_CODEX_NATIVE_TOOLS: '1'
 
