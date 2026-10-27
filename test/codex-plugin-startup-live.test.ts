@@ -37,7 +37,7 @@ describe.runIf(process.env.PRISM_ACP_CODEX_NATIVE_TOOLS==='1')('native Codex0.16
     const probe=await openCodexToolProbe({model:'gpt-5.3-codex',inheritedFeatures:{plugins:true,remote_plugin:true,mentions_v2:true}});
     try{
       const until=Date.now()+10000;
-      while(!probe.blockedConnections.includes('github.com:443')&&Date.now()<until)await new Promise(r=>setTimeout(r,100));
+      while(!probe.blockedConnections.some(authority=>authority==='github.com:443')&&Date.now()<until)await new Promise(r=>setTimeout(r,100));
       expect(probe.blockedConnections).toContain('github.com:443');
       expect(probe.requests).toHaveLength(0);
       console.info(JSON.stringify({pluginStartupOrdinaryControl:true,pluginSourceAttempt:true,forwarded:false}));
