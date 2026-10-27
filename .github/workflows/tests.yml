@@ -61,35 +61,6 @@ jobs:
         env:
           PRISM_ACP_APPCONTAINER: '1'
 
-  # Temporary G137 measurement on the normal full-suite concurrency/load.
-  # Removed after deriving and recording the fix; ordinary Windows gates stay unchanged.
-  acl-timing:
-    name: Measure Windows private ACL calls, 30 samples
-    runs-on: windows-latest
-    needs: third-party
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - run: npx vitest run
-        env:
-          PRISM_ACP_ACL_TIMING: '1'
-      - name: Preserve every native-call timing
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-private-acl-timings
-          path: .acl-timing-evidence/
-          include-hidden-files: true
-          if-no-files-found: error
-
   supervisor-cold-cache:
     name: Windows supervisor, parallel cold installs
     runs-on: windows-latest
