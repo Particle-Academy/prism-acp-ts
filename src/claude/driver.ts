@@ -14,7 +14,7 @@
 import type { ChildProcess } from 'node:child_process';
 import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { childEnv } from '../env.js';
 import { apiKeyEnvironment, apiKeyHome, type ProviderCredentials } from '../credentials.js';
 import { restrictToCurrentUser } from '../private-directory.js';
@@ -27,10 +27,10 @@ import { isValidCliSessionId } from '../session-id.js';
 import { randomBytes } from 'node:crypto';
 import type { PermissionOutcome, PermissionRequest, ProblemDetail } from '../acp/agent.js';
 export type { ProblemDetail } from '../acp/agent.js';
-import { ApprovalServer, HOOK_SCRIPT, approvalSettings, permissionRequestFor } from './approvals.js';
+import { ApprovalServer, approvalCliVersion, approvalHookScript, approvalSettings, permissionRequestFor } from './approvals.js';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
 import { ModelListError, claudeModelsOf, type SessionModelState } from '../models.js';
-import { ProcessTreeError, launchProvider, type ProcessTree, type ProcessTreeOptions, type ProviderIo, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
+import { ProcessTreeError, launchProvider, windowsApprovalAdapter, type ProcessTree, type ProcessTreeOptions, type ProviderIo, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
 import type { DriverCapabilities } from '../acp/agent.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
@@ -96,7 +96,13 @@ export interface ClaudeDriverOptions {
    * (`--settings`), over a private socket; anything but an explicit allow denies. Tool names are single identifiers
    * (`Bash`, `WebFetch`, `Write`, ...).
    */
-  readonly permissionPrompts?: { readonly tools: readonly string[] };
+  readonly permissionPrompts?: {
+    readonly tools: readonly string[];
+    /** Trusted absolute Node executable override; default is this process's runtime, including Electron's Node mode. */
+    readonly nodePath?: string;
+    /** Approval deadline in seconds (1–86400); default 86400. Expiry denies the call. */
+    readonly timeoutSeconds?: number;
+  };
   /** CLI --allowed-tools permission auto-allow rules; does not restrict the available tool catalog. */
   readonly allowedTools?: readonly string[];
   readonly disallowedTools?: readonly string[];
@@ -380,6 +386,12 @@ export class ClaudeDriver {
   #approvalDirectory: string | null = null;
   #approvalFiles: string[] = [];
   #approvals: ApprovalServer | null = null;
+  #approvalVersion: string | null = null;
+  #approvalInitVersion: string | null = null;
+  #approvalFailure: string | null = null;
+  #approvalStopped = false;
+  #heldPrompts: string[] = [];
+  #heldEndInput = false;
 
   /** Names of credentials withheld from the child, available after start(). */
   withheldCredentials: readonly string[] = [];
@@ -405,8 +417,11 @@ export class ClaudeDriver {
   }
 
   constructor(options: ClaudeDriverOptions, events: ClaudeDriverEvents = {}) {
+    if (options.permissionPrompts?.nodePath !== undefined && !isAbsolute(options.permissionPrompts.nodePath)) {
+      throw new Error('permissionPrompts.nodePath must be an absolute executable path');
+    }
     this.#mcpServers = readMcpServers(options.mcpServers);
-    this.#options = { ...options, mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
+    this.#options = { ...options, ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
     if (options.processTree?.windowsStdio === 'local-pipes' && (this.#mcpServers.length > 0 || options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0)) {
       throw new ProcessTreeError('LOCAL transport does not support generated Claude MCP configuration or permission hooks');
     }
@@ -424,6 +439,8 @@ export class ClaudeDriver {
 
   start(): void {
     if (this.#child !== null) throw new Error('driver already started');
+    // Build/hash verification is a startup prerequisite, before credentials/configuration or any CLI process.
+    if (this.#options.permissionPrompts !== undefined && process.platform === 'win32') windowsApprovalAdapter();
 
     if (this.#options.resumeSessionId !== undefined && !isValidCliSessionId(this.#options.resumeSessionId)) {
       this.#events.onProtocolError?.('invalid resumeSessionId: rejected CLI session id shape');
@@ -463,11 +480,14 @@ export class ClaudeDriver {
         const hookPath = join(directory, 'approve.cjs');
         settingsPath = join(directory, 'settings.json');
         if (this.#options.permissionPrompts !== undefined) {
-          writeFileSync(hookPath, HOOK_SCRIPT, { mode: 0o600, flag: 'wx' });
+          writeFileSync(hookPath, approvalHookScript(this.#options.permissionPrompts.timeoutSeconds), { mode: 0o600, flag: 'wx' });
           this.#approvalFiles.push(hookPath);
         }
         const settings = {
-          ...(this.#options.permissionPrompts !== undefined ? approvalSettings(process.execPath, hookPath, this.#options.permissionPrompts.tools) : {}),
+          ...(this.#options.permissionPrompts !== undefined ? approvalSettings(this.#options.permissionPrompts.nodePath ?? process.execPath, hookPath, this.#options.permissionPrompts.tools, {
+            electron: this.#options.permissionPrompts.nodePath === undefined && process.versions.electron !== undefined,
+            timeoutSeconds: this.#options.permissionPrompts.timeoutSeconds,
+          }) : {}),
           ...(this.#options.disabledMcpServers!.length > 0 ? { deniedMcpServers: this.#options.disabledMcpServers!.map((name) => ({ serverName: name })) } : {}),
         };
         writeFileSync(settingsPath, JSON.stringify(settings), { mode: 0o600, flag: 'wx' });
@@ -477,7 +497,11 @@ export class ClaudeDriver {
         const directory = this.#approvalDirectory!;
         const socket = process.platform === 'win32' ? `\\\\.\\pipe\\prism-acp-${randomBytes(12).toString('hex')}` : join(directory, 'approve.sock');
         const ask = this.#events.onRequestPermission;
-        this.#approvals = new ApprovalServer(socket, (input) => (ask ? ask(permissionRequestFor(input)) : Promise.resolve({ outcome: 'cancelled' as const })));
+        this.#approvals = new ApprovalServer(socket, async (input) => {
+          if (!ask || this.#approvalVersion === null || this.#approvalFailure !== null || this.#approvalStopped) return { outcome: 'cancelled' as const };
+          const outcome = await ask(permissionRequestFor(input));
+          return this.#approvalFailure === null && !this.#approvalStopped ? outcome : { outcome: 'cancelled' as const };
+        });
         const channel = this.#approvals.listen();
         // The token travels in the environment, never in argv.
         env.PRISM_ACP_APPROVAL_SOCKET = channel.socket;
@@ -522,12 +546,30 @@ export class ClaudeDriver {
     this.#models = this.#control({ subtype: 'initialize' }).then((response) => {
       // The control_response's `response` is the envelope ({ subtype, request_id, response }); the models are inside.
       if (response.subtype !== 'success') throw new ModelListError('the Claude CLI refused the initialize request');
-      return claudeModelsOf(response.response);
+      const availableModels = claudeModelsOf(response.response);
+      if (this.#options.permissionPrompts !== undefined) {
+        const version = approvalCliVersion(isObject(response.response) ? response.response.claude_code_version : undefined);
+        if (version === null || (this.#approvalInitVersion !== null && version !== this.#approvalInitVersion)) {
+          this.#refuseApprovals('Claude permission prompts require an initialize version of 2.1.295 or later, consistent with system/init');
+          throw new ModelListError('unsupported Claude permission-hook version');
+        }
+        this.#approvalVersion = version;
+        if (!this.#approvalStopped && this.#approvalFailure === null) {
+          for (const line of this.#heldPrompts.splice(0)) this.#io?.stdin?.write(line);
+          if (this.#heldEndInput) this.#io?.stdin?.end();
+        }
+      }
+      return availableModels;
+    }).catch((cause: unknown) => {
+      if (this.#options.permissionPrompts !== undefined) this.#refuseApprovals('Claude permission prompts refused: initialize failed, timed out or reported an unsupported version');
+      throw cause;
     });
     // Nobody may ask for the models; a refusal or an early exit must not become an unhandled rejection.
     this.#models.catch(() => {});
 
     const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (this.#options.permissionPrompts !== undefined && this.#approvalVersion === null) this.#refuseApprovals('Claude exited before permission-hook initialization completed');
+      this.#approvalStopped = true;
       for (const waiter of this.#controlWaiters.values()) waiter.reject(new ModelListError('the Claude CLI exited before answering'));
       this.#controlWaiters.clear();
       this.#removeMcpConfig();
@@ -550,7 +592,11 @@ export class ClaudeDriver {
     if (stdin === null || stdin === undefined) {
       throw new Error('driver is not started, or its stdin has closed');
     }
-    stdin.write(line);
+    if (this.#approvalFailure !== null) throw new Error(this.#approvalFailure);
+    if (this.#options.permissionPrompts !== undefined && this.#approvalVersion === null) {
+      if (this.#approvalStopped) throw new Error('Claude permission-hook initialization has stopped');
+      this.#heldPrompts.push(line);
+    } else stdin.write(line);
     this.#turnsInFlight += 1;
   }
 
@@ -577,6 +623,13 @@ export class ClaudeDriver {
    * control_response, whose shape was not captured. No turn running: nothing is sent.
    */
   cancel(): Promise<void> {
+    if (this.#heldPrompts.length > 0) {
+      const count = this.#heldPrompts.length;
+      this.#heldPrompts = [];
+      this.#turnsInFlight = Math.max(0, this.#turnsInFlight - count);
+      for (let i = 0; i < count; i++) this.#events.onTurnEnd?.({ stopReason: 'cancelled', isError: false, raw: 'cancelled before permission-hook initialization' });
+      return Promise.resolve();
+    }
     const stdin = this.#io?.stdin;
     if (this.#turnsInFlight === 0 || stdin === null || stdin === undefined || stdin.destroyed) {
       return Promise.resolve();
@@ -640,11 +693,17 @@ export class ClaudeDriver {
 
   /** Close stdin, which tells the CLI no more turns are coming. */
   endInput(): void {
+    if (this.#options.permissionPrompts !== undefined && this.#approvalVersion === null && !this.#approvalStopped) {
+      this.#heldEndInput = true;
+      return;
+    }
     this.#io?.stdin?.end();
   }
 
   /** End the CLI and every process it started, now. */
   kill(signal: NodeJS.Signals = 'SIGTERM'): void {
+    this.#approvalStopped = true;
+    this.#heldPrompts = [];
     this.#provider?.kill(signal);
   }
 
@@ -653,6 +712,8 @@ export class ClaudeDriver {
    * exit on its own, terminate the tree, and resolve once the tree is empty (or the wait gave up -- see the verdict).
    */
   stop(options?: StopOptions): Promise<StopVerdict> {
+    this.#approvalStopped = true;
+    this.#heldPrompts = [];
     if (this.#provider === null) return Promise.resolve({ graceful: true, empty: true, survivors: 0, verified: true });
     return this.#provider.stop(options);
   }
@@ -665,6 +726,19 @@ export class ClaudeDriver {
   /** Everything the CLI has written to stderr so far. */
   get stderr(): string {
     return this.#stderr;
+  }
+
+  #refuseApprovals(reason: string): void {
+    if (this.#approvalFailure !== null) return;
+    this.#approvalFailure = reason;
+    this.#approvalStopped = true;
+    const pending = this.#turnsInFlight;
+    this.#heldPrompts = [];
+    this.#turnsInFlight = 0;
+    this.#pendingOutcome = null;
+    void this.#provider?.stop({ graceMs: 0 });
+    this.#events.onProtocolError?.(reason);
+    for (let i = 0; i < pending; i++) this.#events.onTurnEnd?.({ stopReason: 'refusal', isError: true, raw: reason });
   }
 
   /** The permission-prompt channel closed and its private files removed (issue #1). */
@@ -714,9 +788,19 @@ export class ClaudeDriver {
     // BEFORE mapping, because neither survives translation: the `result` frame
     // becomes a usage_update and the `init` frame maps to nothing at all.
     for (const frame of frames) {
+      if (this.#approvalFailure !== null) continue;
       if (!frame.ok) {
         acceptedFrames.push(frame);
         continue;
+      }
+
+      if (this.#options.permissionPrompts !== undefined && isObject(frame.value) && frame.value.type === 'system' && frame.value.subtype === 'init') {
+        const version = approvalCliVersion(frame.value.claude_code_version);
+        if (version === null || (this.#approvalVersion !== null && version !== this.#approvalVersion)) {
+          this.#refuseApprovals('Claude system/init omitted or changed the validated permission-hook version');
+          continue;
+        }
+        this.#approvalInitVersion = version;
       }
 
       const cliSessionId = cliSessionIdOf(frame.value);

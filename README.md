@@ -186,7 +186,28 @@ new ClaudeDriver({ cwd, permissionPrompts: { tools: ['Bash', 'WebFetch'] } }, {
 Each matching call waits for the answer: **Allow once** runs it, anything else (Deny, a cancel, an unknown option, no
 handler) denies it, and the denial reason reaches the model. It is a PreToolUse command hook supplied for this one
 invocation with `--settings`, talking to the driver over a private socket with a token that travels only in the
-environment; the hook is marked `onFailure: "block"`, so a broken channel blocks the call rather than passing it.
+environment. The hook accepts Claude Code **2.1.295 or later**; **2.1.310** is tested in native Windows/Linux CI. In that version,
+`onFailure: "block"` blocks failures and timeouts, but an empty or plain-text exit0 still runs the tool. An exit adapter
+therefore accepts only the script's reserved explicit-allow status; a worker validates the complete decision before
+any allow reaches Claude. Missing, extra or malformed output, cancellation, errors and expired approvals deny.
+The driver holds prompts and EOF until control initialize reports a valid version of at least 2.1.295. Missing,
+unparseable or older versions, initialize errors/timeouts, and later system/init version omissions/changes close the
+session. Versions 2.1.295–2.1.309 are accepted on Anthropic's documented `onFailure` semantics and have not been measured
+by this suite. `system/init` arrives after the first user prompt on 2.1.310, so its version alone cannot gate that prompt.
+
+Inside Electron, the hook runs the app executable with `ELECTRON_RUN_AS_NODE=1` for that hook only. The script removes
+the flag before its worker or any child starts; the POSIX supervisor also removes its injected flag before starting
+a provider. Hook paths are passed as arguments rather than interpolated into shell commands. Windows uses an approval
+mode in the existing native C# supervisor; POSIX uses `/bin/sh`. The Windows adapter is built once and hash-checked
+at driver startup, before Claude starts. Missing, quarantined or unverified binaries that cannot be rebuilt and verified
+refuse startup. The existing .NET Framework compiler requirement applies; there is no interpreter fallback. Its byte
+handles preserve JSON output, and a per-call Job Object ends helper descendants when the adapter exits. If an Electron
+build disables Node mode, the call denies. An app can supply
+`permissionPrompts.nodePath` as a trusted absolute ordinary Node executable instead. This option belongs to app
+configuration and must never come from model or ACP client input.
+
+`permissionPrompts.timeoutSeconds` sets the approval deadline (integer 1–86400, default 86400). The hook denies before
+the native hook timeout. The permission hook is an application approval mechanism; it is not OS isolation.
 
 `CLAUDE_DRIVER_CAPABILITIES.permissionRequests` describes the default and remains
 `false`. When an embedder configures this hook, its `serve` declaration can report

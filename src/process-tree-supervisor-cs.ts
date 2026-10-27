@@ -25,6 +25,8 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Threading;
+using System.Collections;
+using System.Collections.Generic;
 using Microsoft.Win32.SafeHandles;
 
 static class Supervisor
@@ -118,6 +120,10 @@ static class Supervisor
     static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr data, int length, out int returned);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr attributes, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool WriteFile(IntPtr handle, byte[] bytes, uint count, out uint written, IntPtr overlapped);
 
     static StreamWriter control;
     static readonly object writeLock = new object();
@@ -244,8 +250,84 @@ static class Supervisor
         catch { pipe.Dispose(); throw; }
     }
 
-    static int Main()
+    static string QuoteArgument(string value)
     {
+        var output = new StringBuilder("\"");
+        int slashes = 0;
+        foreach (char c in value)
+        {
+            if (c == '\\') { slashes++; continue; }
+            output.Append('\\', slashes * (c == '"' ? 2 : 1)); slashes = 0;
+            if (c == '"') output.Append('\\');
+            output.Append(c);
+        }
+        return output.Append('\\', slashes * 2).Append('"').ToString();
+    }
+
+    // Nested in Claude's Job Object, with a per-call kill-on-close job too. Only the runtime child gets Node mode;
+    // stdin/stdout are inherited byte handles, stderr goes to NUL. No shell or Console re-encoding.
+    static int Approval(string[] args)
+    {
+        var handles = new IntPtr[3];
+        IntPtr nullFile = IntPtr.Zero, environment = IntPtr.Zero, job = IntPtr.Zero;
+        ProcessInformation info = new ProcessInformation();
+        try
+        {
+            if (args.Length != 4 || args[0] != "approval" || (args[3] != "electron" && args[3] != "node") ||
+                !Path.IsPathRooted(args[1]) || !Path.IsPathRooted(args[2])) throw new ArgumentException();
+            nullFile = CreateFileW("NUL", 0x40000000, 3, IntPtr.Zero, 3, 0x80, IntPtr.Zero);
+            if (nullFile == IntPtr.Zero || nullFile == new IntPtr(-1)) throw new IOException();
+            IntPtr current = GetCurrentProcess();
+            var originals = new IntPtr[] { GetStdHandle(-10), GetStdHandle(-11), nullFile };
+            for (int i = 0; i < 3; i++)
+                if (!DuplicateHandle(current, originals[i], current, out handles[i], 0, true, 2)) throw new IOException();
+            var env = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables()) env[(string)entry.Key] = (string)entry.Value;
+            env.Remove("ELECTRON_RUN_AS_NODE");
+            if (args[3] == "electron") env["ELECTRON_RUN_AS_NODE"] = "1";
+            var block = new StringBuilder();
+            foreach (var entry in env) block.Append(entry.Key).Append('=').Append(entry.Value).Append('\0');
+            block.Append('\0');
+            environment = Marshal.StringToHGlobalUni(block.ToString());
+            job = CreateJobObjectW(IntPtr.Zero, null);
+            var limit = new ExtendedLimit(); limit.Basic.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if (job == IntPtr.Zero || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref limit, Marshal.SizeOf(typeof(ExtendedLimit)))) throw new IOException();
+            var startup = new StartupInfo();
+            startup.cb = Marshal.SizeOf(typeof(StartupInfo)); startup.dwFlags = STARTF_USESTDHANDLES;
+            startup.hStdInput = handles[0]; startup.hStdOutput = handles[1]; startup.hStdError = handles[2];
+            if (!CreateProcessW(args[1], new StringBuilder(QuoteArgument(args[1]) + " " + QuoteArgument(args[2])),
+                IntPtr.Zero, IntPtr.Zero, true, CREATE_SUSPENDED | 0x400 | 0x08000000, environment, Environment.CurrentDirectory, ref startup, out info)) throw new IOException();
+            if (!AssignProcessToJobObject(job, info.hProcess) || ResumeThread(info.hThread) == uint.MaxValue) { TerminateProcess(info.hProcess, 2); throw new IOException(); }
+            CloseHandle(info.hThread); info.hThread = IntPtr.Zero;
+            var exited = new ManualResetEvent(false);
+            exited.SafeWaitHandle = new SafeWaitHandle(info.hProcess, false);
+            exited.WaitOne();
+            uint code;
+            if (GetExitCodeProcess(info.hProcess, out code) && code == 42) return 0;
+        }
+        catch { }
+        finally
+        {
+            foreach (IntPtr handle in handles) if (handle != IntPtr.Zero) CloseHandle(handle);
+            if (nullFile != IntPtr.Zero && nullFile != new IntPtr(-1)) CloseHandle(nullFile);
+            if (environment != IntPtr.Zero) Marshal.FreeHGlobal(environment);
+            if (job != IntPtr.Zero) CloseHandle(job);
+            if (info.hThread != IntPtr.Zero) CloseHandle(info.hThread);
+            if (info.hProcess != IntPtr.Zero) CloseHandle(info.hProcess);
+        }
+        try
+        {
+            byte[] message = Encoding.UTF8.GetBytes("prism-acp: approval hook failed or denied; tool call blocked\n");
+            uint written;
+            WriteFile(GetStdHandle(-12), message, (uint)message.Length, out written, IntPtr.Zero);
+        }
+        catch { }
+        return 2;
+    }
+
+    static int Main(string[] args)
+    {
+        if (args.Length > 0) return Approval(args);
         string channel = Environment.GetEnvironmentVariable("PRISM_ACP_TREE_CHANNEL");
         string token = Environment.GetEnvironmentVariable("PRISM_ACP_TREE_TOKEN");
         // Never inherited by the provider.
