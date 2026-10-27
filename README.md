@@ -849,6 +849,10 @@ subprocesses they start, `detached` ones included -- and never through a shell:
   `%LOCALAPPDATA%/prism-acp/supervisor-<source hash>/`, and its SHA-256 is checked before every launch. If it cannot be
   built or verified the driver refuses to start, naming the cause, rather than run uncontained. Call
   `prepareProcessTree({ directory? })` at startup so that surfaces once, before the first session.
+  Concurrent first launches publish hash-named executables without replacing existing files, then atomically
+  rename a temporary current-hash pointer in the same directory. Readers bind that digest to the executable's
+  name and verify its bytes before using it. This avoids mixing one compiler's executable with another's hash;
+  a genuinely altered cache is rebuilt once or refused. Old generations remain available to running sessions.
 - **Linux:** the CLI leads its own process group, and descendants that leave it are found through `/proc` by parent and
   by a per-launch `PRISM_ACP_TREE_ID` cookie in their environment. Not caught: one that clears its environment, leaves
   the group and is orphaned. **macOS:** the process group only.

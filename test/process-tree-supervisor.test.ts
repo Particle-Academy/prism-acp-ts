@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { ProcessTreeError, launchProvider, prepareProcessTree } from '../src/process-tree.js';
+import { ProcessTreeError, launchProvider, prepareProcessTree, windowsApprovalAdapter } from '../src/process-tree.js';
 
 /**
  * THE WINDOWS SUPERVISOR IS BUILT ONCE AND CHECKED EVERY TIME (tynn, 2026-10-20): a freshly compiled, unsigned
@@ -15,7 +15,8 @@ import { ProcessTreeError, launchProvider, prepareProcessTree } from '../src/pro
  */
 const directory = mkdtempSync(join(tmpdir(), 'prism-supervisor-'));
 afterAll(() => { try { rmSync(directory, { recursive: true, force: true }); } catch { /* a supervisor may still hold it */ } });
-const executable = join(directory, 'prism-acp-supervisor.exe');
+const pointer = join(directory, 'prism-acp-supervisor.current.sha256');
+let executable: string;
 const sha256 = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
 
 async function runOnce(): Promise<number | null> {
@@ -27,11 +28,13 @@ async function runOnce(): Promise<number | null> {
 
 describe.runIf(process.platform === 'win32')('the Windows supervisor', () => {
   it('is built once into the given directory, with its hash recorded beside it', async () => {
-    expect(existsSync(executable)).toBe(false);
+    expect(existsSync(pointer)).toBe(false);
     await prepareProcessTree({ directory });
+    executable = windowsApprovalAdapter();
     expect(existsSync(executable)).toBe(true);
-    expect(readFileSync(`${executable}.sha256`, 'utf8').trim()).toBe(sha256(executable));
+    expect(readFileSync(pointer, 'utf8').trim()).toBe(sha256(executable));
     const hash = sha256(executable);
+    expect(executable).toBe(join(directory, `prism-acp-supervisor-${hash}.exe`));
     await prepareProcessTree();
     expect(sha256(executable)).toBe(hash);
     expect(await runOnce()).toBe(5);
@@ -41,8 +44,10 @@ describe.runIf(process.platform === 'win32')('the Windows supervisor', () => {
     appendFileSync(executable, 'tampered');
     const tampered = sha256(executable);
     expect(await runOnce()).toBe(5);
-    expect(sha256(executable)).not.toBe(tampered);
-    expect(readFileSync(`${executable}.sha256`, 'utf8').trim()).toBe(sha256(executable));
+    const replacement = windowsApprovalAdapter();
+    expect(replacement).not.toBe(executable);
+    expect(sha256(replacement)).not.toBe(tampered);
+    expect(readFileSync(pointer, 'utf8').trim()).toBe(sha256(replacement));
   });
 
   it('no compiler is a ProcessTreeError naming the cause, never an uncontained provider', async () => {
@@ -60,6 +65,20 @@ describe.runIf(process.platform === 'win32')('the Windows supervisor', () => {
       process.env.SystemRoot = saved;
       await prepareProcessTree({ directory });
       rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['../../outside.exe','x'.repeat(129),'A'.repeat(64)])('an invalid current pointer cannot select an executable (%s)',async(value)=>{
+    const unavailable=join(directory,'no-compiler');
+    const previous=process.env.SystemRoot;
+    writeFileSync(pointer,value);process.env.SystemRoot=unavailable;
+    try{
+      await expect(prepareProcessTree({directory})).rejects.toThrow(/csc\.exe/);
+      expect(()=>windowsApprovalAdapter()).toThrow(/cannot prepare Claude approval adapter/);
+    }finally{
+      if(previous===undefined)delete process.env.SystemRoot;else process.env.SystemRoot=previous;
+      await prepareProcessTree({directory});
+      expect(readFileSync(pointer,'utf8').trim()).toBe(sha256(windowsApprovalAdapter()));
     }
   });
 });
