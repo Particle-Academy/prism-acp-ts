@@ -1,9 +1,11 @@
 // The baseline is immutable released code with the measured mixed-generation bug. Execute it, never fake its result.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { coldHashFailureKind } from './supervisor-cold-evidence.mjs';
 
 if(process.platform!=='win32')throw Error('The Windows cold-cache gate must run on Windows');
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
@@ -12,19 +14,21 @@ const source=join(root,'src','process-tree.ts');
 const original=readFileSync(source);
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const originalHash=hash(original);
+const supervisorSource=join(root,'src','process-tree-supervisor-cs.ts');
+const originalSupervisorHash=hash(readFileSync(supervisorSource));
 const logs=join(root,'.cold-cache-evidence');mkdirSync(logs,{recursive:true});
 function run(binary,args,settings={}){
  const result=spawnSync(binary,args,{cwd:root,encoding:'utf8',windowsHide:true,maxBuffer:16*1024*1024,timeout:540000,...settings});
  if(result.error)throw result.error;
  return result;
 }
-function build(){
- const result=run(process.execPath,[join(root,'node_modules','typescript','bin','tsc'),'-p','tsconfig.json']);
+function build(config=join(root,'tsconfig.json')){
+ const result=run(process.execPath,[join(root,'node_modules','typescript','bin','tsc'),'-p',config]);
  if(result.status!==0)throw Error('Cold-cache probe build failed: '+result.stderr.slice(0,1000));
 }
-function measure(label){
+function measure(label,moduleUrl){
  const result=run(process.execPath,[join(root,'node_modules','vitest','vitest.mjs'),'run','test/supervisor-cold-measure.test.ts'],
-   {env:{...process.env,PRISM_ACP_SUPERVISOR_COLD:'1'}});
+   {env:{...process.env,PRISM_ACP_SUPERVISOR_COLD:'1',PRISM_ACP_COLD_MODULE:moduleUrl}});
  writeFileSync(join(logs,label+'.log'),(result.stdout??'')+(result.stderr??''));
  process.stdout.write(result.stdout??'');process.stderr.write(result.stderr??'');
  const clean=(result.stdout??'').replace(/\x1b\[[0-9;]*m/g,'');
@@ -34,8 +38,12 @@ function measure(label){
  if(summary.batches!==20||summary.parallelism!==8||summary.launches!==160||!Number.isInteger(summary.failed))throw Error(label+': incomplete measurement');
  const batches=clean.split(/\r?\n/).filter(line=>line.startsWith('{"supervisorColdBatch":')).map(line=>JSON.parse(line).supervisorColdBatch);
  if(batches.length!==20||batches.some((batch,i)=>batch.round!==i||batch.launches!==8))throw Error(label+': incomplete batch receipts');
- const hashRefusals=batches.flatMap(batch=>batch.failures).filter(failure=>failure.name==='ProcessTreeError'&&/supervisor does not match the hash recorded when it was built/.test(failure.message)).length;
- return{exit:result.status,...summary,hashRefusals};
+ const hashEvidence=batches.flatMap(batch=>batch.failures).flatMap(failure=>{
+  const kind=coldHashFailureKind(failure);
+  return kind?[{kind,...(kind==='adapter-receipt'?{observedSha256:failure.observedSha256,recordedSha256:failure.recordedSha256}:{})}]:[];
+ });
+ const varianceValid=batches.every(batch=>Array.isArray(batch.workerCompiledDigests)&&batch.workerCompiledDigests.length===8&&batch.workerCompiledDigests.every(worker=>Array.isArray(worker)&&worker.every(value=>typeof value==='string'&&/^[0-9a-f]{64}$/.test(value)))&&new Set(batch.workerCompiledDigests.flat()).size>=2&&batch.compilerGenerations===new Set(batch.workerCompiledDigests.flat()).size);
+ return{exit:result.status,...summary,varianceValid,hashRefusals:hashEvidence.length,hashEvidence};
 }
 let oldSource=run('git',['show',baseline+':src/process-tree.ts']);
 if(oldSource.status!==0){
@@ -44,16 +52,31 @@ if(oldSource.status!==0){
  oldSource=run('git',['show',baseline+':src/process-tree.ts']);
 }
 if(oldSource.status!==0||!oldSource.stdout.includes('function windowsSupervisor()'))throw Error('Immutable baseline source is missing');
-let before;
+const temporaryParent=realpathSync(tmpdir());
+const owned=mkdtempSync(join(temporaryParent,'prism-cold-baseline-'));
+const project=join(owned,'baseline');
+let before,after,baselineError,currentError;
 try{
- writeFileSync(source,oldSource.stdout);build();before=measure('baseline');
- if(before.exit!==1||before.failed<1||before.hashRefusals<1)throw Error('The old producer did not reproduce a hash refusal in the same cold-cache oracle');
-}finally{
- writeFileSync(source,original);
- if(hash(readFileSync(source))!==originalHash)throw Error('Current source restoration hash mismatch');
+ // Compile the immutable old publisher in its own package copy. The production
+ // source is never swapped, stamped or instrumented, including during baseline.
+ cpSync(join(root,'src'),join(project,'src'),{recursive:true});
+ writeFileSync(join(project,'src','process-tree.ts'),oldSource.stdout);
+ writeFileSync(join(project,'package.json'),'{"type":"module"}\n');
+ const baselineConfig=join(project,'tsconfig.json');
+ writeFileSync(baselineConfig,JSON.stringify({extends:join(root,'tsconfig.json'),compilerOptions:{rootDir:join(project,'src'),outDir:join(project,'dist'),typeRoots:[join(root,'node_modules','@types')]},include:[join(project,'src','**','*.ts')]},null,2)+'\n');
+ build(baselineConfig);
  build();
+ try{before=measure('baseline',pathToFileURL(join(project,'dist','process-tree.js')).href);}catch(error){baselineError=error.message;}
+ try{after=measure('current',pathToFileURL(join(root,'dist','process-tree.js')).href);}catch(error){currentError=error.message;}
+ const productionUnchanged=hash(readFileSync(source))===originalHash&&hash(readFileSync(supervisorSource))===originalSupervisorHash;
+ writeFileSync(join(logs,'summary.json'),JSON.stringify({baselineRef:baseline,baselineSourceSha256:hash(Buffer.from(oldSource.stdout)),currentSourceSha256:originalHash,supervisorSourceSha256:originalSupervisorHash,restored:productionUnchanged,productionUnchanged,before,after,baselineError,currentError},null,2)+'\n');
+ if(!productionUnchanged)throw Error('Production publisher or supervisor source changed during the cold oracle');
+ if(baselineError||!before||!before.varianceValid||before.exit!==1||before.failed<1||before.hashRefusals<1)throw Error('The old producer did not reproduce a proven hash refusal under valid compiler variance');
+ if(currentError||!after||!after.varianceValid||after.exit!==0||after.failed!==0||after.approvalVerified!==160)throw Error('Current producer failed the cold-cache/approval oracle or compiler-variance precondition');
+ console.log('Windows cold-cache regression verified: baseline '+before.failed+'/160 refusals; current 0/160; 160 approval adapters verified.');
+}finally{
+ const unchanged=hash(readFileSync(source))===originalHash&&hash(readFileSync(supervisorSource))===originalSupervisorHash;
+ if(dirname(realpathSync(owned))!==temporaryParent)throw Error('Owned baseline cleanup escaped temporary parent');
+ rmSync(owned,{recursive:true,force:true,maxRetries:20,retryDelay:100});
+ if(!unchanged)throw Error('Production source hash changed during the cold-cache gate');
 }
-const after=measure('current');
-if(after.exit!==0||after.failed!==0||after.approvalVerified!==160)throw Error('Current producer failed the cold-cache/approval oracle');
-writeFileSync(join(logs,'summary.json'),JSON.stringify({baselineRef:baseline,currentSourceSha256:originalHash,restored:true,before,after},null,2)+'\n');
-console.log('Windows cold-cache regression verified: baseline '+before.failed+'/160 refusals; current 0/160; 160 approval adapters verified.');
