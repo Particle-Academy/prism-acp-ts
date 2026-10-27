@@ -85,6 +85,37 @@ jobs:
         env:
           PRISM_ACP_CODEX_NATIVE_TOOLS: '1'
 
+  claude-approval:
+    name: Claude approval, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    needs: third-party
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            binary: claude
+          - os: windows-latest
+            platform: win32-x64
+            binary: claude.exe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # Native test executable only; no package dependency, install scripts, real login or model traffic.
+      - run: npm install --prefix .claude-native-cli --ignore-scripts --no-package-lock @anthropic-ai/claude-code-${{ matrix.platform }}@2.1.310
+      - run: npx vitest run test/claude-approval-live.test.ts
+        env:
+          PRISM_ACP_CLAUDE_APPROVAL: '1'
+          PRISM_ACP_CLAUDE_BINARY: ${{ github.workspace }}/.claude-native-cli/node_modules/@anthropic-ai/claude-code-${{ matrix.platform }}/${{ matrix.binary }}
+
   third-party:
     name: Third-party dependency allowlist
     runs-on: ubuntu-latest

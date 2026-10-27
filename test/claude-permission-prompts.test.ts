@@ -32,7 +32,9 @@ function runHook(env: Record<string, string>, input: unknown): Promise<{ code: n
     const script = join(dir, 'hook.cjs');
     writeFileSync(script, HOOK_SCRIPT);
     return new Promise((resolve) => {
-        const child = spawn(process.execPath, [script], { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+        const settings = approvalSettings(process.execPath, script, ['Bash']) as { hooks: { PreToolUse: Array<{ hooks: Array<{ command: string; args: string[] }> }> } };
+        const hook = settings.hooks.PreToolUse[0]!.hooks[0]!;
+        const child = spawn(hook.command, hook.args, { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
         let stdout = '';
         let stderr = '';
         child.stdout.on('data', (d) => (stdout += d));
@@ -57,7 +59,8 @@ describe('the arguments and the settings', () => {
         const hook = s.hooks.PreToolUse[0]!.hooks[0]!;
         expect(hook).toMatchObject({ type: 'command', onFailure: 'block' });
         expect(hook.timeout as number).toBeGreaterThanOrEqual(3600);
-        expect(hook.command).toBe('"/opt/node" "/tmp/x/hook.cjs"');
+        expect(hook.args).toBeInstanceOf(Array); // exec form; paths never pass through Claude's shell parser
+        expect(hook.command).toMatch(/(?:powershell\.exe|\/bin\/sh)$/i);
     });
 
     it('a tool name that would widen the matcher is refused', () => {
@@ -112,7 +115,7 @@ describe('the hook script against the approval server (end to end, both real)', 
             const { socket, token } = server.listen();
             const r = await runHook({ PRISM_ACP_APPROVAL_SOCKET: socket, PRISM_ACP_APPROVAL_TOKEN: token }, INPUT);
             server.close();
-            expect(r.code).toBe(0);
+            expect(r.code).toBe(2);
             expect(decision(r.stdout)).toEqual({ hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason });
         }
     });

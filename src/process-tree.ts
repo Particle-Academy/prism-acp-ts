@@ -150,12 +150,18 @@ export function launchProvider(command: string, args: readonly string[], options
     if (socketDirectory !== null) rmSync(socketDirectory, { recursive: true, force: true });
   });
 
-  const supervisorEnv = { ...env, [CHANNEL_ENV]: channel, [TOKEN_ENV]: token };
+  const electron = !windows && process.versions.electron !== undefined;
+  const supervisorEnv = { ...env, ...(electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}), [CHANNEL_ENV]: channel, [TOKEN_ENV]: token };
+  // The POSIX supervisor uses this runtime as Node, even inside an Electron app. Restore the provider's original
+  // environment before SUPERVISOR_JS spawns it: the injected flag must never change how a provider/helper starts.
+  const restoreElectron = env.ELECTRON_RUN_AS_NODE === undefined
+    ? 'delete process.env.ELECTRON_RUN_AS_NODE;\n'
+    : `process.env.ELECTRON_RUN_AS_NODE = ${JSON.stringify(env.ELECTRON_RUN_AS_NODE)};\n`;
   let child: ChildProcess;
   try {
     child = supervisor !== null
       ? spawn(supervisor, [], { cwd: options.cwd, env: supervisorEnv, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
-      : spawn(process.execPath, ['-e', SUPERVISOR_JS], { cwd: options.cwd, env: supervisorEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+      : spawn(process.execPath, ['-e', (electron ? `'use strict';\n${restoreElectron}` : '') + SUPERVISOR_JS], { cwd: options.cwd, env: supervisorEnv, stdio: ['pipe', 'pipe', 'pipe'] });
   } catch (cause) {
     control.close();
     if (socketDirectory !== null) rmSync(socketDirectory, { recursive: true, force: true });
