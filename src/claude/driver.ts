@@ -12,7 +12,7 @@
  * would have its most mistake-prone surface covered by its least reliable test.
  */
 import type { ChildProcess } from 'node:child_process';
-import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { childEnv } from '../env.js';
@@ -351,7 +351,11 @@ function isObject(value: unknown): value is Record<string, unknown> {
 /** Protect the directory before a credential is written, including Windows ACLs. */
 function privateMcpDirectory(transport?: ProcessTreeOptions): string {
   if (process.platform === 'win32' && transport?.windowsStdio === 'local-pipes') {
-    const directory = join(tmpdir(), `prism-acp-mcp-${randomBytes(24).toString('hex')}`);
+    const parent = tmpdir();
+    let available = false;
+    try { available = statSync(parent).isDirectory(); } catch { /* A host-owned parent must already be usable. */ }
+    if (!available) throw new ProcessTreeError("the private configuration parent (the process's effective TEMP) is not an accessible directory; the host must provision it before launch");
+    const directory = join(parent, `prism-acp-mcp-${randomBytes(24).toString('hex')}`);
     createWindowsPrivateDirectory(directory);
     return directory;
   }

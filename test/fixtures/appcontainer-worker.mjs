@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -47,6 +47,39 @@ if (mode === 'claude-native-mcp') {
     }
   } catch (error) { say('error', { name: error.name, message: error.message, stderr: driver.stderr.slice(-2000) }); process.exitCode = 4; }
   finally { clearTimeout(timer); say('stop', { verdict: await driver.stop({ graceMs: 0 }) }); }
+} else if (mode.startsWith('private-temp-')) {
+  await prepareProcessTree({ directory: root + '/program/supervisor' });
+  const missing = mode === 'private-temp-missing';
+  const parent = tmpdir();
+  if (!parent.replaceAll('\\', '/').toLowerCase().startsWith((root + '/home/').replaceAll('\\', '/').toLowerCase())) throw new Error('effective fixture TEMP escaped its owned home');
+  const marker = root + '/workspace/private-temp-provider-' + mode;
+  const driver = new ClaudeDriver({ cwd: root + '/workspace', binary: process.execPath,
+    binaryArgs: ['-e', 'require("node:fs").writeFileSync(process.argv[1],"owned");process.stdin.resume();setInterval(()=>{},60000)', marker],
+    parentEnv: process.env, nativeTools: 'none', processTree: { windowsStdio: 'local-pipes', startupTimeoutMs: 2000 },
+  });
+  let refused = false, config;
+  try {
+    try { driver.start(); }
+    catch (error) {
+      if (!missing || !error.message.includes('effective TEMP') || !error.message.includes('host must provision') || error.message.includes(root) || driver.processTree !== null) throw error;
+      refused = true;
+    }
+    if (missing) {
+      if (!refused || existsSync(parent) || existsSync(marker)) throw new Error('missing fixture TEMP did not refuse before launch');
+    } else {
+      config = parent + '/' + readdirSync(parent).find(name => name.startsWith('prism-acp-mcp-')) + '/mcp.json';
+      if (!existsSync(config)) throw new Error('protected fixture config missing');
+      const deadline = Date.now() + 5000;
+      while (!existsSync(marker)) {
+        if (Date.now() > deadline) throw new Error('owned fixture provider did not start');
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+    say('private_temp', { refused, parentExists: existsSync(parent), providerStarted: existsSync(marker) });
+  } finally {
+    const verdict = await driver.stop({ graceMs: 0 }); say('stop', { verdict });
+    if (config !== undefined && existsSync(config)) throw new Error('protected fixture config survived stop');
+  }
 } else if (mode === 'private-probe') {
   await prepareProcessTree({ directory: root + '/program/supervisor' });
   const directory = root + '/home/owned-native-probe';

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { restrictToCurrentUser } from '../src/private-directory.js';
 import { prepareProcessTree, windowsApprovalAdapter, createWindowsPrivateDirectory } from '../src/process-tree.js';
 
@@ -37,7 +37,7 @@ function rules(directory: string, file = false): string[] {
 describe.skipIf(process.platform !== 'win32')('restrictToCurrentUser', () => {
   let directory: string;
   beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'prism-acp-private-')); });
-  afterEach(() => rmSync(directory, { recursive: true, force: true }));
+  afterEach(() => { vi.unstubAllEnvs(); rmSync(directory, { recursive: true, force: true }); });
 
   // G137: 30 hosted full-suite samples (run 40556608228), 210 successful native calls.
   // Nearest-rank p99/max 3330.13ms; earlier hosted timeout completed in 6504ms.
@@ -91,8 +91,22 @@ describe.skipIf(process.platform !== 'win32')('restrictToCurrentUser', () => {
     await prepareProcessTree({ directory: join(directory, 'owned-supervisor') });
     expect(() => createWindowsPrivateDirectory('owned-relative')).toThrow('must be absolute');
     const absent = join(directory, 'absent');
-    expect(() => createWindowsPrivateDirectory(join(absent, 'child'))).toThrow('failed to protect');
+    expect(() => createWindowsPrivateDirectory(join(absent, 'child'))).toThrow('CreateDirectoryW failed: parent path not found (Win32 3)');
     expect(existsSync(absent)).toBe(false);
+  });
+
+  it('preserves helper preparation failures instead of presenting them as native directory creation', async () => {
+    const cache = join(directory, 'owned-supervisor');
+    await prepareProcessTree({ directory: cache });
+    writeFileSync(join(cache, 'prism-acp-supervisor.current.sha256'), 'f'.repeat(64));
+    vi.stubEnv('SystemRoot', join(directory, 'owned-no-Windows'));
+    let failure: unknown;
+    try { createWindowsPrivateDirectory(join(directory, 'not-created')); } catch (error) { failure = error; }
+    expect((failure as Error).message).toContain('cannot prepare private directory helper');
+    expect((failure as Error).message).toContain('compiler (csc.exe) was not found');
+    expect((failure as Error).message).not.toContain(directory);
+    expect((failure as Error).message).not.toContain('CreateDirectoryW');
+    expect(existsSync(join(directory, 'not-created'))).toBe(false);
   });
 
   it('supervisor generations and their atomic pointer inherit only the private cache owner', async () => {

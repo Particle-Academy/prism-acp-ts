@@ -374,7 +374,13 @@ static class Supervisor
                     attributes.length = (uint)Marshal.SizeOf(typeof(PrivateDirectoryAttributes));
                     attributes.descriptor = memory;
                     attributes.inherit = 0;
-                    if (!CreateDirectoryW(path, ref attributes)) return 133;
+                    if (!CreateDirectoryW(path, ref attributes))
+                    {
+                        // Preserve the native cause through the exit status without printing paths
+                        // or contaminating inherited provider/protocol stdio with diagnostics.
+                        int error = Marshal.GetLastWin32Error();
+                        return error > 0 && error <= 0xffff ? 0x10000 + error : 133;
+                    }
                     created = true;
                 }
                 finally { Marshal.FreeHGlobal(memory); }

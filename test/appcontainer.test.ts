@@ -106,6 +106,13 @@ describe.runIf(process.platform === 'win32' && process.env.PRISM_ACP_APPCONTAINE
     expect(lines.find(line => line.stage === 'native_private_diagnostic')).toMatchObject({ status: 0 });
   }, 20_000);
 
+  it.each(['present', 'missing', 'retargeted'])('requires the actual effective TEMP parent: %s', async mode => {
+    const { lines, final } = await probe('private-temp-' + mode, 10_000);
+    expect(final, JSON.stringify(lines)).toMatchObject({ timedOut: false, workerExit: 0, remainingBeforeCleanup: 0 });
+    expect(lines.find(line => line.stage === 'private_temp')).toMatchObject({ refused: mode === 'missing', parentExists: mode !== 'missing', providerStarted: mode !== 'missing' });
+    expect(lines.find(line => line.stage === 'stop')?.verdict).toMatchObject({ empty: true, verified: true, survivors: 0 });
+  }, 25_000);
+
   it.each(['inherit', 'ignore'])('measures %s stdio without global-pipe creation', async mode => {
     const { lines, final } = await probe(mode);
     expect(final, JSON.stringify(lines)).toMatchObject({ timedOut: false, workerExit: 0, remainingBeforeCleanup: 0 });
