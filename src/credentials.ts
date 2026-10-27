@@ -123,7 +123,8 @@ export function apiKeyEnvironment(provider: CredentialProvider, checked: ApiKeyH
 function subscriptionHomes(provider: CredentialProvider, parentEnv: Readonly<Record<string, string | undefined>>): string[] {
   const { variable, defaultDirectory } = PROVIDER_HOMES[provider];
   const homes = [join(homedir(), defaultDirectory)];
-  const moved = Object.entries(parentEnv).find(([name]) => name.toUpperCase() === variable)?.[1]?.trim();
+  const name = Object.keys(parentEnv).find((name) => name.toUpperCase() === variable);
+  const moved = name === undefined ? undefined : parentEnv[name]?.trim();
   if (moved !== undefined && moved !== '' && isAbsolute(moved)) homes.push(moved);
   return homes.map((path) => resolve(path));
 }

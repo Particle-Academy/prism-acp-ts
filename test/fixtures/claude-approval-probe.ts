@@ -21,7 +21,12 @@ async function bounded<T>(promise: Promise<T>, ms: number, label: string): Promi
 }
 function cleanParent(root: string): Record<string, string> {
   const allowed = new Set(['SYSTEMROOT','WINDIR','COMSPEC','PATH','PATHEXT','TEMP','TMP','TMPDIR','LANG']);
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && allowed.has(key.toUpperCase()))) as Record<string,string>;
+  const env: Record<string,string> = {};
+  for (const key of Object.keys(process.env)) {
+    if (!allowed.has(key.toUpperCase())) continue;
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
   return { ...env, HOME:root, USERPROFILE:root, XDG_CONFIG_HOME:root };
 }
 

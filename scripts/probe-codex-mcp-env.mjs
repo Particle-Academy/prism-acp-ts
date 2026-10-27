@@ -86,10 +86,17 @@ const server = createServer((request, response) => {
 await new Promise((yes) => server.listen(0, '127.0.0.1', yes));
 const origin = `http://127.0.0.1:${server.address().port}`;
 const safeNames = new Set(['PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'LC_CTYPE']);
-const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => safeNames.has(name.toUpperCase())));
+const baseEnv = {};
+for (const name of Object.keys(process.env)) {
+  if (!safeNames.has(name.toUpperCase())) continue;
+  const value = process.env[name];
+  if (value !== undefined) baseEnv[name] = value;
+}
 
 async function contains(directory, token) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
+    // The CLI owns its credential store. Never inspect its contents, even in this synthetic probe.
+    if (['auth.json', '.credentials.json', 'credentials.json', 'tokens.json', 'token.json'].includes(entry.name.toLowerCase())) continue;
     const path = join(directory, entry.name);
     if (entry.isDirectory() ? await contains(path, token) : entry.isFile() && (await readFile(path)).includes(Buffer.from(token))) return true;
   }
@@ -157,8 +164,8 @@ try {
   if (part !== 'legacy') await runCase('native hostile keyed filters exclude bearer', { token: tokens[2], filters: true });
   await writeFile(join(home, 'scanner-presence.txt'), LEGACY, { mode: 0o600 });
   assert(await contains(home, LEGACY), 'persistence scanner positive presence control');
-  for (const token of tokens) assert(!await contains(home, token), 'forwarded MCP bearer is absent from CLI-home regular files');
-  console.log(JSON.stringify({ version, part, passed, fixtureOnly: true, externalInference: false }));
+  for (const token of tokens) assert(!await contains(home, token), 'forwarded MCP bearer is absent from scanned non-credential CLI-home files');
+  console.log(JSON.stringify({ version, part, passed, fixtureOnly: true, externalInference: false, credentialStoresInspected: false }));
 } finally {
   for (const driver of active) await driver.stop({ graceMs: 0 });
   server.closeAllConnections(); await new Promise((yes) => server.close(yes));

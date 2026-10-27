@@ -67,6 +67,64 @@ package entirely: it never reads one, never holds one, and never puts one on a
 wire. An app that bills per token instead can hand the drivers an API key; see
 [API keys instead of a subscription](#api-keys-instead-of-a-subscription).
 
+## Reuse an existing subscription in host mode
+
+Subscription mode uses the CLI's own existing login. Prism does not read, parse,
+copy, hash or share the user's stored credentials or token files; the native CLI
+owns that store. A new sign-in is not required for an account already signed in.
+An app still owns the explicit decision to bind its principal and session to that
+machine account. Login metadata alone is not authorization or proof of model access.
+
+```ts
+const driver = new ClaudeDriver({
+  cwd: appOwnedWorkingDirectory,
+  credentials: { mode: 'subscription' }, // also the default
+  nativeTools: 'none',
+  mcpServers: appSuppliedUiMcpServers,
+});
+driver.start();
+const models = await driver.modelState(); // control initialization; no model turn
+// The app authorizes any later prompt and every UI MCP action.
+await driver.stop({ graceMs: 0 });
+```
+
+Use a fresh Claude2.1.311 session. Omit `processTree.windowsStdio` (or omit
+`processTree` entirely): this recipe runs in the host, without LOCAL/AppContainer
+transport. Preserve the trusted host's original home/config environment; do not
+redirect it to an empty home or import credentials. The environment builder
+withholds billing credentials that would outrank the subscription. Explicit
+app-supplied API keys and MCP credentials remain separate, app-owned inputs.
+
+`nativeTools: 'none'` restricts the measured CLI's agent capabilities and inherited
+settings/MCP, while the process retains the host user's OS authority. It is not an
+OS sandbox. No credential-file grant, credential copy or sharing into a container
+is part of this recipe. The app owns principal, role and session checks for its
+supplied MCP server. Pre-turn `mcpServers === null` means no report yet, not zero
+servers. Model lists are metadata, not an inference entitlement check.
+
+Codex remains limited to the published `CODEX_NATIVE_TOOLS_NONE` matrix:
+CLI0.163.0 with explicit `gpt-5.3-codex`. A recognized CLI or existing ChatGPT login
+does not make another model safe. The measured host account advertises
+`gpt-6.1-sol` as its default and does not advertise `gpt-5.3-codex`; restricted reuse
+of that default is refused. Do not fall back to native execution or relax the
+model guard to accept it.
+
+The standing workstation check initializes against an existing Claude subscription
+without a prompt or turn. It guards Prism-side file reads and uses an owned
+metadata-only MCP fixture. It never reads or copies token files. Hosted CI has no
+user subscription, so this opt-in is explicitly skipped there:
+
+```powershell
+$env:PRISM_ACP_EXISTING_SUBSCRIPTION = '1'
+npm run build
+npx vitest run test/existing-subscription.test.ts
+```
+
+Run it only where the measured CLI is already signed in; an absent login fails.
+The native CLI may maintain its own cache/diagnostic state. This test establishes
+login metadata and restricted initialization, not a successful model turn or
+model-emitted native-tool refusal under the account.
+
 ## The environment is built, not inherited
 
 `childEnv` constructs the spawned CLI's environment **allow-list-first**, and
