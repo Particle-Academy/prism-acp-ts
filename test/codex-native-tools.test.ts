@@ -7,11 +7,20 @@ function setup(options: Partial<CodexDriverOptions> = {}, version = '0.163.0', c
   mcp_servers: { foreign: { command: 'foreign-mcp', args: [] } },
 }, behavior: { reportedModel?: string; earlyThreadStarted?: boolean; onUpdate?: (driver: CodexDriver) => void; configError?: string } = {}) {
   const frames: Record<string, unknown>[] = [], problems: string[] = [];
+  // Native config/read includes the global launch overrides; explicit feature values below can inject a bad receipt.
+  const supplied=config as Record<string,unknown> | null;
+  const baseFeatures={plugins:false,remote_plugin:false};
+  const effective=options.nativeTools==='none'&&supplied!==null&&typeof supplied==='object'&&!Array.isArray(supplied)
+    ? {...supplied,features:supplied.features===undefined?baseFeatures:
+      supplied.features!==null&&typeof supplied.features==='object'&&!Array.isArray(supplied.features)
+        ? {...baseFeatures,...supplied.features}:supplied.features} : config;
+  let launchArgs:readonly string[]|undefined;
   let closes = 0, receive!: CodexTransportHandlers['onFrame'];
   const driver = new CodexDriver({ cwd: 'C:/work', parentEnv: {}, model: 'gpt-5.3-codex', ...options }, {
     onProtocolError: (problem) => problems.push(problem),
     onUpdate: () => behavior.onUpdate?.(driver),
   }, (_options, handlers) => {
+    launchArgs=_options.binaryArgs;
     receive = handlers.onFrame;
     return {
       start: async () => {}, close: () => { closes++; },
@@ -20,7 +29,7 @@ function setup(options: Partial<CodexDriverOptions> = {}, version = '0.163.0', c
         if (frame.id === undefined) return;
         const params = frame.params as Record<string, unknown> | undefined;
         const result = frame.method === 'initialize' ? { userAgent: `prism-test/${version} (test)` }
-          : frame.method === 'config/read' ? { config }
+          : frame.method === 'config/read' ? { config:effective }
           : frame.method === 'thread/start' || frame.method === 'thread/resume' ? { thread: { id: 'thread-test' }, model: behavior.reportedModel ?? params?.model }
           : frame.method === 'thread/turns/list' ? { data: [], nextCursor: null }
           : frame.method === 'model/list' ? { data: [
@@ -36,7 +45,7 @@ function setup(options: Partial<CodexDriverOptions> = {}, version = '0.163.0', c
       },
     } satisfies CodexTransport;
   });
-  return { driver, frames, problems, get closes() { return closes; }, receive: (raw: unknown) => receive(raw) };
+  return { driver, frames, problems, get launchArgs(){return launchArgs;},get closes() { return closes; }, receive: (raw: unknown) => receive(raw) };
 }
 
 describe('measured Codex native-tool restriction', () => {
@@ -48,7 +57,25 @@ describe('measured Codex native-tool restriction', () => {
     const state = setup(); state.driver.start(); await state.driver.ready;
     expect(state.frames.some((f) => f.method === 'config/read')).toBe(false);
     expect((state.frames.find((f) => f.method === 'thread/start')?.params as Record<string, unknown>).config).toBeUndefined();
+    expect(state.launchArgs).toBeUndefined();
     state.driver.kill();
+  });
+
+  it('disables both plugin startup features only for restricted launch, preserving the interpreter prefix',async()=>{
+    const prefix=['/owned/launcher.mjs','--owned-prefix'];
+    const restricted=setup({nativeTools:'none',binaryArgs:prefix});restricted.driver.start();await restricted.driver.ready;
+    expect(restricted.launchArgs).toEqual([...prefix,'-c','features.plugins=false','-c','features.remote_plugin=false']);
+    expect(prefix).toEqual(['/owned/launcher.mjs','--owned-prefix']);restricted.driver.kill();
+    const ordinary=setup({binaryArgs:prefix});ordinary.driver.start();await ordinary.driver.ready;
+    expect(ordinary.launchArgs).toEqual(prefix);ordinary.driver.kill();
+  });
+
+  for(const feature of ['plugins','remote_plugin'])it.each([undefined,true,'false',null])(`refuses an unverifiable startup ${feature}=%s before the first turn`,async(value)=>{
+    const state=setup({nativeTools:'none'},'0.163.0',{features:{plugins:false,remote_plugin:false,[feature]:value}});
+    state.driver.start();state.driver.prompt('must remain queued');await state.driver.ready;
+    expect(state.frames.some(f=>f.method==='thread/start'||f.method==='turn/start')).toBe(false);
+    expect(state.problems.join(' ')).toContain(`could not verify startup feature ${feature}=false`);
+    expect(state.closes).toBe(1);
   });
 
   it.each([undefined, 'gpt-6.1-sol', 'future-model'])('refuses unmeasured or implicit model %s before starting', (model) => {

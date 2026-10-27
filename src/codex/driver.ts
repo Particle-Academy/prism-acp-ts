@@ -10,7 +10,7 @@ import { codexFailureOf } from '../turn-failure.js';
 import { codexMcpConfig, codexMcpSessionConfig, codexMcpShellPolicy, codexMcpDisabledConfig, readDisabledMcpServers, readMcpServers, type McpServer, type McpToolApproval } from '../mcp.js';
 import { isValidCliSessionId } from '../session-id.js';
 import { stripAnsiControlSequences } from '../text.js';
-import { assertRestrictedCli, assertRestrictedConfig, assertRestrictedModel, CODEX_NATIVE_TOOLS_NONE, CodexNativeToolsRefused, restrictedToolConfig } from './native-tools.js';
+import { assertRestrictedCli, assertRestrictedConfig, assertRestrictedModel, CODEX_NATIVE_TOOLS_NONE, CodexNativeToolsRefused, RESTRICTED_STARTUP_ARGS, restrictedToolConfig } from './native-tools.js';
 import { JsonRpcPeer } from '../jsonrpc.js';
 import {
   META_CLI_SESSION_ID,
@@ -513,13 +513,16 @@ export class CodexDriver implements AgentDriver {
       onProblem: (problem, detail) => this.#events.onProtocolError?.(problem, detail),
       onExit: (code, signal) => this.#onExit(code, signal),
     };
+    const binaryArgs = this.#options.nativeTools === 'none'
+      ? [...(this.#options.binaryArgs ?? []), ...RESTRICTED_STARTUP_ARGS]
+      : this.#options.binaryArgs;
     const transport = this.#transportFactory(
       {
         cwd: this.#options.cwd,
         ...(this.#options.processTree === undefined ? {} : { processTree: this.#options.processTree }),
         env,
         ...(this.#options.binary === undefined ? {} : { binary: this.#options.binary }),
-        ...(this.#options.binaryArgs === undefined ? {} : { binaryArgs: this.#options.binaryArgs }),
+        ...(binaryArgs === undefined ? {} : { binaryArgs }),
       },
       handlers,
     );

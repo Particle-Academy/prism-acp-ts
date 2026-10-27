@@ -47,9 +47,17 @@ const HARMLESS_FEATURES = new Set([
   'auth_elicitation', 'mentions_v2',
 ]);
 
+// Thread config arrives after app-server startup. Native0.163.0 can clone a plugin marketplace before then.
+export const RESTRICTED_STARTUP_ARGS: readonly string[] = Object.freeze([
+  '-c', 'features.plugins=false', '-c', 'features.remote_plugin=false',
+]);
+
 /** Refuse unmeasured home/project settings instead of assuming the finite native override list covers them. */
 export function assertRestrictedConfig(effective: Record<string, unknown>): void {
   const features = optionalTable(effective.features, 'features');
+  for (const name of ['plugins', 'remote_plugin']) {
+    if (features[name] !== false) throw new CodexNativeToolsRefused(`nativeTools:'none' could not verify startup feature ${name}=false`);
+  }
   for (const [name, value] of Object.entries(features)) {
     // These entries are always overwritten with false by the final restriction config.
     if ((NATIVE_FEATURES as readonly string[]).includes(name)) continue;
