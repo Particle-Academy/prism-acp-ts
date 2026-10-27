@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,12 +33,16 @@ describe.runIf(process.platform === 'win32' && process.env.PRISM_ACP_APPCONTAINE
     writeFileSync(source, 'static class OwnedStall { static void Main() { System.Threading.Thread.Sleep(10000); } }');
     const stalledExe = join(stalled, 'prism-acp-supervisor.exe');
     await exec(csc, ['-nologo', '-target:exe', `-out:${stalledExe}`, source], { windowsHide: true, timeout: 20_000 });
-    writeFileSync(stalledExe + '.sha256', createHash('sha256').update(readFileSync(stalledExe)).digest('hex'));
+    const stalledHash = createHash('sha256').update(readFileSync(stalledExe)).digest('hex');
+    renameSync(stalledExe, join(stalled, `prism-acp-supervisor-${stalledHash}.exe`));
+    writeFileSync(join(stalled, 'prism-acp-supervisor.current.sha256'), stalledHash);
     const exiting = join(root, 'program', 'exiting-supervisor'); mkdirSync(exiting);
     const exitSource = join(exiting, 'owned-exit.cs'), exitExe = join(exiting, 'prism-acp-supervisor.exe');
     writeFileSync(exitSource, 'static class OwnedExit { static int Main() { return 123; } }');
     await exec(csc, ['-nologo', '-target:exe', `-out:${exitExe}`, exitSource], { windowsHide: true, timeout: 20_000 });
-    writeFileSync(exitExe + '.sha256', createHash('sha256').update(readFileSync(exitExe)).digest('hex'));
+    const exitHash = createHash('sha256').update(readFileSync(exitExe)).digest('hex');
+    renameSync(exitExe, join(exiting, `prism-acp-supervisor-${exitHash}.exe`));
+    writeFileSync(join(exiting, 'prism-acp-supervisor.current.sha256'), exitHash);
     writeFileSync(join(root, 'program', 'owned-invalid.exe'), 'owned invalid executable; must never run');
   }, 60_000);
   afterAll(() => {

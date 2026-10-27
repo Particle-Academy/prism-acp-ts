@@ -61,6 +61,29 @@ jobs:
         env:
           PRISM_ACP_APPCONTAINER: '1'
 
+  supervisor-cold-cache:
+    name: Windows supervisor, parallel cold installs
+    runs-on: windows-latest
+    needs: third-party
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Released producer must fail; current producer must pass the same 20x8 oracle
+        run: node scripts/check-supervisor-cold-cache.mjs
+      - name: Preserve cold-cache measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-supervisor-cold-cache
+          path: .cold-cache-evidence/
+
   codex-native-tools:
     name: Codex native tools, ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

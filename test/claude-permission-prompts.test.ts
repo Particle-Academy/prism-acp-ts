@@ -69,7 +69,7 @@ describe('the arguments and the settings', () => {
         expect(hook).toMatchObject({ type: 'command', onFailure: 'block' });
         expect(hook.timeout as number).toBeGreaterThanOrEqual(3600);
         expect(hook.args).toBeInstanceOf(Array); // exec form; paths never pass through Claude's shell parser
-        expect(hook.command).toMatch(/(?:prism-acp-supervisor\.exe|\/bin\/sh)$/i);
+        expect(hook.command).toMatch(/(?:prism-acp-supervisor-[0-9a-f]{64}\.exe|\/bin\/sh)$/);
     });
 
     it('a tool name that would widen the matcher is refused', () => {

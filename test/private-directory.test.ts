@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { restrictToCurrentUser } from '../src/private-directory.js';
+import { prepareProcessTree, windowsApprovalAdapter } from '../src/process-tree.js';
 
 /*
  * A private directory is readable by the current user and NOBODY else, whatever grants it started with. Removing
@@ -21,10 +22,10 @@ function currentSid(): string {
 }
 
 /** Every access rule on the directory as `SID|inherited|type`, read by .NET with no PowerShell modules. */
-function rules(directory: string): string[] {
+function rules(directory: string, file = false): string[] {
   const env = { ...process.env };
   for (const name of Object.keys(env)) if (name.toUpperCase() === 'PSMODULEPATH') delete env[name];
-  const script = `$a=[System.IO.Directory]::GetAccessControl('${directory.replace(/'/g, "''")}');`
+  const script = `$a=[System.IO.${file ? 'File' : 'Directory'}]::GetAccessControl('${directory.replace(/'/g, "''")}');`
     + `'protected='+$a.AreAccessRulesProtected;`
     + `$a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])|%{$_.IdentityReference.Value+'|'+$_.IsInherited+'|'+$_.AccessControlType}`;
   const out = execFileSync(join(system32, 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
@@ -50,6 +51,15 @@ describe.skipIf(process.platform !== 'win32')('restrictToCurrentUser', () => {
   it('does the same for a directory with only its inherited grants', () => {
     restrictToCurrentUser(directory);
 
+    expect(rules(directory)).toEqual(['protected=True', `${currentSid()}|False|Allow`]);
+  });
+
+  it('supervisor generations and their atomic pointer inherit only the private cache owner', async () => {
+    restrictToCurrentUser(directory);
+    await prepareProcessTree({ directory });
+    const expected = ['protected=False', `${currentSid()}|True|Allow`];
+    expect(rules(windowsApprovalAdapter(), true)).toEqual(expected);
+    expect(rules(join(directory, 'prism-acp-supervisor.current.sha256'), true)).toEqual(expected);
     expect(rules(directory)).toEqual(['protected=True', `${currentSid()}|False|Allow`]);
   });
 });

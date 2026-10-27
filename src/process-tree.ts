@@ -1,6 +1,6 @@
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, extname, isAbsolute, join } from 'node:path';
@@ -443,13 +443,19 @@ function supervisorDirectory(): string {
 
 const sha256Of = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
 
-/** The built supervisor, if it is there and still the bytes that were built. */
-function verifiedSupervisor(executable: string, hashFile: string): 'ok' | 'missing' | 'mismatch' {
-  if (!isFile(executable) || !isFile(hashFile)) return 'missing';
+/** Read one atomic pointer, then verify the immutable executable named by that digest. */
+function verifiedSupervisor(directory: string): { state: 'ok'; executable: string } | { state: 'missing' | 'mismatch' } {
+  const pointer = join(directory, 'prism-acp-supervisor.current.sha256');
+  if (!isFile(pointer)) return { state: 'missing' };
   try {
-    return sha256Of(executable) === readFileSync(hashFile, 'utf8').trim() ? 'ok' : 'mismatch';
+    if (statSync(pointer).size > 80) return { state: 'mismatch' };
+    const hash = readFileSync(pointer, 'utf8').trim();
+    if (!/^[0-9a-f]{64}$/.test(hash)) return { state: 'mismatch' };
+    const executable = join(directory, `prism-acp-supervisor-${hash}.exe`);
+    if (!isFile(executable)) return { state: 'missing' };
+    return sha256Of(executable) === hash ? { state: 'ok', executable } : { state: 'mismatch' };
   } catch {
-    return 'missing';
+    return { state: 'missing' };
   }
 }
 
@@ -461,10 +467,8 @@ function verifiedSupervisor(executable: string, hashFile: string): 'ok' | 'missi
  */
 function windowsSupervisor(): string {
   const directory = supervisorDirectory();
-  const executable = join(directory, 'prism-acp-supervisor.exe');
-  const hashFile = `${executable}.sha256`;
-  const state = verifiedSupervisor(executable, hashFile);
-  if (state === 'ok') return executable;
+  const state = verifiedSupervisor(directory);
+  if (state.state === 'ok') return state.executable;
 
   const windowsDirectory = process.env.SystemRoot ?? process.env.windir ?? 'C:\Windows';
   const csc = ['Framework64', 'FrameworkArm64', 'Framework']
@@ -481,6 +485,8 @@ function windowsSupervisor(): string {
   const unique = randomBytes(6).toString('hex');
   const source = join(directory, `supervisor-${unique}.cs`);
   const built = join(directory, `prism-acp-supervisor-${unique}.exe`);
+  const pointer = join(directory, 'prism-acp-supervisor.current.sha256');
+  const pendingPointer = join(directory, `supervisor-${unique}.sha256`);
   try {
     writeFileSync(source, SUPERVISOR_CS);
     execFileSync(csc, ['-nologo', '-optimize+', '-target:exe', `-out:${built}`, source], { stdio: 'ignore', windowsHide: true });
@@ -494,17 +500,24 @@ function windowsSupervisor(): string {
     throw new ProcessTreeError('cannot contain the provider: the supervisor was removed right after it was built (antivirus quarantine is the likely cause)');
   }
   const hash = sha256Of(built);
+  const executable = join(directory, `prism-acp-supervisor-${hash}.exe`);
   try {
-    // A stale or altered copy is replaced; a copy another process is running cannot be, and is checked below instead.
-    if (state === 'mismatch') rmSync(executable, { force: true });
-    renameSync(built, executable);
-    writeFileSync(hashFile, hash);
+    // Compilers can produce different bytes concurrently. Never replace an executable another reader may launch:
+    // publish immutable bytes first, then atomically replace only the small pointer to that complete generation.
+    try { linkSync(built, executable); }
+    catch { if (!isFile(executable) || sha256Of(executable) !== hash) throw new Error('supervisor publication failed'); }
+    if (sha256Of(executable) !== hash) throw new Error('supervisor publication hash mismatch');
+    writeFileSync(pendingPointer, hash, { flag: 'wx' });
+    renameSync(pendingPointer, pointer);
   } catch {
+    // A competing publisher may have won. Only its independently verified complete generation is accepted below.
+  } finally {
     rmSync(built, { force: true });
+    rmSync(pendingPointer, { force: true });
   }
-  const after = verifiedSupervisor(executable, hashFile);
-  if (after === 'ok') return executable;
-  throw new ProcessTreeError(after === 'mismatch'
+  const after = verifiedSupervisor(directory);
+  if (after.state === 'ok') return after.executable;
+  throw new ProcessTreeError(after.state === 'mismatch'
     ? 'cannot contain the provider: the supervisor does not match the hash recorded when it was built, and could not be replaced'
     : 'cannot contain the provider: the supervisor is missing after it was built (antivirus quarantine is the likely cause)');
 }

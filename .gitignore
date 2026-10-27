@@ -2,3 +2,4 @@ node_modules/
 dist/
 .native-tools-probes/
 .claude-native-cli/
+.cold-cache-evidence/
