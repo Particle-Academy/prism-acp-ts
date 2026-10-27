@@ -83,6 +83,8 @@ jobs:
         with:
           name: windows-supervisor-cold-cache
           path: .cold-cache-evidence/
+          include-hidden-files: true
+          if-no-files-found: error
 
   codex-native-tools:
     name: Codex native tools, ${{ matrix.os }}
