@@ -121,9 +121,49 @@ static class AppContainerHost
         }
         Console.WriteLine("{\"stage\":\"stdio_acl\",\"protected\":true,\"principals\":2,\"pipes\":3}"); return 0;
     }
+    static int PrivateAccess(string readable,string privateFile) {
+        Check(File.ReadAllText(readable)=="owned-readable-control","foreign readable control");
+        bool denied=false;
+        try { File.ReadAllText(privateFile); }
+        catch(UnauthorizedAccessException) { denied=true; }
+        Check(denied,"foreign private read denied");
+        Console.WriteLine("{\"fixture\":\"private_foreign_access\",\"readableControl\":true,\"privateDenied\":true}");
+        return 0;
+    }
+    static void CheckForeignPrivateAccess(string root,IntPtr foreignSid,IntPtr job,IntPtr environment) {
+        // Both profiles can traverse this owned fixture and read its positive
+        // control. The private directory's protected DACL must block the other
+        // profile despite the same Windows user and newly inherited grants.
+        Grant(root,new SecurityIdentifier(foreignSid),FileSystemRights.ReadAndExecute);
+        string home=Path.Combine(root,"home"),readable=Path.Combine(home,"owned-readable-control");
+        File.WriteAllText(readable,"owned-readable-control");
+        IntPtr list=IntPtr.Zero,capsMemory=IntPtr.Zero; ProcessInfo probe=new ProcessInfo();
+        try {
+            IntPtr size=IntPtr.Zero; InitializeProcThreadAttributeList(IntPtr.Zero,1,0,ref size); list=Marshal.AllocHGlobal(size);
+            Check(InitializeProcThreadAttributeList(list,1,0,ref size),"foreign attributes");
+            var caps=new SecurityCapabilities(); caps.sid=foreignSid; capsMemory=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SecurityCapabilities))); Marshal.StructureToPtr(caps,capsMemory,false);
+            Check(UpdateProcThreadAttribute(list,0,new IntPtr(0x20009),capsMemory,new IntPtr(Marshal.SizeOf(typeof(SecurityCapabilities))),IntPtr.Zero,IntPtr.Zero),"foreign capabilities");
+            var startup=new StartupEx(); startup.startup.cb=Marshal.SizeOf(typeof(StartupEx)); startup.attributes=list;
+            startup.startup.flags=0x100; startup.startup.input=GetStdHandle(-10); startup.startup.output=GetStdHandle(-11); startup.startup.error=GetStdHandle(-12);
+            string binary=System.Reflection.Assembly.GetExecutingAssembly().Location;
+            string command=Quote(binary)+" --private-access "+Quote(readable)+" "+Quote(Path.Combine(home,"owned-private","mcp.json"));
+            Check(CreateProcessW(binary,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,true,0x08080404,environment,home,ref startup,out probe),"foreign create");
+            if(!AssignProcessToJobObject(job,probe.process)) { TerminateProcess(probe.process,1); Check(false,"foreign assign"); }
+            Check(IsContainer(probe.process,foreignSid),"foreign private identity");
+            Check(ResumeThread(probe.thread)!=uint.MaxValue,"foreign resume");
+            Check(WaitForSingleObject(probe.process,5000)==0,"foreign private deadline");
+            uint code; Check(GetExitCodeProcess(probe.process,out code)&&code==0,"foreign private result");
+            Console.WriteLine("{\"fixture\":\"private_foreign_identity\",\"appContainer\":true}");
+        } finally {
+            if(probe.thread!=IntPtr.Zero) CloseHandle(probe.thread); if(probe.process!=IntPtr.Zero) CloseHandle(probe.process);
+            if(list!=IntPtr.Zero) { DeleteProcThreadAttributeList(list); Marshal.FreeHGlobal(list); }
+            if(capsMemory!=IntPtr.Zero) Marshal.FreeHGlobal(capsMemory);
+        }
+    }
     static int Main(string[] args) {
         if(args.Length==1&&args[0]=="--pipe-probe") return PipeProbe();
         if(args.Length==1&&args[0]=="--pipe-acl") return PipeAclProbe();
+        if(args.Length==3&&args[0]=="--private-access") return PrivateAccess(args[1],args[2]);
         if(args.Length!=6) return 2;
         string root=Path.GetFullPath(args[0]),node=Path.GetFullPath(args[1]),worker=Path.GetFullPath(args[2]),mode=args[3],foreign=Path.GetFullPath(args[4]);
         int timeout=int.Parse(args[5]); if(timeout<100||timeout>30000) return 2;
@@ -141,6 +181,10 @@ static class AppContainerHost
             Grant(cwd,identity,FileSystemRights.Modify); Grant(home,identity,FileSystemRights.Modify);
             Grant(cwd,WindowsIdentity.GetCurrent().User,FileSystemRights.FullControl); Grant(home,WindowsIdentity.GetCurrent().User,FileSystemRights.FullControl);
             Low(cwd); Low(home);
+            // Windows rewrites TEMP/TMP when starting this profile, even when
+            // the supplied environment named cwd. Provision that effective
+            // temp under the assigned home; all grants inherit unchanged.
+            Directory.CreateDirectory(Path.Combine(home,"Packages",name,"AC","Temp"));
             job=CreateJobObjectW(IntPtr.Zero,null); Check(job!=IntPtr.Zero,"job"); var limits=new ExtendedLimit(); limits.basic.flags=0x2000;
             Check(SetInformationJobObject(job,9,ref limits,Marshal.SizeOf(typeof(ExtendedLimit))),"job limits");
             IntPtr size=IntPtr.Zero; InitializeProcThreadAttributeList(IntPtr.Zero,1,0,ref size); list=Marshal.AllocHGlobal(size);
@@ -167,6 +211,30 @@ static class AppContainerHost
             GetExitCodeProcess(child.process,out exit);
             // Measure before the fixture's cleanup kill: host death must itself
             // remove the supervisor and all descendants, not rely on this host.
+            if(mode=="private-config"&&!timedOut&&exit==0) {
+                var directory=new DirectoryInfo(Path.Combine(home,"owned-private"));
+                var acl=directory.GetAccessControl();
+                Check(acl.AreAccessRulesProtected,"protected private configuration ACL");
+                var user=WindowsIdentity.GetCurrent().User; var container=new SecurityIdentifier(sid); int grants=0;
+                bool userFound=false,containerFound=false;
+                foreach(FileSystemAccessRule rule in acl.GetAccessRules(true,true,typeof(SecurityIdentifier))) {
+                    Check(!rule.IsInherited&&rule.AccessControlType==AccessControlType.Allow,"explicit private grant");
+                    Check(rule.IdentityReference.Equals(user)||rule.IdentityReference.Equals(container),"foreign private grant");
+                    userFound|=rule.IdentityReference.Equals(user); containerFound|=rule.IdentityReference.Equals(container); grants++;
+                }
+                Check(userFound&&containerFound&&grants==2,"exact private principals");
+                Check(File.Exists(Path.Combine(directory.FullName,"mcp.json")),"private configuration written");
+                Console.WriteLine("{\"fixture\":\"private_acl\",\"protected\":true,\"principals\":2}");
+                var fileAcl=new FileInfo(Path.Combine(directory.FullName,"mcp.json")).GetAccessControl();
+                Check(!fileAcl.AreAccessRulesProtected,"private file inheritance"); int fileGrants=0;
+                foreach(FileSystemAccessRule rule in fileAcl.GetAccessRules(true,true,typeof(SecurityIdentifier))) {
+                    Check(rule.IsInherited&&rule.AccessControlType==AccessControlType.Allow,"inherited private file grant");
+                    Check(rule.IdentityReference.Equals(user)||rule.IdentityReference.Equals(container),"foreign private file grant"); fileGrants++;
+                }
+                Check(fileGrants==2,"exact private file principals");
+                Console.WriteLine("{\"fixture\":\"private_file_acl\",\"inherited\":true,\"principals\":2}");
+                CheckForeignPrivateAccess(root,foreignSid,job,environment);
+            }
             remaining=Active(job);
             if(!timedOut) for(int i=0;i<100&&remaining!=0;i++) { Thread.Sleep(20); remaining=Active(job); }
         } catch(Exception error) { Console.Error.WriteLine(error.Message); }

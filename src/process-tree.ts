@@ -531,6 +531,20 @@ export function windowsApprovalAdapter(): string {
   }
 }
 
+/** Internal private-file support: quiet native operation, no global libuv pipes or NUL. */
+export function createWindowsPrivateDirectory(directory: string): void {
+  if (process.platform !== 'win32') throw new ProcessTreeError('Windows private directory protection is unavailable');
+  if (!isAbsolute(directory)) throw new ProcessTreeError('private directory must be absolute');
+  try {
+    execFileSync(windowsSupervisor(), ['--create-private-directory', directory], {
+      stdio: 'inherit', windowsHide: true, timeout: 5_000,
+    });
+  } catch (cause) {
+    const status = (cause as { status?: unknown }).status;
+    throw new ProcessTreeError(`failed to protect the private directory for this Windows identity${Number.isInteger(status) ? ` (exit ${String(status)})` : ''}`);
+  }
+}
+
 /**
  * Build (or verify) the Windows supervisor ahead of the first session, so a missing compiler or a quarantined
  * executable surfaces once, at startup, as a ProcessTreeError. A no-op elsewhere. `directory` overrides where it is

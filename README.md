@@ -613,6 +613,66 @@ Codex reads the effective configuration and supplies a disabled entry with a
 valid transport, including when the name was previously absent. This option
 does not provide wholesale replacement of inherited MCP configuration.
 
+### Claude app MCP only
+
+A trusted host can set `nativeTools: 'none'` on `ClaudeDriver` to remove native
+execution, filesystem and web tools and use only its explicit `mcpServers`.
+User/project/local settings and inherited MCP servers are excluded for this
+invocation, including when the supplied server list is empty. This is constructor
+policy, never a model argument or an ACP session field. The default driver keeps
+its existing behavior.
+
+```ts
+const driver = new ClaudeDriver({
+  cwd: assignedWorkspace,
+  parentEnv: assignedProviderEnvironment,
+  credentials: { mode: 'subscription' },
+  nativeTools: 'none',
+  mcpServers: applicationServers,
+  // Optional, explicit per-tool permission rule; this does not narrow the catalog.
+  allowedTools: ['mcp__workspace__read_document'],
+  processTree: { windowsStdio: 'local-pipes', startupTimeoutMs: 5_000 }, // Windows
+});
+```
+
+The measured CLI is **Claude Code 2.1.311**, and only fresh sessions are supported.
+An unknown/missing version or `resumeSessionId` refuses; `bypassPermissions` also
+refuses. At most one prompt waits for a successful control initialize response.
+Malformed protocol data, inconsistent system/init versions and native/inherited
+entries in the announced tool catalog close the process tree. The CLI announces
+its catalog after receiving the first prompt: the pre-prompt boundary is the
+validated CLI version and explicit launch controls, rather than that later notice.
+
+This uses the CLI's [`--tools ""`, `--strict-mcp-config`, empty `--setting-sources`
+and `--restricted`](https://code.claude.com/docs/en/cli-reference) together.
+Claude's control-only `EndConversation` may remain while MCP tools are present;
+it provides no execution, file or web route. Machine-managed policy still applies.
+A conflicting managed configuration must be resolved by the embedding host;
+this mode does not bypass an administrator's policy. Supplied MCP tools retain
+the authority and permissions the host gives them.
+
+The assigned `HOME`, `USERPROFILE` and `CLAUDE_CONFIG_DIR` are preserved for
+subscription mode; this option never adopts another login or creates a substitute
+home. In API-key mode the existing explicit `credentials.home` contract applies.
+Windows LOCAL mode creates temporary MCP configuration with a protected ACL at
+creation, granting only the user and the actual AppContainer SID. The host must
+provision a writable effective temp directory. Windows can rewrite `TEMP`/`TMP`
+under the profile's `Packages/<profile>/AC/Temp`, even when the launch environment
+supplied a different temp path. Parent directories and their grants are never
+created or widened by this operation. Configuration is removed when the driver
+stops or startup fails. `cancel()` interrupts the turn; `stop()` ends the process
+tree and removes its configuration.
+
+The native regression uses a synthetic key, `claude-sonnet-4-6` request shape and
+owned loopback model/MCP servers. It proves a supplied MCP call, refusals of forced
+Bash/Read/Write/WebFetch/inherited-MCP calls, and cancel/stop cleanup. Its
+unrestricted control loads a planted inherited server and runs a planted hook.
+CI installs exact 2.1.311 native executables on Windows and Linux. A separate
+Windows test starts the actual CLI and discovers a supplied stdio MCP server
+inside a zero-capability AppContainer; it performs no authenticated model turn
+and adds no network exemption. Account/model entitlement and authenticated turns
+must be validated in the embedding application's provisioned home and network.
+
 ### Measured Codex native-tool restriction
 
 A trusted host can opt into `nativeTools: 'none'` on `CodexDriver` to remove
@@ -930,9 +990,10 @@ the deadline does not interrupt synchronous compilation or filesystem access.
 
 API-key homes must already exist with application-provisioned container ACLs;
 LOCAL mode refuses to create them through the ordinary Windows ACL helper.
-Claude's generated `mcpServers`, `disabledMcpServers` and `permissionPrompts`
-configuration is currently refused in LOCAL mode: its private-directory helper
-and approval channel need a separate AppContainer-compatible implementation.
+Claude accepts generated `mcpServers` in LOCAL mode with `nativeTools: 'none'`
+as described above. Other generated Claude MCP configuration, `disabledMcpServers`
+and `permissionPrompts` still refuse in LOCAL mode; their ordinary ACL/approval
+paths require a separate AppContainer-compatible implementation.
 
 Both drivers and `listModels()` accept the same configuration through
 `processTree`. Their protocol I/O uses the selected transport automatically:
@@ -950,7 +1011,9 @@ This option covers Prism's launch and protocol I/O. The application still owns
 sandbox provisioning, ACLs, networking, credential/profile storage and validation
 of the real CLI and any processes it starts. A CLI that creates incompatible IPC
 itself needs its own compatibility fix. Package tests exercise trusted fixture
-executables inside real AppContainers without credentials or model calls.
+executables inside real AppContainers without credentials or model calls. The
+separate pinned native Claude lane uses an explicit fake key for startup and
+stdio MCP discovery, with no authenticated model turn.
 On Windows run that fixture explicitly with `PRISM_ACP_APPCONTAINER=1` and
 `npx vitest run test/appcontainer.test.ts` after building. Windows CI opts in;
 other platforms and ordinary test runs visibly skip OS-profile creation.

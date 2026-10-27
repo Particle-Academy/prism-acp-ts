@@ -1,8 +1,10 @@
-import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { prepareProcessTree, launchProvider, ClaudeDriver, CodexDriver, listModels } from './dist/index.js';
+import { createWindowsPrivateDirectory } from './dist/process-tree.js';
 
 const [root, mode, foreign] = process.argv.slice(2);
 const say = (stage, detail = {}) => process.stdout.write(JSON.stringify({ stage, ...detail }) + '\n');
@@ -13,7 +15,53 @@ writeFileSync(root + '/workspace/owned-marker', 'owned');
 writeFileSync(root + '/home/owned-marker', 'owned');
 say('assigned_write');
 
-if (mode === 'native') {
+if (mode === 'claude-native-mcp') {
+  await prepareProcessTree({ directory: root + '/program/supervisor' });
+  const home = root + '/home/owned-provider'; mkdirSync(home);
+  const marker = root + '/workspace/owned-mcp-methods';
+  say('native_private_location', { insideOwnedRoot: tmpdir().replaceAll('\\', '/').toLowerCase().startsWith(root.replaceAll('\\', '/').toLowerCase() + '/'), exists: existsSync(tmpdir()) });
+  let finish, refuse;
+  const announced = new Promise((resolve, reject) => { finish = resolve; refuse = reject; });
+  announced.catch(() => {});
+  const driver = new ClaudeDriver({ cwd: root + '/workspace', binary: process.execPath,
+    binaryArgs: ['--preserve-symlinks', '--preserve-symlinks-main', root + '/program/claude-restricted-loopback.mjs', root + '/program/claude.exe', 'http://127.0.0.1:1', root + '/workspace/owned-native-launch.json'],
+    parentEnv: { ...process.env, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' },
+    allowEnv: ['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', 'DISABLE_AUTOUPDATER', 'DISABLE_TELEMETRY', 'DISABLE_ERROR_REPORTING'],
+    credentials: { mode: 'apiKey', apiKey: 'owned-restricted-synthetic-key', home }, nativeTools: 'none', model: 'claude-sonnet-4-6',
+    mcpServers: [{ name: 'owned', command: process.execPath, args: ['--preserve-symlinks', '--preserve-symlinks-main', root + '/program/claude-restricted-mcp.mjs', marker], env: [] }],
+    processTree: { windowsStdio: 'local-pipes', startupTimeoutMs: 2000 },
+  }, { onProtocolError: reason => refuse(new Error(reason)), onUpdate: update => { if (update.sessionUpdate === 'notice' && update.notice?.message === 'session started') finish(); } });
+  let timer;
+  try {
+    driver.start(); driver.prompt('Owned startup-only MCP discovery fixture.');
+    await driver.modelState();
+    await Promise.race([announced, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('owned native discovery deadline')), 10_000); })]);
+    say('native_mcp_reports', { reports: driver.mcpServers });
+    const rows = readFileSync(marker, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    say('native_mcp_protocol', { methods: rows.map(row => row.method) });
+    writeFileSync(root + '/workspace/proof-pids', [driver.processTree.providerPid, rows[0].ppid, rows[0].pid].join('\n') + '\n');
+    const deadline = Date.now() + 2000;
+    while (!existsSync(root + '/workspace/proof-ack')) {
+      if (Date.now() > deadline) throw new Error('owned native descendant identity deadline');
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  } catch (error) { say('error', { name: error.name, message: error.message, stderr: driver.stderr.slice(-2000) }); process.exitCode = 4; }
+  finally { clearTimeout(timer); say('stop', { verdict: await driver.stop({ graceMs: 0 }) }); }
+} else if (mode === 'private-probe') {
+  await prepareProcessTree({ directory: root + '/program/supervisor' });
+  const directory = root + '/home/owned-native-probe';
+  const hash = readFileSync(root + '/program/supervisor/prism-acp-supervisor.current.sha256', 'utf8').trim();
+  if (!/^[a-f0-9]{64}$/.test(hash)) throw new Error('owned native probe digest invalid');
+  const result = spawnSync(root + '/program/supervisor/prism-acp-supervisor-' + hash + '.exe', ['--create-private-directory', directory], { stdio: 'inherit', windowsHide: true, timeout: 5000 });
+  say('native_private_diagnostic', { status: result.status, signal: result.signal, spawnCode: result.error?.code });
+  process.exitCode = result.status === 0 ? 0 : 3;
+} else if (mode === 'private-config') {
+  await prepareProcessTree({ directory: root + '/program/supervisor' });
+  const directory = root + '/home/owned-private';
+  createWindowsPrivateDirectory(directory);
+  writeFileSync(directory + '/mcp.json', JSON.stringify({ owned: 'synthetic-mcp-header' }), { flag: 'wx', mode: 0o600 });
+  say('private_config_created');
+} else if (mode === 'native') {
   const child = spawn(process.env.PRISM_FIXTURE_NATIVE, ['--pipe-probe'], { stdio: 'inherit' });
   child.once('exit', (code) => process.exit(code ?? 1));
 } else if (['inherit', 'ignore', 'pipe'].includes(mode)) {

@@ -5,7 +5,7 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, wri
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { coldHashFailureKind } from './supervisor-cold-evidence.mjs';
+import { coldBaselineConfig, coldHashFailureKind } from './supervisor-cold-evidence.mjs';
 
 if(process.platform!=='win32')throw Error('The Windows cold-cache gate must run on Windows');
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
@@ -22,9 +22,11 @@ function run(binary,args,settings={}){
  if(result.error)throw result.error;
  return result;
 }
-function build(config=join(root,'tsconfig.json')){
+function build(config=join(root,'tsconfig.json'),label='current-build'){
  const result=run(process.execPath,[join(root,'node_modules','typescript','bin','tsc'),'-p',config]);
- if(result.status!==0)throw Error('Cold-cache probe build failed: '+result.stderr.slice(0,1000));
+ const output=(result.stdout??'')+(result.stderr??'');
+ writeFileSync(join(logs,label+'.log'),JSON.stringify({exit:result.status})+'\n'+output);
+ if(result.status!==0)throw Error('Cold-cache probe build failed: '+output.slice(0,2000));
 }
 function measure(label,moduleUrl){
  const result=run(process.execPath,[join(root,'node_modules','vitest','vitest.mjs'),'run','test/supervisor-cold-measure.test.ts'],
@@ -63,8 +65,8 @@ try{
  writeFileSync(join(project,'src','process-tree.ts'),oldSource.stdout);
  writeFileSync(join(project,'package.json'),'{"type":"module"}\n');
  const baselineConfig=join(project,'tsconfig.json');
- writeFileSync(baselineConfig,JSON.stringify({extends:join(root,'tsconfig.json'),compilerOptions:{rootDir:join(project,'src'),outDir:join(project,'dist'),typeRoots:[join(root,'node_modules','@types')]},include:[join(project,'src','**','*.ts')]},null,2)+'\n');
- build(baselineConfig);
+ writeFileSync(baselineConfig,JSON.stringify(coldBaselineConfig(project,root),null,2)+'\n');
+ build(baselineConfig,'baseline-build');
  build();
  try{before=measure('baseline',pathToFileURL(join(project,'dist','process-tree.js')).href);}catch(error){baselineError=error.message;}
  try{after=measure('current',pathToFileURL(join(root,'dist','process-tree.js')).href);}catch(error){currentError=error.message;}
