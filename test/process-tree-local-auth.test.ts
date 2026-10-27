@@ -55,10 +55,21 @@ describe.runIf(process.platform === 'win32')('LOCAL endpoint authentication', ()
   });
 
   it('does not extend the authentication deadline for a slow partial header', async () => {
-    const { socket, accepted } = await open(150); const started = Date.now();
-    const ended = once(socket, 'close');
-    const timer = setInterval(() => socket.write('h'), 30);
-    try { await ended; } finally { clearInterval(timer); }
+    const { endpoint, socket, accepted } = await open(150); const started = Date.now();
+    const peerErrors: Array<string | undefined> = [];
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const stopWriting = () => clearInterval(timer);
+    // events.once('close') rejects on 'error'. A late deliberate write can
+    // report peer closure before 'close'; still wait for the actual close.
+    const ended = new Promise<void>(resolve => socket.once('close', () => { stopWriting(); resolve(); }));
+    const onError = (error: NodeJS.ErrnoException) => { peerErrors.push(error.code); stopWriting(); };
+    socket.on('error', onError);
+    timer = setInterval(() => socket.write('h'), 30);
+    try {
+      await ended;
+      await expect(endpoint.ready).rejects.toThrow('local pipe closed before authentication');
+      expect(peerErrors.filter(code => code !== 'EPIPE' && code !== 'ECONNRESET')).toEqual([]);
+    } finally { stopWriting(); socket.removeListener('error', onError); }
     expect(Date.now() - started).toBeLessThan(750);
     expect(accepted).toHaveLength(0);
   });
