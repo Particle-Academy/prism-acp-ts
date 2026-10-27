@@ -1,13 +1,14 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ClaudeDriver, type TurnOutcome } from '../src/claude/driver.js';
-import { launchProvider } from '../src/process-tree.js';
+import { launchProvider, prepareProcessTree } from '../src/process-tree.js';
 import { encodeLine } from '../src/ndjson.js';
 
 vi.mock('../src/process-tree.js',async()=>({...await vi.importActual<typeof import('../src/process-tree.js')>('../src/process-tree.js'),launchProvider:vi.fn()}));
 vi.mock('../src/private-directory.js',()=>({restrictToCurrentUser:()=>{}}));
 const drivers: ClaudeDriver[]=[];
+beforeAll(async()=>{await prepareProcessTree();},60000);
 afterEach(()=>{for(const driver of drivers.splice(0))driver.kill();vi.useRealTimers();vi.mocked(launchProvider).mockReset();});
 
 function fixture(hooks=true){

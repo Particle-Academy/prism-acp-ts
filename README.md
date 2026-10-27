@@ -197,8 +197,12 @@ by this suite. `system/init` arrives after the first user prompt on 2.1.310, so 
 
 Inside Electron, the hook runs the app executable with `ELECTRON_RUN_AS_NODE=1` for that hook only. The script removes
 the flag before its worker or any child starts; the POSIX supervisor also removes its injected flag before starting
-a provider. Hook paths are passed as arguments rather than interpolated into shell commands. Windows uses its built-in
-Windows PowerShell; POSIX uses `/bin/sh`. If an Electron build disables Node mode, the call denies. An app can supply
+a provider. Hook paths are passed as arguments rather than interpolated into shell commands. Windows uses an approval
+mode in the existing native C# supervisor; POSIX uses `/bin/sh`. The Windows adapter is built once and hash-checked
+at driver startup, before Claude starts. Missing, quarantined or unverified binaries that cannot be rebuilt and verified
+refuse startup. The existing .NET Framework compiler requirement applies; there is no interpreter fallback. Its byte
+handles preserve JSON output, and a per-call Job Object ends helper descendants when the adapter exits. If an Electron
+build disables Node mode, the call denies. An app can supply
 `permissionPrompts.nodePath` as a trusted absolute ordinary Node executable instead. This option belongs to app
 configuration and must never come from model or ACP client input.
 

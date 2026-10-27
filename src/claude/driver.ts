@@ -30,7 +30,7 @@ export type { ProblemDetail } from '../acp/agent.js';
 import { ApprovalServer, approvalCliVersion, approvalHookScript, approvalSettings, permissionRequestFor } from './approvals.js';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
 import { ModelListError, claudeModelsOf, type SessionModelState } from '../models.js';
-import { ProcessTreeError, launchProvider, type ProcessTree, type ProcessTreeOptions, type ProviderIo, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
+import { ProcessTreeError, launchProvider, windowsApprovalAdapter, type ProcessTree, type ProcessTreeOptions, type ProviderIo, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
 import type { DriverCapabilities } from '../acp/agent.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
@@ -439,6 +439,8 @@ export class ClaudeDriver {
 
   start(): void {
     if (this.#child !== null) throw new Error('driver already started');
+    // Build/hash verification is a startup prerequisite, before credentials/configuration or any CLI process.
+    if (this.#options.permissionPrompts !== undefined && process.platform === 'win32') windowsApprovalAdapter();
 
     if (this.#options.resumeSessionId !== undefined && !isValidCliSessionId(this.#options.resumeSessionId)) {
       this.#events.onProtocolError?.('invalid resumeSessionId: rejected CLI session id shape');

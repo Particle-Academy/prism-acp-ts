@@ -1,6 +1,41 @@
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { SUPERVISOR_CS } from '../../src/process-tree-supervisor-cs.js';
+
+/** Read only our process ancestry without starting PowerShell inside the measured hook. */
+export function buildParentProbe(directory: string): string | undefined {
+  if(process.platform!=='win32')return undefined;
+  const source=join(directory,'parents.cs'),executable=join(directory,'parents.exe');
+  writeFileSync(source,`using System;using System.Diagnostics;using System.Runtime.InteropServices;using System.Text;
+class Parents {
+ [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct Entry {
+  public uint size,usage,pid;public UIntPtr heap;public uint module,threads,parent;public int priority;public uint flags;
+  [MarshalAs(UnmanagedType.ByValTStr,SizeConst=260)] public string name;
+ }
+ [DllImport("kernel32.dll",SetLastError=true)]static extern IntPtr CreateToolhelp32Snapshot(uint flags,uint pid);
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode)]static extern bool Process32FirstW(IntPtr snapshot,ref Entry entry);
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode)]static extern bool Process32NextW(IntPtr snapshot,ref Entry entry);
+ [DllImport("kernel32.dll")]static extern bool CloseHandle(IntPtr handle);
+ static uint Parent(uint pid){var snapshot=CreateToolhelp32Snapshot(2,0);if(snapshot==new IntPtr(-1))return 0;
+  try{var entry=new Entry();entry.size=(uint)Marshal.SizeOf(typeof(Entry));if(Process32FirstW(snapshot,ref entry))do{if(entry.pid==pid)return entry.parent;}while(Process32NextW(snapshot,ref entry));return 0;}finally{CloseHandle(snapshot);}}
+ static int Main(string[] args){uint pid=UInt32.Parse(args[0]);for(int i=0;i<4&&pid!=0;i++){try{Console.WriteLine(Convert.ToBase64String(Encoding.UTF8.GetBytes(Process.GetProcessById((int)pid).MainModule.FileName)));pid=Parent(pid);}catch{break;}}return 0;}
+}`);
+  execFileSync(join(process.env.SystemRoot??'C:\\Windows','Microsoft.NET','Framework64','v4.0.30319','csc.exe'),['/nologo',`/out:${executable}`,source],{windowsHide:true,stdio:'pipe'});
+  return executable;
+}
+
+/** Mutate an owned adapter copy; never alter the verified install cache or the provider's supervisor. */
+export function buildSilentZeroAdapter(directory: string): string | undefined {
+  if (process.platform !== 'win32') return undefined;
+  const needle='code == 42';
+  if(SUPERVISOR_CS.split(needle).length!==2)throw new Error('approval adapter mutation needs exactly one status check');
+  const source=join(directory,'approval-mutated.cs');
+  const executable=join(directory,'approval-mutated.exe');
+  writeFileSync(source,SUPERVISOR_CS.replace(needle,'code == 0'));
+  execFileSync(join(process.env.SystemRoot??'C:\\Windows','Microsoft.NET','Framework64','v4.0.30319','csc.exe'),['/nologo','/optimize+',`/out:${executable}`,source],{windowsHide:true,stdio:'pipe'});
+  return executable;
+}
 
 /** A real executable, not a Node script. App mode exits silently without ever running JS. */
 export function buildFakeElectron(directory: string): string {

@@ -21,7 +21,7 @@ if(config.mutation==='leak-electron')script=script.replace('delete process.env.E
 script=script.replace("const http = require('http');",`const check=require('child_process').spawnSync(${JSON.stringify(process.execPath)},['-p','String(process.env.ELECTRON_RUN_AS_NODE)'],{encoding:'utf8'});if(check.stdout.trim()!=='undefined')process.exit(7); const http = require('http');`);
 if(config.captureLauncher){
  const inspect=process.platform==='win32'
-  ? `JSON.parse(require('child_process').execFileSync(${JSON.stringify(join(process.env.SystemRoot??'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'))},['-NoProfile','-NonInteractive','-Command','[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);$probePid='+process.ppid+';$chain=@();for($i=0;$i -lt 4;$i++){$p=Get-CimInstance Win32_Process -Filter "ProcessId=$probePid";if(!$p){break};$chain+=$p.ExecutablePath;$probePid=$p.ParentProcessId};ConvertTo-Json -InputObject $chain -Compress'],{encoding:'utf8',windowsHide:true}))`
+  ? `require('child_process').execFileSync(${JSON.stringify(config.parentProbe)},[String(process.ppid)],{encoding:'utf8',windowsHide:true}).trim().split(/\\r?\\n/).filter(Boolean).map(s=>Buffer.from(s,'base64').toString('utf8'))`
   : `require('fs').readlinkSync('/proc/'+process.ppid+'/exe')`;
  script=script.replace("const http = require('http');",`require('fs').writeFileSync(${JSON.stringify(config.launcher)},JSON.stringify({parent:${inspect},runtime:process.execPath,flag:process.env.ELECTRON_RUN_AS_NODE??null})); const http = require('http');`);
 }
@@ -33,7 +33,10 @@ writeFileSync(scriptPath,script);
 if(config.scenario==='runtime-hang')hook.timeout=1;
 if(config.mutation==='drop-wrapper'){hook.command=config.electron;hook.args=[scriptPath];}
 if(config.mutation==='allow-silent-zero'){
- if(process.platform==='win32')hook.args[hook.args.length-1]=Buffer.from(Buffer.from(hook.args.at(-1),'base64').toString('utf16le').replace('$child.ExitCode -eq 42','$child.ExitCode -eq 0'),'utf16le').toString('base64');
+ if(process.platform==='win32'){
+  if(!config.silentZeroAdapter)throw new Error('native Windows mutation adapter missing');
+  hook.command=config.silentZeroAdapter;
+ }
  else hook.args[1]=hook.args[1].replace('"$code" -eq 42','"$code" -eq 0');
 }
 writeFileSync(settingsPath,JSON.stringify(settings));

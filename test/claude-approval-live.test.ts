@@ -3,12 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { prepareProcessTree } from '../src/process-tree.js';
-import { buildFakeElectron } from './fixtures/fake-electron.js';
+import { buildFakeElectron, buildParentProbe, buildSilentZeroAdapter } from './fixtures/fake-electron.js';
 import { assertApprovalResult, DENY_REASON, probeClaudeApproval, type ApprovalScenario } from './fixtures/claude-approval-probe.js';
 
 // Opt-in, pinned native CLI, loopback-only model, empty profiles, fake key. A missing/version-mismatched CLI fails.
 describe.runIf(process.env.PRISM_ACP_CLAUDE_APPROVAL === '1')('native Claude2.1.310 approval enforcement', () => {
   let root: string, electron: string;
+  let silentZeroAdapter: string|undefined;
+  let parentProbe: string|undefined;
   const binary = process.env.PRISM_ACP_CLAUDE_BINARY ?? '';
   beforeAll(async()=>{
     if(!binary)throw new Error('Set PRISM_ACP_CLAUDE_BINARY to the installed native Claude2.1.310 executable');
@@ -16,11 +18,13 @@ describe.runIf(process.env.PRISM_ACP_CLAUDE_APPROVAL === '1')('native Claude2.1.
     root=mkdtempSync(join(tmpdir(),'prism-electron-native-'));
     const path=join(root,"space ' & % é $ `");mkdirSync(path);
     electron=buildFakeElectron(path);
+    silentZeroAdapter=buildSilentZeroAdapter(path);
+    parentProbe=buildParentProbe(path);
   },60000);
   afterAll(()=>{if(root)rmSync(root,{recursive:true,force:true,maxRetries:20,retryDelay:100});});
 
   it('allows once, uses the actual driver-built command, and leaves provider/grandchild env clean', async()=>{
-    const r=await probeClaudeApproval({binary,electron,scenario:'allow',captureLauncher:true});
+    const r=await probeClaudeApproval({binary,electron,parentProbe,scenario:'allow',captureLauncher:true});
     assertApprovalResult(r,true);
     expect(r.launcher.flag).toBe(null);
     console.info(JSON.stringify({nativeApproval:'allow',launcher:r.launcher,providerFlag:r.providerFlag,cleanGrandchild:r.cleanGrandchild}).replace(/[^\x20-\x7e]/g,c=>'\\u'+c.charCodeAt(0).toString(16).padStart(4,'0')));
@@ -31,7 +35,7 @@ describe.runIf(process.env.PRISM_ACP_CLAUDE_APPROVAL === '1')('native Claude2.1.
   },60000);
 
   it('MEASUREMENT: records the actual legacy shell-form launcher on this platform',async()=>{
-    const r=await probeClaudeApproval({binary,electron,scenario:'allow',nodeOverride:true,captureLauncher:true,legacyShell:true});
+    const r=await probeClaudeApproval({binary,electron,parentProbe,scenario:'allow',nodeOverride:true,captureLauncher:true,legacyShell:true});
     assertApprovalResult(r,true);
     console.info(JSON.stringify({nativeApprovalLegacyShell:r.launcher}).replace(/[^\x20-\x7e]/g,c=>'\\u'+c.charCodeAt(0).toString(16).padStart(4,'0')));
   },60000);
@@ -42,6 +46,7 @@ describe.runIf(process.env.PRISM_ACP_CLAUDE_APPROVAL === '1')('native Claude2.1.
       assertApprovalResult(r,false);
       if(scenario==='deny')expect(JSON.stringify(r.toolResults)).toContain(DENY_REASON);
       if(scenario==='runtime-hang')expect(JSON.stringify(r.toolResults)).toMatch(/timed out/i);
+      if(['runtime-empty','runtime-crash','runtime-invalid'].includes(scenario))expect(JSON.stringify(r.toolResults)).toContain('prism-acp: approval hook failed or denied; tool call blocked');
       console.info(JSON.stringify({nativeApproval:scenario,executed:r.executed,asked:r.asked,requests:r.requests}));
     },60000);
   }
@@ -49,7 +54,7 @@ describe.runIf(process.env.PRISM_ACP_CLAUDE_APPROVAL === '1')('native Claude2.1.
   for(const mutation of ['drop-wrapper','allow-silent-zero','leak-electron'] as const){
     it(`MUTATION CONTROL: ${mutation} makes the same safety oracle fail`,async()=>{
       const allow=mutation==='leak-electron';
-      const r=await probeClaudeApproval({binary,electron,scenario:allow?'allow':'runtime-empty',mutation});
+      const r=await probeClaudeApproval({binary,electron,silentZeroAdapter,scenario:allow?'allow':'runtime-empty',mutation});
       expect(()=>assertApprovalResult(r,allow)).toThrow();
       expect(r.executed).toBe(!allow);
       console.info(JSON.stringify({nativeApprovalMutation:mutation,oracle:'rejected',executed:r.executed}));

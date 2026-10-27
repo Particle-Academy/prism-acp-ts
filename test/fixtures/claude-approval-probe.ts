@@ -26,7 +26,7 @@ function cleanParent(root: string): Record<string, string> {
 }
 
 /** Native CLI is pinned; every request is answered locally. No real login, API key, account or model call. */
-export async function probeClaudeApproval(options: { binary: string; electron: string; scenario: ApprovalScenario; mutation?: ApprovalMutation; nodeOverride?: boolean; captureLauncher?: boolean; legacyShell?: boolean; versionFault?: 'missing' | 'old' | 'malformed' | 'error' | 'timeout' | 'init-missing' | 'init-changed' }) {
+export async function probeClaudeApproval(options: { binary: string; electron: string; silentZeroAdapter?: string; parentProbe?: string; scenario: ApprovalScenario; mutation?: ApprovalMutation; nodeOverride?: boolean; captureLauncher?: boolean; legacyShell?: boolean; versionFault?: 'missing' | 'old' | 'malformed' | 'error' | 'timeout' | 'init-missing' | 'init-changed' }) {
   assert.match(execFileSync(options.binary, ['--version'], { encoding:'utf8', windowsHide:true }).trim(), /^2\.1\.310 \(Claude Code\)$/);
   const root = mkdtempSync(join(tmpdir(), 'prism-native-approval-'));
   const home = join(root, 'home'); mkdirSync(home);

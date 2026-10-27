@@ -509,6 +509,15 @@ function windowsSupervisor(): string {
     : 'cannot contain the provider: the supervisor is missing after it was built (antivirus quarantine is the likely cause)');
 }
 
+/** Prepare the hash-verified native approval adapter BEFORE Claude starts. No interpreter/unguarded fallback. */
+export function windowsApprovalAdapter(): string {
+  if (process.platform !== 'win32') throw new ProcessTreeError('the Claude native approval adapter requires Windows');
+  try { return windowsSupervisor(); }
+  catch (cause) {
+    throw new ProcessTreeError(`cannot prepare Claude approval adapter: ${cause instanceof ProcessTreeError ? cause.message : 'native adapter verification failed'}`);
+  }
+}
+
 /**
  * Build (or verify) the Windows supervisor ahead of the first session, so a missing compiler or a quarantined
  * executable surfaces once, at startup, as a ProcessTreeError. A no-op elsewhere. `directory` overrides where it is

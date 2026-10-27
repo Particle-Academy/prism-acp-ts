@@ -6,12 +6,14 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { approvalHookScript, approvalSettings, ApprovalServer } from '../src/claude/approvals.js';
 import { buildFakeElectron } from './fixtures/fake-electron.js';
+import { launchProvider, prepareProcessTree, type ProviderProcess } from '../src/process-tree.js';
+import { childEnv } from '../src/env.js';
 
 const root = mkdtempSync(join(tmpdir(), 'prism-hook-command-'));
 const paths = join(root, "a space ' & % é $ `");
 mkdirSync(paths);
 let electron: string;
-beforeAll(() => { electron = buildFakeElectron(paths); }, 60000);
+beforeAll(async () => { await prepareProcessTree(); electron = buildFakeElectron(paths); }, 60000);
 afterAll(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 const socket = () => process.platform === 'win32' ? `\\\\.\\pipe\\prism-hook-${Math.random().toString(36).slice(2)}` : join(mkdtempSync(join(root, 'socket-')), 'a.sock');
 const input = { tool_name: 'Bash', tool_input: { command: 'echo harmless', exitCode: 42, permissionDecision: 'allow' }, tool_use_id: 'toolu_probe' };
@@ -34,6 +36,29 @@ async function command(options: { env?: Record<string, string>; script?: string;
 }
 
 describe('the actual approval command, including a non-Node Electron executable', () => {
+  for(const original of [undefined,'original-node-mode'])it.runIf(process.platform!=='win32')(`POSIX supervisor restores originally ${String(original)} Electron mode before provider and grandchild`,async()=>{
+    const realNode=process.execPath;
+    const env={...childEnv(process.env).env,PRISM_FAKE_ELECTRON_NODE:realNode,...(original===undefined?{}:{ELECTRON_RUN_AS_NODE:original})};
+    delete (env as Record<string,string|undefined>).ELECTRON_RUN_AS_NODE;
+    if(original!==undefined)(env as Record<string,string>).ELECTRON_RUN_AS_NODE=original;
+    const execDescriptor=Object.getOwnPropertyDescriptor(process,'execPath')!;
+    const versionDescriptor=Object.getOwnPropertyDescriptor(process.versions,'electron');
+    let provider: ProviderProcess;
+    Object.defineProperty(process,'execPath',{...execDescriptor,value:electron});
+    Object.defineProperty(process.versions,'electron',{configurable:true,value:'fixture'});
+    try {
+      const code=`const {spawnSync}=require('child_process');const child=spawnSync(${JSON.stringify(realNode)},['-p','JSON.stringify(process.env.ELECTRON_RUN_AS_NODE??null)'],{encoding:'utf8'});console.log(JSON.stringify({provider:process.env.ELECTRON_RUN_AS_NODE??null,grandchild:JSON.parse(child.stdout)}));`;
+      provider=launchProvider(realNode,['-e',code],{cwd:root,env});
+    } finally {
+      Object.defineProperty(process,'execPath',execDescriptor);
+      if(versionDescriptor)Object.defineProperty(process.versions,'electron',versionDescriptor);else delete process.versions.electron;
+    }
+    let stdout='';provider.child.stdout!.on('data',b=>stdout+=b);provider.child.stderr!.resume();
+    try {
+      await new Promise<void>((resolve,reject)=>{provider.child.on('error',reject);provider.child.on('close',()=>resolve());});
+      expect(JSON.parse(stdout)).toEqual({provider:original??null,grandchild:original??null});
+    } finally {expect(await provider.stop({graceMs:0})).toMatchObject({verified:true,empty:true,survivors:0});}
+  });
   it('uses paths as data, preserves allow bytes exactly, and removes Electron mode before a child spawns', async () => {
     const reason = "Allowed é ' & % $ ` \\ and a newline\nsecond line" + 'long reason '.repeat(7000);
     const server = new ApprovalServer(socket(), async () => ({ outcome: 'selected', optionId: 'allow_once', reason }));

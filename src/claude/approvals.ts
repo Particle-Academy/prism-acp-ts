@@ -1,7 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { join } from 'node:path';
-import { windowsCommandLine } from '../process-tree.js';
+import { windowsApprovalAdapter } from '../process-tree.js';
 import type { PermissionOutcome, PermissionRequest } from '../acp/agent.js';
 
 /**
@@ -58,7 +57,7 @@ const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 /**
  * Exec-form hook: Claude passes an argv vector, with no shell tokenization. Its exit adapter uses the platform's
- * existing interpreter (Windows PowerShell or POSIX /bin/sh). Paths are argv/data, never shell source. The Electron
+ * cached/hash-verified native Windows adapter or POSIX /bin/sh. Paths are argv/data, never shell source. The Electron
  * flag belongs only to the hook runtime and is removed before the worker starts. Provider environments are unchanged.
  */
 export function approvalSettings(nodePath: string, hookPath: string, tools: readonly string[], options: {
@@ -69,29 +68,9 @@ export function approvalSettings(nodePath: string, hookPath: string, tools: read
   for (const t of tools) if (!TOOL_NAME.test(t)) throw new Error(`refusing tool name ${JSON.stringify(t)}: a tool name is a single identifier`);
   for (const path of [nodePath, hookPath]) if (!path || /[\0\r\n]/.test(path)) throw new Error('permission hook paths must be nonempty single-line paths');
   const windows = process.platform === 'win32';
-  // Use inherited byte streams on Windows; a PowerShell output pipeline would decode/re-encode the JSON.
-  const config = Buffer.from(JSON.stringify({ node: nodePath, arguments: windowsCommandLine([hookPath]), electron: options.electron === true }), 'utf8').toString('base64');
-  const powershell = `$ErrorActionPreference='Stop'
-$ProgressPreference='SilentlyContinue'
-try {
-  $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${config}')) | ConvertFrom-Json
-  $info = New-Object Diagnostics.ProcessStartInfo
-  $info.FileName = $config.node
-  $info.Arguments = $config.arguments
-  $info.UseShellExecute = $false
-  $info.CreateNoWindow = $true
-  $info.RedirectStandardError = $true
-  if ($config.electron) { $info.EnvironmentVariables['ELECTRON_RUN_AS_NODE'] = '1' }
-  $child = [Diagnostics.Process]::Start($info)
-  $child.BeginErrorReadLine()
-  $child.WaitForExit()
-  if ($child.ExitCode -eq ${EXPLICIT_ALLOW}) { exit 0 }
-} catch {}
-[Console]::Error.Write('prism-acp: approval hook failed or denied; tool call blocked' + [char]10)
-exit 2`;
-  const command = windows ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : '/bin/sh';
+  const command = windows ? windowsApprovalAdapter() : '/bin/sh';
   const args = windows
-    ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(powershell, 'utf16le').toString('base64')]
+    ? ['approval', nodePath, hookPath, options.electron ? 'electron' : 'node']
     : ['-c', `${options.electron ? 'ELECTRON_RUN_AS_NODE=1 ' : ''}"$1" "$2" 2>/dev/null; code=$?; if [ "$code" -eq ${EXPLICIT_ALLOW} ]; then exit 0; fi; printf '%s\\n' 'prism-acp: approval hook failed or denied; tool call blocked' >&2; exit 2`, 'prism-acp-approval', nodePath, hookPath];
   return {
     hooks: {

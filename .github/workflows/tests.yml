@@ -110,6 +110,11 @@ jobs:
           cache: npm
       - run: npm ci
       # Native test executable only; no package dependency, install scripts, real login or model traffic.
+      - name: Measure first and warm Windows approval overhead
+        if: runner.os == 'Windows'
+        run: npx vitest run test/claude-approval-latency.test.ts
+        env:
+          PRISM_ACP_HOOK_LATENCY: '1'
       - run: npm install --prefix .claude-native-cli --ignore-scripts --no-package-lock @anthropic-ai/claude-code-${{ matrix.platform }}@2.1.310
       - run: npx vitest run test/claude-approval-live.test.ts
         env:

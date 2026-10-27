@@ -2,7 +2,9 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { performance } from 'node:perf_hooks';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { prepareProcessTree } from '../src/process-tree.js';
 import { claudeArgs } from '../src/claude/driver.js';
 import { ApprovalServer, HOOK_SCRIPT, approvalSettings, decisionFor, permissionRequestFor } from '../src/claude/approvals.js';
 
@@ -20,6 +22,7 @@ import { ApprovalServer, HOOK_SCRIPT, approvalSettings, decisionFor, permissionR
  * token, no server, no handler, a cancelled request — the hook fails closed.
  */
 const dirs: string[] = [];
+beforeAll(async () => { await prepareProcessTree(); }, 60000);
 afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'prism-approvals-')); dirs.push(d); return d; };
 const socketIn = (dir: string) => (process.platform === 'win32' ? `\\\\.\\pipe\\prism-acp-test-${Math.random().toString(36).slice(2)}` : join(dir, 'a.sock'));
@@ -32,6 +35,7 @@ function runHook(env: Record<string, string>, input: unknown): Promise<{ code: n
     const script = join(dir, 'hook.cjs');
     writeFileSync(script, HOOK_SCRIPT);
     return new Promise((resolve) => {
+        const start = performance.now();
         const settings = approvalSettings(process.execPath, script, ['Bash']) as { hooks: { PreToolUse: Array<{ hooks: Array<{ command: string; args: string[] }> }> } };
         const hook = settings.hooks.PreToolUse[0]!.hooks[0]!;
         const child = spawn(hook.command, hook.args, { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
@@ -39,7 +43,12 @@ function runHook(env: Record<string, string>, input: unknown): Promise<{ code: n
         let stderr = '';
         child.stdout.on('data', (d) => (stdout += d));
         child.stderr.on('data', (d) => (stderr += d));
-        child.on('close', (code) => resolve({ code, stdout, stderr }));
+        const pending = setTimeout(() => console.info(JSON.stringify({ approvalCommandTiming: 'still pending', platform: process.platform, elapsedMs: performance.now() - start, stdoutBytes: Buffer.byteLength(stdout) })), 4500);
+        child.on('close', (code) => {
+            clearTimeout(pending);
+            console.info(JSON.stringify({ approvalCommandTiming: 'closed', platform: process.platform, elapsedMs: performance.now() - start, code, stdoutBytes: Buffer.byteLength(stdout) }));
+            resolve({ code, stdout, stderr });
+        });
         child.stdin.end(JSON.stringify(input));
     });
 }
@@ -60,7 +69,7 @@ describe('the arguments and the settings', () => {
         expect(hook).toMatchObject({ type: 'command', onFailure: 'block' });
         expect(hook.timeout as number).toBeGreaterThanOrEqual(3600);
         expect(hook.args).toBeInstanceOf(Array); // exec form; paths never pass through Claude's shell parser
-        expect(hook.command).toMatch(/(?:powershell\.exe|\/bin\/sh)$/i);
+        expect(hook.command).toMatch(/(?:prism-acp-supervisor\.exe|\/bin\/sh)$/i);
     });
 
     it('a tool name that would widen the matcher is refused', () => {
@@ -86,8 +95,9 @@ describe('the request and the decision', () => {
 
 describe('the hook script against the approval server (end to end, both real)', () => {
     it('the person allows: the hook prints allow; the server saw the call', async () => {
+        const start = performance.now();
         const seen: unknown[] = [];
-        const server = new ApprovalServer(socketIn(tmp()), async (input) => { seen.push(input); return { outcome: 'selected', optionId: 'allow_once' }; });
+        const server = new ApprovalServer(socketIn(tmp()), async (input) => { console.info(JSON.stringify({ approvalFirstRequestMs: performance.now() - start })); seen.push(input); return { outcome: 'selected', optionId: 'allow_once' }; });
         const { socket, token } = server.listen();
         const r = await runHook({ PRISM_ACP_APPROVAL_SOCKET: socket, PRISM_ACP_APPROVAL_TOKEN: token }, INPUT);
         server.close();
