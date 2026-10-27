@@ -40,6 +40,15 @@ describe('apiKeyHome: what it accepts, and what it refuses without naming the ke
     expect(apiKeyHome('codex', { mode: 'subscription' })).toBeNull();
   });
 
+  it.each(['claude', 'codex'] as const)('does not read unrelated credential environment values while validating %s homes', (provider) => {
+    let reads = 0;
+    const parent: Record<string, string | undefined> = { [provider === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME']: join(scratch, 'existing-subscription') };
+    Object.defineProperty(parent, 'CLAUDE_CODE_OAUTH_TOKEN', { enumerable: true, get: () => { reads++; throw new Error('Unrelated credential value was accessed'); } });
+    const home = join(scratch, 'app-owned');
+    expect(apiKeyHome(provider, { mode: 'apiKey', apiKey: KEY, home }, parent)?.home).toBe(home);
+    expect(reads).toBe(0);
+  });
+
   it('creates a missing home, and accepts an existing one', () => {
     const home = join(scratch, 'tenant-a', 'claude');
     expect(apiKeyHome('claude', { mode: 'apiKey', apiKey: KEY, home })).toEqual({ apiKey: KEY, home });

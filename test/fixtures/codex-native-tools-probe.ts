@@ -12,7 +12,7 @@ import { advertisedTools } from './codex-tool-surface.js';
 
 type Row = Record<string, any>;
 export const PROTECTED_HOME_SENTINELS = Object.freeze({
-  auth: 'PRISM_SYNTHETIC_AUTH_SENTINEL_725ac3', config: 'PRISM_SYNTHETIC_CONFIG_SENTINEL_118e9b',
+  profile: 'PRISM_SYNTHETIC_PROFILE_SENTINEL_725ac3', config: 'PRISM_SYNTHETIC_CONFIG_SENTINEL_118e9b',
   session: 'PRISM_SYNTHETIC_SESSION_SENTINEL_4dc271',
 });
 export interface ProbeOptions {
@@ -145,7 +145,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
   };
   writeFileSync(join(home, 'config.toml'), toml(configuration) + (options.protectedHome ? `\n# ${PROTECTED_HOME_SENTINELS.config}\n` : ''));
   if (options.protectedHome) {
-    writeFileSync(join(home, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'prism-dummy-not-a-real-api-key', synthetic_fixture: PROTECTED_HOME_SENTINELS.auth }));
+    writeFileSync(join(home, 'profile.json'), JSON.stringify({ synthetic_fixture: PROTECTED_HOME_SENTINELS.profile }));
     mkdirSync(join(home, 'sessions'), { recursive: true });
     writeFileSync(join(home, 'sessions', 'protected.jsonl'), JSON.stringify({ synthetic_fixture: PROTECTED_HOME_SENTINELS.session }) + '\n');
   }
@@ -153,6 +153,8 @@ export async function openCodexToolProbe(options: ProbeOptions) {
   for (const key of ['SystemRoot', 'WINDIR', 'PATH', 'PATHEXT', 'TEMP', 'TMP', 'ComSpec']) if (process.env[key]) parentEnv[key] = process.env[key]!;
   Object.assign(parentEnv, { CODEX_HOME: home, HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home,
     PRISM_FAKE_KEY: 'prism-dummy-not-a-real-api-key', HTTP_PROXY: origin, HTTPS_PROXY: origin, ALL_PROXY: origin, NO_PROXY: '127.0.0.1,localhost,::1' });
+  // The native CLI owns its dummy API-key store; the fixture never seeds or reads credential files.
+  if (options.protectedHome) delete parentEnv.CODEX_HOME;
   const cleanup = async (keepHome = false) => {
     if (cleaned) {
       if (!keepHome && existsSync(root)) {
@@ -183,6 +185,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
     const servers = [...(options.noMcp ? [] : [{ name: 'owned', ...fixtureServer('owned'), env: [] }]),
       ...(options.suppliedForeign ? [{ name: 'foreign', ...fixtureServer('foreign'), env: [] }] : [])];
     driver = new CodexDriver({ cwd, binary: process.env.PRISM_ACP_CODEX_BINARY ?? 'codex', parentEnv, allowEnv: ['PRISM_FAKE_KEY'],
+      ...(options.protectedHome ? { credentials: { mode: 'apiKey', apiKey: 'prism-dummy-not-a-real-api-key', home } as const } : {}),
       model: options.model, ...(options.nativeTools === undefined ? {} : { nativeTools: options.nativeTools }),
       mcpServers: servers, mcpToolApproval: Object.fromEntries(servers.map((entry) => [entry.name, 'approve' as const])),
       approvalPolicy: options.executionControl ? 'never' : 'untrusted', sandbox: options.executionControl ? 'danger-full-access' : 'read-only', turnInactivityTimeoutMs: 15000,
@@ -226,7 +229,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
         assert(!result.error, 'Trusted CLI account read must work');
         return result.result;
       },
-      protectedFiles: () => Object.fromEntries(['auth.json', 'config.toml', 'sessions/protected.jsonl'].map((name) => [name, readFileSync(join(home, name), 'utf8')])),
+      protectedFiles: () => Object.fromEntries(['profile.json', 'config.toml', 'sessions/protected.jsonl'].map((name) => [name, readFileSync(join(home, name), 'utf8')])),
       resources: () => existsSync(receipt) ? readFileSync(receipt, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as Row) : [],
       outputs: () => requests.flatMap((body) => body.input.filter((item: Row) => typeof item.call_id === 'string' && item.call_id.startsWith(nonce + '-probe-') && (item.type === 'function_call_output' || item.type === 'custom_tool_call_output'))).map((item: Row) => JSON.stringify(item.output)).join('\n'),
       turn: async (settings?: { allowError?: boolean }) => {
