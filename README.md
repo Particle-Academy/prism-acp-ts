@@ -170,6 +170,22 @@ Nothing here mutates `process.env`. A workspace may hold an API key on purpose â
 other consumers beside this one legitimately bill per token â€” so the child's
 environment is constructed and the ambient one is left alone.
 
+## Claude settings and MCP configuration
+
+Choose the file-based settings sources and MCP configuration independently:
+
+```ts
+new ClaudeDriver({ cwd, settingSources: ['user'], strictMcpConfig: true, mcpServers });
+```
+
+`settingSources` accepts `user`, `project`, and `local`. Omit it for the CLI's
+defaults, or pass `[]` for no file-based sources. `strictMcpConfig: true` passes
+`--strict-mcp-config`, so the CLI uses only explicitly supplied MCP configuration.
+Explicit `--settings` hooks and the driver's supplied MCP configuration still
+apply. These options apply to fresh and resumed launches; pass the same driver
+configuration when constructing a replacement driver. `nativeTools: 'none'`
+always selects no file-based settings sources and strict MCP configuration.
+
 ## API keys instead of a subscription
 
 A deployment uses either the person's subscription or API keys, and an app may
