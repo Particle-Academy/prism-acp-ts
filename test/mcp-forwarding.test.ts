@@ -18,7 +18,8 @@ vi.mock('../src/process-tree.js', async () => ({
   launchProvider: (await import('./fake-launch.js')).fakeLaunch,
 }));
 
-const TOKEN = 'fixture-only-"&|%TOKEN%!$`-token';
+const TOKEN = "fixture-only-\\\"&|%TOKEN%!$`-token";
+const JSON_TOKEN = JSON.stringify(TOKEN).slice(1, -1);
 const SERVERS = [
   { type: 'http', name: 'loopback', url: 'http://127.0.0.1:43210/mcp',
     headers: [{ name: 'Authorization', value: `Bearer ${TOKEN}` }, { name: 'X-Client', value: 'acp' }] },
@@ -169,7 +170,7 @@ for (const provider of ['claude', 'codex'] as const) {
             expect(vi.mocked(spawn).mock.calls[0][2]?.env?.[loopback.bearer_token_env_var]).toBe(TOKEN);
           }
           for (const call of vi.mocked(spawn).mock.calls) {
-            expect(JSON.stringify(call[1])).not.toContain(TOKEN);
+            expect(JSON.stringify(call[1])).not.toContain(JSON_TOKEN);
             expect(call[2]?.env).not.toHaveProperty('ANTHROPIC_API_KEY');
             expect(call[2]?.env).not.toHaveProperty('OPENAI_API_KEY');
             expect(call[2]?.env).not.toHaveProperty('MCP_TOKEN');
@@ -227,13 +228,13 @@ for (const provider of ['claude', 'codex'] as const) {
         expect(c.children).toHaveLength(2);
         const received = provider === 'claude' ? c.configs : c.children.map((child) =>
           child.sent.find((frame) => frame.method === 'thread/start')?.params);
-        if (provider === 'claude') expect(JSON.stringify(received[0])).toContain(TOKEN.replace(/"/g, '\\"'));
+        if (provider === 'claude') expect(JSON.stringify(received[0])).toContain(JSON_TOKEN);
         else {
           const config = received[0] as { config: { mcp_servers: { loopback: { bearer_token_env_var: string } } } };
           const binding = config.config.mcp_servers.loopback.bearer_token_env_var;
           expect(vi.mocked(spawn).mock.calls[0][2]?.env?.[binding]).toBe(TOKEN);
-          expect(JSON.stringify(received[0])).not.toContain(TOKEN.replace(/"/g, '\\"'));
-          expect(JSON.stringify(vi.mocked(spawn).mock.calls[1][2]?.env)).not.toContain(TOKEN);
+          expect(JSON.stringify(received[0])).not.toContain(JSON_TOKEN);
+          expect(JSON.stringify(vi.mocked(spawn).mock.calls[1][2]?.env)).not.toContain(JSON_TOKEN);
         }
         expect(JSON.stringify(received[1])).not.toContain('Authorization');
         expect(JSON.stringify(received[1])).toContain('43211');
@@ -290,7 +291,7 @@ for (const provider of ['claude', 'codex'] as const) {
           const reply = await c.request(method, { cwd: '/work', sessionId: 'thread-resumed', mcpServers: value });
           expect(reply.error?.code).toBe(-32602);
           expect(reply.error?.message).toMatch(/invalid mcpServers/);
-          expect(JSON.stringify(reply)).not.toContain(TOKEN);
+          expect(JSON.stringify(reply)).not.toContain(JSON_TOKEN);
           expect(spawn).not.toHaveBeenCalled();
           expect(c.children).toEqual([]);
         } finally { await c.close(); }
@@ -334,7 +335,7 @@ describe('Claude temporary credential file lifecycle', () => {
       try {
         const reply = await c.request('session/new', { cwd: '/work', mcpServers: SERVERS });
         expect(reply.error?.code).toBe(-32603);
-        expect(JSON.stringify(reply)).not.toContain(TOKEN);
+        expect(JSON.stringify(reply)).not.toContain(JSON_TOKEN);
         expect(directory).not.toBe('');
         expect(existsSync(join(directory, 'mcp.json'))).toBe(false);
         expect(existsSync(directory)).toBe(false);
@@ -406,7 +407,7 @@ describe('Claude temporary credential file lifecycle', () => {
         c.children[0].emit('error', new Error('ENOENT'));
       } else {
         expect(reply.error?.code).toBe(-32603);
-        expect(JSON.stringify(reply)).not.toContain(TOKEN);
+        expect(JSON.stringify(reply)).not.toContain(JSON_TOKEN);
       }
       expect(existsSync(path)).toBe(false);
       expect(existsSync(dirname(path))).toBe(false);
