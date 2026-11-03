@@ -182,6 +182,11 @@ jobs:
         env:
           PRISM_ACP_CLAUDE_RESTRICTED: '1'
           PRISM_ACP_CLAUDE_BINARY: ${{ github.workspace }}/.claude-restricted-cli/node_modules/@anthropic-ai/claude-code-${{ matrix.platform }}/${{ matrix.binary }}
+      - name: Native settings sources and strict MCP configuration
+        run: npx vitest run test/claude-settings-native.test.ts
+        env:
+          PRISM_ACP_CLAUDE_SETTINGS: '1'
+          PRISM_ACP_CLAUDE_BINARY: ${{ github.workspace }}/.claude-restricted-cli/node_modules/@anthropic-ai/claude-code-${{ matrix.platform }}/${{ matrix.binary }}
       - name: Native startup and stdio MCP discovery in a zero-capability AppContainer
         if: runner.os == 'Windows'
         run: npx vitest run test/appcontainer.test.ts

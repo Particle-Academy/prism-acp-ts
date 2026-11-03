@@ -82,6 +82,10 @@ export interface ClaudeDriverOptions {
   readonly resumeSessionId?: string;
   /** Explicit per-session MCP servers; independent of the agent's environment. */
   readonly mcpServers?: readonly McpServer[];
+  /** CLI settings sources to load. Omit for native defaults; [] loads no file-based sources. */
+  readonly settingSources?: readonly ('user' | 'project' | 'local')[];
+  /** Use only explicitly supplied MCP configuration, ignoring other CLI MCP configurations. */
+  readonly strictMcpConfig?: boolean;
   /** Deny these inherited MCP names for this run, preserving unrelated servers and permission hooks. */
   readonly disabledMcpServers?: readonly string[];
   readonly permissionMode?: ClaudePermissionMode;
@@ -173,6 +177,8 @@ export interface ClaudeDriverEvents {
 // this helper must supply their own file path for non-empty mcpServers.
 export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string, settingsPath?: string): string[] {
   const restricted = nativeToolsDisabled(options);
+  const settingSources = claudeSettingSources(options.settingSources);
+  assertStrictMcpConfig(options.strictMcpConfig);
   const args = [
     '--print',
     '--output-format',
@@ -187,6 +193,10 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
   if (options.permissionMode !== undefined) args.push('--permission-mode', options.permissionMode);
   if (options.model !== undefined) args.push('--model', assertModel(options.model));
   if (restricted) args.push('--tools', '', '--strict-mcp-config', '--setting-sources', '', '--restricted');
+  else {
+    if (settingSources !== undefined) args.push('--setting-sources', settingSources.join(','));
+    if (options.strictMcpConfig === true) args.push('--strict-mcp-config');
+  }
   if (options.allowedTools !== undefined && options.allowedTools.length > 0) {
     args.push('--allowed-tools', options.allowedTools.join(','));
   }
@@ -202,6 +212,20 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
   if (settingsPath !== undefined) args.push('--settings', settingsPath);
 
   return args;
+}
+
+function claudeSettingSources(value: ClaudeDriverOptions['settingSources']): ClaudeDriverOptions['settingSources'] {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error('settingSources must be an array of user, project, or local');
+  const sources = [...value];
+  if (sources.some(source => source !== 'user' && source !== 'project' && source !== 'local')) {
+    throw new Error('settingSources must contain only user, project, or local');
+  }
+  return Object.freeze(sources);
+}
+
+function assertStrictMcpConfig(value: ClaudeDriverOptions['strictMcpConfig']): void {
+  if (value !== undefined && typeof value !== 'boolean') throw new Error('strictMcpConfig must be a boolean');
 }
 
 function nativeToolsDisabled(options: ClaudeDriverOptions): boolean {
@@ -463,11 +487,13 @@ export class ClaudeDriver {
 
   constructor(options: ClaudeDriverOptions, events: ClaudeDriverEvents = {}) {
     const restricted = nativeToolsDisabled(options);
+    const settingSources = claudeSettingSources(options.settingSources);
+    assertStrictMcpConfig(options.strictMcpConfig);
     if (options.permissionPrompts?.nodePath !== undefined && !isAbsolute(options.permissionPrompts.nodePath)) {
       throw new Error('permissionPrompts.nodePath must be an absolute executable path');
     }
     this.#mcpServers = readMcpServers(options.mcpServers);
-    this.#options = { ...options, ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
+    this.#options = { ...options, ...(settingSources === undefined ? {} : { settingSources }), ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
     if (options.processTree?.windowsStdio === 'local-pipes' && ((!restricted && this.#mcpServers.length > 0) || options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0)) {
       throw new ProcessTreeError('LOCAL transport does not support generated Claude MCP configuration or permission hooks');
     }
