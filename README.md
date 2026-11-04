@@ -186,6 +186,30 @@ apply. These options apply to fresh and resumed launches; pass the same driver
 configuration when constructing a replacement driver. `nativeTools: 'none'`
 always selects no file-based settings sources and strict MCP configuration.
 
+### Append files and plugins
+
+```ts
+new ClaudeDriver({
+  cwd,
+  appendSystemPromptFile: '/srv/app/prompts/rules.txt',
+  pluginDirs: ['/srv/app/plugins/review', '/srv/app/plugins/extra.zip'],
+});
+```
+
+`appendSystemPromptFile` passes `--append-system-prompt-file`. `pluginDirs` accepts
+plugin directories or ZIP files and passes each entry as a separate `--plugin-dir`.
+Paths must be absolute strings without control characters or malformed Unicode.
+The constructor validates values and copies the plugin list; validation errors
+do not include path values or file contents. A nonempty plugin list is refused
+with `nativeTools: 'none'`; an empty list preserves that policy.
+
+Both options are passed on fresh, resumed and replacement launches. The CLI's
+[recorded system prompt](https://code.claude.com/docs/en/cli-reference#system-prompt-flags-in-resumed-conversations)
+still governs what the model receives: on Claude Code 2.1.311 and 2.1.312, resuming with a
+different append file retains the conversation's original prompt. Passing a new
+file does not immediately replace that recorded text. The driver preserves the
+CLI's snapshot policy.
+
 ## API keys instead of a subscription
 
 A deployment uses either the person's subscription or API keys, and an app may
