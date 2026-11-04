@@ -21,6 +21,7 @@
  * implemented on top of the CLI's own `--resume`; anything not implemented is
  * reported absent rather than optimistically.
  */
+import { readFileSync } from 'node:fs';
 import { JsonRpcPeer, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR, RpcError } from '../jsonrpc.js';
 import type { AcpUpdate } from '../claude/to-acp.js';
 import type { StopReason, TurnOutcome } from '../claude/driver.js';
@@ -32,6 +33,15 @@ import { PromptRefused, promptBlockKind, promptBlocks, type PromptBlockKind, typ
 
 /** The protocol version this agent speaks. */
 export const PROTOCOL_VERSION = 1;
+
+function packageVersion(): string {
+  try {
+    const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { readonly version?: unknown };
+    return typeof version === 'string' && version.length > 0 ? version : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
 
 /** What a driver must offer the agent surface, whichever CLI it drives. */
 export interface AgentDriver {
@@ -233,7 +243,7 @@ export class AcpAgent {
       agentInfo: this.#options.agentInfo ?? {
         name: '@particle-academy/prism-acp',
         title: 'Prism ACP',
-        version: '0.1.0',
+        version: packageVersion(),
       },
       // Empty because this agent needs no authentication STEP: the CLI it
       // drives is already authenticated by the user, and no credential ever
