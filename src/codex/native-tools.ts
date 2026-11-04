@@ -94,7 +94,7 @@ export function restrictedToolConfig(config: Record<string, unknown> | undefined
     features: { ...object(config?.features), ...Object.fromEntries(NATIVE_FEATURES.map((key) => [key, false])) },
     tools: { experimental_request_user_input: { enabled: false }, update_plan: { enabled: false }, view_image: false },
     cloud: { skills: { enabled: false } },
-    skills: { include_instructions: false },
+    skills: { ...object(config?.skills), include_instructions: false },
     web_search: 'disabled',
     approvals_reviewer: 'user',
   };

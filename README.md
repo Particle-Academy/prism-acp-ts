@@ -506,6 +506,36 @@ checks its identity by resuming the captured id through `thread/resume`; omit
 
 ## Codex permissions
 
+`CodexDriverOptions.config` passes JSON configuration to `thread/start` and
+`thread/resume`, alongside the driver's MCP settings:
+
+```ts
+new CodexDriver({
+  cwd,
+  config: {
+    project_doc_max_bytes: 0,
+    'skills.config': [{ path: '/absolute/path/to/skill/SKILL.md', enabled: false }],
+  },
+});
+```
+
+Use `project_doc_max_bytes: 0` to omit project documents and list individual skill
+files with `enabled: false` to disable them. Set `'skills.include_instructions':
+false` to omit skill instructions, including skills added after a turn. Nested objects, arrays, booleans,
+finite numbers, strings and null are accepted. Dotted top-level paths are
+normalized to nested objects; overlapping paths are refused. Configuration is
+copied and recursively frozen at construction, so later edits to the caller's
+object do not change a pending launch. Supply it again when constructing a
+replacement driver.
+
+Driver-managed settings such as `mcp_servers`, model/provider selection, profiles,
+approval and sandbox choices, shell environment policy and shell snapshots are
+refused through `config`. Use the dedicated driver options where available.
+With `nativeTools: 'none'`, its feature/tool controls are also reserved; per-file
+skill settings and `skills.include_instructions: false` remain available. Values with accessors, custom prototypes,
+cycles, non-JSON types or excessive size/depth are refused before launch. This is
+trusted application configuration; never build it from model or ACP client input.
+
 `CodexDriver` accepts two trusted configuration options, sent on both `thread/start` and `thread/resume`:
 
 - `approvalPolicy`: `'untrusted' | 'on-request' | 'never'`. New threads default to `'on-request'`. On resume,
