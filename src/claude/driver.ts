@@ -86,6 +86,10 @@ export interface ClaudeDriverOptions {
   readonly settingSources?: readonly ('user' | 'project' | 'local')[];
   /** Use only explicitly supplied MCP configuration, ignoring other CLI MCP configurations. */
   readonly strictMcpConfig?: boolean;
+  /** Absolute text file appended to the system prompt; native recorded-prompt behavior applies on resume. */
+  readonly appendSystemPromptFile?: string;
+  /** Absolute plugin directory or zip paths, each passed separately. Incompatible with nativeTools: 'none'. */
+  readonly pluginDirs?: readonly string[];
   /** Deny these inherited MCP names for this run, preserving unrelated servers and permission hooks. */
   readonly disabledMcpServers?: readonly string[];
   readonly permissionMode?: ClaudePermissionMode;
@@ -179,6 +183,8 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
   const restricted = nativeToolsDisabled(options);
   const settingSources = claudeSettingSources(options.settingSources);
   assertStrictMcpConfig(options.strictMcpConfig);
+  const appendSystemPromptFile = claudeAppendFile(options.appendSystemPromptFile);
+  const pluginDirs = claudePluginDirs(options.pluginDirs, restricted);
   const args = [
     '--print',
     '--output-format',
@@ -192,6 +198,8 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
   if (options.resumeSessionId !== undefined) args.push('--resume', options.resumeSessionId);
   if (options.permissionMode !== undefined) args.push('--permission-mode', options.permissionMode);
   if (options.model !== undefined) args.push('--model', assertModel(options.model));
+  if (appendSystemPromptFile !== undefined) args.push('--append-system-prompt-file', appendSystemPromptFile);
+  for (const plugin of pluginDirs ?? []) args.push('--plugin-dir', plugin);
   if (restricted) args.push('--tools', '', '--strict-mcp-config', '--setting-sources', '', '--restricted');
   else {
     if (settingSources !== undefined) args.push('--setting-sources', settingSources.join(','));
@@ -226,6 +234,28 @@ function claudeSettingSources(value: ClaudeDriverOptions['settingSources']): Cla
 
 function assertStrictMcpConfig(value: ClaudeDriverOptions['strictMcpConfig']): void {
   if (value !== undefined && typeof value !== 'boolean') throw new Error('strictMcpConfig must be a boolean');
+}
+
+function assertAbsoluteCliPath(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || !isAbsolute(value)
+    || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(value)
+    || /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/.test(value)) {
+    throw new Error(`${field} must be an absolute path without control characters or malformed Unicode`);
+  }
+}
+
+function claudeAppendFile(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  assertAbsoluteCliPath(value, 'appendSystemPromptFile');
+  return value;
+}
+
+function claudePluginDirs(value: ClaudeDriverOptions['pluginDirs'], restricted: boolean): ClaudeDriverOptions['pluginDirs'] {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error('pluginDirs must be an array of absolute paths');
+  const paths = [...value].map(entry => { assertAbsoluteCliPath(entry, 'pluginDirs'); return entry; });
+  if (restricted && paths.length > 0) throw new Error("pluginDirs cannot be combined with nativeTools: 'none'");
+  return Object.freeze(paths);
 }
 
 function nativeToolsDisabled(options: ClaudeDriverOptions): boolean {
@@ -489,11 +519,13 @@ export class ClaudeDriver {
     const restricted = nativeToolsDisabled(options);
     const settingSources = claudeSettingSources(options.settingSources);
     assertStrictMcpConfig(options.strictMcpConfig);
+    const appendSystemPromptFile = claudeAppendFile(options.appendSystemPromptFile);
+    const pluginDirs = claudePluginDirs(options.pluginDirs, restricted);
     if (options.permissionPrompts?.nodePath !== undefined && !isAbsolute(options.permissionPrompts.nodePath)) {
       throw new Error('permissionPrompts.nodePath must be an absolute executable path');
     }
     this.#mcpServers = readMcpServers(options.mcpServers);
-    this.#options = { ...options, ...(settingSources === undefined ? {} : { settingSources }), ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
+    this.#options = { ...options, appendSystemPromptFile, pluginDirs, ...(settingSources === undefined ? {} : { settingSources }), ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
     if (options.processTree?.windowsStdio === 'local-pipes' && ((!restricted && this.#mcpServers.length > 0) || options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0)) {
       throw new ProcessTreeError('LOCAL transport does not support generated Claude MCP configuration or permission hooks');
     }
