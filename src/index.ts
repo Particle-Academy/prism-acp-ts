@@ -117,6 +117,7 @@ export type { TurnFailure, TurnFailureKind } from './turn-failure.js';
 
 export { CODEX_DRIVER_CAPABILITIES, CodexDriver } from './codex/driver.js';
 export { CODEX_NATIVE_TOOLS_NONE } from './codex/native-tools.js';
+export type { CodexConfig, CodexConfigValue } from './codex/config.js';
 export type { CodexDriverOptions, CodexTransportFactory } from './codex/driver.js';
 export { codexRateLimitNotice, parseCodexRateLimit, readCodexRateLimit } from './codex/rate-limit.js';
 export type { CodexRateLimit, CodexRateLimitRead, CodexRateLimitWindow } from './codex/rate-limit.js';

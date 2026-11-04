@@ -113,6 +113,10 @@ jobs:
       - run: npx vitest run test/codex-native-tools-live.test.ts test/codex-replay-live.test.ts test/codex-plugin-startup-live.test.ts
         env:
           PRISM_ACP_CODEX_NATIVE_TOOLS: '1'
+      - name: Native per-thread project document and skill configuration
+        run: npx vitest run test/codex-config-native.test.ts
+        env:
+          PRISM_ACP_CODEX_CONFIG: '1'
 
   claude-approval:
     name: Claude approval, ${{ matrix.os }}
