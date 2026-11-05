@@ -58,6 +58,8 @@ export interface FrameError {
  */
 export class NdjsonFramer {
   #buffer = '';
+  /** UTF-8 byte length of `#buffer`, kept incrementally so each push costs O(chunk), not O(pending line). */
+  #pendingBytes = 0;
   #decoder = new TextDecoder('utf-8');
 
   /**
@@ -69,9 +71,7 @@ export class NdjsonFramer {
    * JSON -- and the corruption is invisible until a non-ASCII payload appears.
    */
   push(chunk: Uint8Array | string): Frame[] {
-    this.#buffer +=
-      typeof chunk === 'string' ? chunk : this.#decoder.decode(chunk, { stream: true });
-    return this.#drain();
+    return this.#append(typeof chunk === 'string' ? chunk : this.#decoder.decode(chunk, { stream: true }));
   }
 
   /**
@@ -83,33 +83,54 @@ export class NdjsonFramer {
    * outcome.
    */
   end(): Frame[] {
-    this.#buffer += this.#decoder.decode();
-    const frames = this.#drain();
+    const frames = this.#append(this.#decoder.decode());
     const rest = this.#buffer;
     this.#buffer = '';
+    this.#pendingBytes = 0;
     const frame = rest.length > 0 ? parseLine(rest) : null;
     return frame === null ? frames : [...frames, frame];
   }
 
-  #drain(): Frame[] {
+  /**
+   * Add decoded text and return the frames it completes.
+   *
+   * Work is proportional to the TEXT ADDED, never to the line pending before it.
+   * The buffer held no newline before this call, so only the new text is
+   * searched; and the pending byte count is updated from the new text alone.
+   * Re-measuring or re-searching the whole pending line on every chunk made a
+   * large frame quadratic in its number of chunks (genie: 7-18 s main-thread
+   * stalls on long session-replay lines).
+   */
+  #append(text: string): Frame[] {
     const frames: Frame[] = [];
-    let newline = this.#buffer.indexOf('\n');
+    if (text.length === 0) return frames;
 
-    while (newline !== -1) {
-      const line = this.#buffer.slice(0, newline);
-      this.#buffer = this.#buffer.slice(newline + 1);
-      const frame = parseLine(line);
-      if (frame !== null) frames.push(frame);
-      newline = this.#buffer.indexOf('\n');
+    let newline = text.indexOf('\n');
+    if (newline === -1) {
+      this.#buffer += text;
+      this.#pendingBytes += utf8Length(text);
+    } else {
+      // The first newline completes the pending line.
+      let start = 0;
+      while (newline !== -1) {
+        const line = start === 0 ? this.#buffer + text.slice(0, newline) : text.slice(start, newline);
+        const frame = parseLine(line);
+        if (frame !== null) frames.push(frame);
+        start = newline + 1;
+        newline = text.indexOf('\n', start);
+      }
+      this.#buffer = text.slice(start);
+      this.#pendingBytes = utf8Length(this.#buffer);
     }
 
     // The cap applies to a line still being accumulated, not only to a
     // completed one. Checking it only on completion would mean a producer
     // emitting an endless line without a newline grows the buffer forever --
     // the cap would be correct and never reached.
-    const pending = byteLength(this.#buffer);
-    if (pending > MAX_LINE_BYTES) {
+    if (this.#pendingBytes > MAX_LINE_BYTES) {
+      const pending = this.#pendingBytes;
       this.#buffer = '';
+      this.#pendingBytes = 0;
       frames.push(oversize(pending));
     }
 
@@ -162,7 +183,29 @@ function oversize(bytes: number): Frame {
 
 /** UTF-8 byte length, because the cap is in bytes and `.length` is in UTF-16 code units. */
 function byteLength(text: string): number {
-  return new TextEncoder().encode(text).length;
+  return utf8Length(text);
+}
+
+/**
+ * UTF-8 length without encoding, so measuring allocates nothing. Matches
+ * `TextEncoder`: a surrogate pair is 4 bytes, and a lone surrogate is encoded
+ * as U+FFFD, 3 bytes.
+ */
+function utf8Length(text: string): number {
+  let bytes = 0;
+  for (let i = 0; i < text.length; i++) {
+    const unit = text.charCodeAt(i);
+    if (unit < 0x80) bytes += 1;
+    else if (unit < 0x800) bytes += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff && i + 1 < text.length) {
+      const next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        i++;
+      } else bytes += 3;
+    } else bytes += 3;
+  }
+  return bytes;
 }
 
 /** Serialise one value as an NDJSON line, trailing newline included. */
