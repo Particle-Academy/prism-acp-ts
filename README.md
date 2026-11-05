@@ -1007,7 +1007,7 @@ interrupt one. A driver that can implements `cancel()`, and declares
   `turn/start` has named the turn is sent as soon as it does; a prompt still
   queued behind startup is dropped and never reaches Codex.
 - **Claude** writes `{ "type": "control_request", "request_id": …,
-  "request": { "subtype": "interrupt" } }` to the CLI's stream-json stdin.
+  "request": { "subtype": "interrupt", "cancel_queued": true } }` to the CLI's stream-json stdin.
   - **Documented:** the [Agent SDK docs](https://code.claude.com/docs/en/agent-sdk/typescript)
     say a client may drive the CLI's control protocol directly with the
     `interrupt` control request. They also document the `control_request`
@@ -1022,10 +1022,23 @@ interrupt one. A driver that can implements `cancel()`, and declares
     - the process stayed alive, and the next prompt ran normally.
   - An aborted result the driver did not ask for stays an error. Re-run the
     probe when the CLI changes.
-  - **`cancel_queued` is not set.** Measured without it, a message queued on
-    stdin at the moment of the interrupt still ran. Through ACP there is never
-    such a message, because a session runs one turn at a time. The flag's
-    effect on this CLI hasn't been measured.
+  - **Queued notices are cancelled too.** Claude Code 2.1.318 was measured on
+    2026-11-05 through `ClaudeDriver.prompt()` and `cancel()`, the direct entry
+    embedders use. Without `cancel_queued`, a notice written during a turn ran
+    after Stop. With it, the CLI dropped the notice without emitting a result.
+    Each prompt now has a fresh UUID: receipt-listed UUIDs end locally with
+    `cancelled`; the active prompt ends through its own result. Callbacks keep
+    submission order. A new prompt written after cancel can still run normally.
+    Lifecycle metadata is consumed silently and only corroborates the receipt.
+    Repeated or idle cancel sends no extra interrupt. A missing receipt (30s
+    control deadline) or inconsistent accounting ends every unfinished prompt
+    with the fixed raw marker `cancel accounting mismatch` and stops the uncertain
+    process. The host receives `onProtocolError` with the fixed reason
+    `cancel state uncertain; driver stopped`; later `prompt()` calls throw the
+    exported `ClaudeCancelStateError` (`code: 'claude_cancel_state_uncertain'`)
+    with the same reason. Start a new driver afterwards. Older serial CLI
+    results that omit UUIDs remain supported.
+    ACP itself continues to allow one turn per session.
 
 Once a client has cancelled, the prompt is answered `cancelled` even if the turn
 finished or failed in the race with the interrupt, as ACP requires. If the

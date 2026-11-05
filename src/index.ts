@@ -81,6 +81,7 @@ export type { ClaudeRateLimit, ClaudeRateLimitWindow, RateLimitRead } from './cl
 export {
   CLAUDE_DRIVER_CAPABILITIES,
   ClaudeDriver,
+  ClaudeCancelStateError,
   claudeArgs,
   promptLine,
   updatesFromFrames,
