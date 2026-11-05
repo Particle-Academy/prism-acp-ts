@@ -2,6 +2,8 @@ import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from 'no
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ClaudeDriver, type TurnOutcome } from '../src/claude/driver.js';
 import { ClaudeCancelStateError } from '../src/index.js';
@@ -49,6 +51,42 @@ async function two(mode = 'queued') {
 }
 
 describe('ClaudeDriver UUID cancellation at the real prompt/cancel process entry', () => {
+  it.each(['result', 'exit'] as const)('finishes %s without an optional onTurnEnd listener', async mode => {
+    const root = mkdtempSync(join(tmpdir(), 'prism-queued-no-listener-'));
+    const built = new URL('../dist/index.js', import.meta.url).href;
+    // A child watchdog is required: an event-loop spin also blocks the driver's own timers.
+    const script = `
+      import { ClaudeDriver } from ${JSON.stringify(built)};
+      import { join } from 'node:path';
+      const [fixture, root, mode] = process.argv.slice(1);
+      let finish; const closed = new Promise(resolve => { finish = resolve; });
+      let updates = 0;
+      const driver = new ClaudeDriver({ cwd: root, binary: process.execPath,
+        binaryArgs: [fixture, mode === 'exit' ? 'exit' : 'queued', join(root, 'wire.json')],
+        parentEnv: process.env }, {
+        onUpdate() { updates++; }, onExit(code) { finish(code); },
+        onProtocolError() { throw new Error('controlled provider protocol error'); },
+      });
+      driver.start(); await driver.modelState();
+      driver.prompt(mode === 'result' ? 'FINISH-one' : 'FIRST');
+      if (mode === 'exit') driver.prompt('SECOND'); else driver.endInput();
+      const code = await closed;
+      const stop = await driver.stop({ graceMs: 0 });
+      console.log(JSON.stringify({ code, updates: updates > 0, stop }));
+    `;
+    try {
+      const result = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', script, fixture, root, mode], {
+        cwd: root, windowsHide: true, timeout: 10000, maxBuffer: 16000,
+        env: { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, HOME: root, USERPROFILE: root, LOCALAPPDATA: root, TEMP: root, TMP: root },
+      });
+      expect(JSON.parse(result.stdout.trim())).toMatchObject({ code: mode === 'exit' ? 23 : 0, updates: true, stop: { verified: true, empty: true, survivors: 0 } });
+    } finally {
+      const owned = realpathSync(root);
+      if (dirname(owned) !== realpathSync(tmpdir()) || !basename(owned).startsWith('prism-queued-no-listener-')) throw new Error('Owned fixture path changed');
+      rmSync(owned, { recursive: true, maxRetries: 20, retryDelay: 100 });
+    }
+  }, 20000);
+
   it('stamps fresh UUIDs without changing the user message', async () => {
     const s = await session();
     s.driver.prompt('FINISH-one'); await until(() => s.outcomes.length === 1);

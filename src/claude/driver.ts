@@ -835,7 +835,12 @@ export class ClaudeDriver {
   #flushOutcomes(): void {
     if (this.#flushingOutcomes) return;
     this.#flushingOutcomes = true;
-    try { while (this.#pendingOutcomes.length > 0) this.#events.onTurnEnd?.(this.#pendingOutcomes.shift()!); }
+    try {
+      while (this.#pendingOutcomes.length > 0) {
+        const outcome = this.#pendingOutcomes.shift()!;
+        this.#events.onTurnEnd?.(outcome);
+      }
+    }
     finally { this.#flushingOutcomes = false; }
   }
 
