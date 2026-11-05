@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_LINE_BYTES, NdjsonFramer, encodeLine, parseLine } from '../src/ndjson.js';
+import { MAX_LINE_BYTES, NdjsonFramer, encodeLine, parseLine, type Frame } from '../src/ndjson.js';
 
 const utf8 = new TextEncoder();
 
@@ -144,5 +144,57 @@ describe('encodeLine', () => {
   it('round-trips through the framer', () => {
     const value = { jsonrpc: '2.0', id: 1, method: 'initialize' };
     expect(framesOf([encodeLine(value)])).toEqual([{ ok: true, value }]);
+  });
+});
+
+describe('framing cost is proportional to the bytes pushed', () => {
+  // A large frame arriving in many chunks used to re-measure and re-search the
+  // whole pending line on every chunk, which is quadratic and froze a host's
+  // main thread for seconds at a time. These pin the behaviour the fix keeps.
+
+  const sample = (n: number): string => {
+    const parts = ['a', 'é', '中', '😀', '\uD800', '\uDC00', '"', '\\', ' '];
+    let s = '';
+    for (let i = 0; i < n; i++) s += parts[(i * 7 + 3) % parts.length];
+    return s;
+  };
+
+  it('frames identically however the stream is chunked', () => {
+    const lines = [{ a: 1 }, { text: sample(500) }, { b: [1, 2, 3] }, { text: sample(37) }];
+    const stream = new TextEncoder().encode(lines.map((value) => encodeLine(value)).join(''));
+    const expected = lines.map((value) => JSON.parse(new TextDecoder().decode(new TextEncoder().encode(JSON.stringify(value)))));
+
+    for (const size of [1, 2, 3, 7, 64, 1000, stream.length]) {
+      const framer = new NdjsonFramer();
+      const frames: Frame[] = [];
+      for (let offset = 0; offset < stream.length; offset += size) frames.push(...framer.push(stream.subarray(offset, offset + size)));
+      frames.push(...framer.end());
+      expect(frames.map((frame) => (frame.ok ? frame.value : frame.error.kind))).toEqual(expected);
+    }
+  });
+
+  it('counts pending bytes exactly as TextEncoder would, including surrogates', () => {
+    const unit = '中😀\uD800';
+    const perUnit = new TextEncoder().encode(unit).length;
+    const repeat = Math.floor(MAX_LINE_BYTES / perUnit) + 1;
+    const frames = new NdjsonFramer().push(unit.repeat(repeat));
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ ok: false, error: { kind: 'oversize', bytes: perUnit * repeat } });
+  });
+
+  it('keeps counting a pending line across chunks and refuses it once it passes the cap', () => {
+    const framer = new NdjsonFramer();
+    const chunk = 'x'.repeat(4_000_000);
+    const frames: Frame[] = [];
+    for (let i = 0; i < 17; i++) frames.push(...framer.push(chunk));
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ ok: false, error: { kind: 'oversize', bytes: 68_000_000 } });
+  });
+
+  it('starts counting afresh after a newline', () => {
+    const framer = new NdjsonFramer();
+    const half = 'x'.repeat(40_000_000);
+    expect(framer.push(`"${half}"\n"`)).toHaveLength(1);
+    expect(framer.push(`${half}"\n`)).toEqual([{ ok: true, value: half }]);
   });
 });
