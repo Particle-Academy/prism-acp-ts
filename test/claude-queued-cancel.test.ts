@@ -14,14 +14,14 @@ const until = async (ready: () => boolean) => {
   const deadline = Date.now() + 8000;
   while (!ready()) { if (Date.now() > deadline) throw new Error('Controlled CLI did not reach the required condition'); await new Promise(resolve => setTimeout(resolve, 10)); }
 };
-async function session(mode = 'queued', afterOutcome?: () => void, windowsStdio?: 'local-pipes') {
+async function session(mode = 'queued', afterOutcome?: () => void, windowsStdio?: 'local-pipes', options: { protocolErrorListener?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'prism-queued-cancel-'));
   const journal = join(root, 'wire.json');
   const outcomes: TurnOutcome[] = [], errors: string[] = [], text: string[] = [];
   let exited = false;
   const driver = new ClaudeDriver({ cwd: root, binary: process.execPath, binaryArgs: [fixture, mode, journal], ...(windowsStdio ? { processTree: { windowsStdio } } : {}), ...(mode === 'permission-fail' ? { permissionPrompts: { tools: ['Bash'] } } : {}),
     parentEnv: { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, HOME: root, USERPROFILE: root, LOCALAPPDATA: root, TEMP: root, TMP: root } }, {
-    onTurnEnd: value => { outcomes.push(value); afterOutcome?.(); }, onProtocolError: value => errors.push(value), onExit: () => { exited = true; },
+    onTurnEnd: value => { outcomes.push(value); afterOutcome?.(); }, ...(options.protocolErrorListener !== false ? { onProtocolError: (value: string) => errors.push(value) } : {}), onExit: () => { exited = true; },
     onUpdate: value => { if (value.sessionUpdate === 'agent_message_chunk') text.push(String((value.content as { text?: string }).text ?? '')); },
   });
   driver.start();
@@ -236,6 +236,16 @@ describe('ClaudeDriver UUID cancellation at the real prompt/cancel process entry
     await s.driver.cancel(); await until(() => s.outcomes.length >= 3);
     expect(s.outcomes.map(outcome => outcome.raw)).toEqual(['aborted_streaming', 'dropped by cancel', 'end_turn']);
     await s.driver.cancel(); expect(s.state().interrupts).toHaveLength(1);
+  }, 20000);
+
+  it('settles and stops uncertain cancellation without an optional onProtocolError listener', async () => {
+    const s = await session('malformed', undefined, undefined, { protocolErrorListener: false });
+    s.driver.prompt('FIRST'); await until(() => s.text.includes('READY-FIRST'));
+    s.driver.prompt('SECOND'); await until(() => s.text.includes('READY-SECOND'));
+    await s.driver.cancel(); await until(() => s.outcomes.length === 2 && s.exited());
+    expect(s.outcomes.map(outcome => outcome.raw)).toEqual(['cancel accounting mismatch', 'cancel accounting mismatch']);
+    expect(() => s.driver.prompt('NEXT')).toThrow(ClaudeCancelStateError);
+    expect(await s.driver.stop({ graceMs: 0 })).toMatchObject({ verified: true, empty: true, survivors: 0 });
   }, 20000);
 
   it('ends every unfinished prompt if the CLI exits without returning results', async () => {
