@@ -68,7 +68,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     return;
   }
   if (frame.type === 'control_request' && frame.request && frame.request.subtype === 'interrupt') {
-    out({ type: 'control_response', response: { subtype: 'success', request_id: frame.request_id, response: { still_queued: [] } } });
+    out({ type: 'control_response', response: { subtype: 'success', request_id: frame.request_id, response: { still_queued: [], cancelled: [] } } });
     if (inTurn) {
       inTurn = false;
       process.stdout.write(MEASURED_RESULT + '\\n');
@@ -154,8 +154,8 @@ describe.skipIf(process.platform === 'win32')('ClaudeDriver turn cancel, against
       expect(controls[0]).toEqual({
         type: 'control_request',
         request_id: expect.stringMatching(/\S/),
-        // No `cancel_queued`: messages queued at the moment of Stop still run, which is what was measured.
-        request: { subtype: 'interrupt' },
+        // The 2.1.318 direct-driver measurement also covers dropping queued notices.
+        request: { subtype: 'interrupt', cancel_queued: true },
       });
       expect(turnEnds[0]).toEqual({ stopReason: 'cancelled', isError: false, raw: 'aborted_streaming' });
       expect(driver.running).toBe(true);
