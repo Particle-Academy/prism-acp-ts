@@ -34,6 +34,9 @@ export interface ProbeOptions {
   executionControl?: boolean;
   inheritedFeatures?: Record<string, unknown>;
   inheritedSettings?: Record<string, unknown>;
+  /** Owned project fixture setup and per-thread config; never a user's project. */
+  prepareProject?: (cwd: string) => void;
+  config?: CodexDriverOptions['config'] | ((cwd: string) => CodexDriverOptions['config']);
   rerouteSignal?: 'http-header' | 'event-early' | 'event-late' | 'envelope';
   rerouteOnRequest?: number;
   protectedHome?: boolean;
@@ -71,6 +74,8 @@ export async function openCodexToolProbe(options: ProbeOptions) {
   const home = options.reuseHome ?? join(root, 'home'); mkdirSync(home, { recursive: true });
   const calls = typeof options.calls === 'function' ? options.calls(home) : options.calls;
   const cwd = mkdtempSync(join(tmpdir(), 'prism-codex-tools-cwd-'));
+  options.prepareProject?.(cwd);
+  const config = typeof options.config === 'function' ? options.config(cwd) : options.config;
   const temporaryParent = realpathSync(tmpdir());
   const receipt = join(root, 'mcp-receipts.jsonl');
   const mcpScript = fileURLToPath(new URL('./codex-native-tools-mcp.mjs', import.meta.url));
@@ -187,6 +192,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
     driver = new CodexDriver({ cwd, binary: process.env.PRISM_ACP_CODEX_BINARY ?? 'codex', parentEnv, allowEnv: ['PRISM_FAKE_KEY'],
       ...(options.protectedHome ? { credentials: { mode: 'apiKey', apiKey: 'prism-dummy-not-a-real-api-key', home } as const } : {}),
       model: options.model, ...(options.nativeTools === undefined ? {} : { nativeTools: options.nativeTools }),
+      ...(config === undefined ? {} : { config }),
       mcpServers: servers, mcpToolApproval: Object.fromEntries(servers.map((entry) => [entry.name, 'approve' as const])),
       approvalPolicy: options.executionControl ? 'never' : 'untrusted', sandbox: options.executionControl ? 'danger-full-access' : 'read-only', turnInactivityTimeoutMs: 15000,
       ...(options.resumeSessionId === undefined ? {} : { resumeSessionId: options.resumeSessionId }),
@@ -219,7 +225,7 @@ export async function openCodexToolProbe(options: ProbeOptions) {
     });
     driver.start(); await bounded(driver.ready, 20000, 'Native fixture startup timeout');
     return {
-      driver, requests, sent, received, updates, problems, unexpected, blockedConnections, home, root, cleanup,
+      driver, requests, sent, received, updates, problems, unexpected, blockedConnections, home, root, cwd, cleanup,
       lateSignalAfterTool: () => lateSignalAfterTool,
       startupConfig: () => effectiveConfig,
       trustedAccount: async () => {

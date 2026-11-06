@@ -12,6 +12,7 @@ import { isValidCliSessionId } from '../session-id.js';
 import { stripAnsiControlSequences } from '../text.js';
 import { assertRestrictedCli, assertRestrictedConfig, assertRestrictedModel, CODEX_NATIVE_TOOLS_NONE, CodexNativeToolsRefused, RESTRICTED_STARTUP_ARGS, restrictedToolConfig } from './native-tools.js';
 import { JsonRpcPeer } from '../jsonrpc.js';
+import { readCodexConfig, mergeCodexConfig, type CodexConfig } from './config.js';
 import {
   META_CLI_SESSION_ID,
   META_MODEL,
@@ -66,6 +67,8 @@ export interface CodexDriverOptions {
   readonly mcpServers?: readonly McpServer[];
   /** Disable inherited user/project mcp_servers entries by name for this run; other entries stay available. */
   readonly disabledMcpServers?: readonly string[];
+  /** Per-thread JSON configuration for start/resume. Driver-owned settings are refused; copied and frozen at construction. */
+  readonly config?: CodexConfig;
   readonly turnInactivityTimeoutMs?: number;
   /**
    * The model to run (`model` on `thread/start` / `thread/resume`). Omitted means Codex's own default. The model in use --
@@ -278,7 +281,8 @@ export class CodexDriver implements AgentDriver {
       throw new Error('sandbox must be one of: read-only, workspace-write, danger-full-access');
     }
     // Keep constructor-validated settings stable across asynchronous startup.
-    this.#options = { ...options };
+    const config = readCodexConfig(options.config, options.nativeTools === 'none');
+    this.#options = { ...options, config };
     const servers = readMcpServers(options.mcpServers);
     this.#suppliedMcpServers = new Set(servers.map((server) => server.name));
     this.#disabledMcpServers = readDisabledMcpServers(options.disabledMcpServers, servers);
@@ -565,6 +569,7 @@ export class CodexDriver implements AgentDriver {
       }
       if (bindings.length > 0) mcpConfig = codexMcpShellPolicy(mcpConfig!, bindings, effective.shell_environment_policy);
     }
+    mcpConfig = mergeCodexConfig(this.#options.config, mcpConfig);
     if (this.#options.nativeTools === 'none') mcpConfig = restrictedToolConfig(mcpConfig);
 
     if (this.#options.resumeSessionId === undefined) {

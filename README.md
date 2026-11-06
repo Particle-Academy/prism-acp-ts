@@ -170,6 +170,46 @@ Nothing here mutates `process.env`. A workspace may hold an API key on purpose �
 other consumers beside this one legitimately bill per token — so the child's
 environment is constructed and the ambient one is left alone.
 
+## Claude settings and MCP configuration
+
+Choose the file-based settings sources and MCP configuration independently:
+
+```ts
+new ClaudeDriver({ cwd, settingSources: ['user'], strictMcpConfig: true, mcpServers });
+```
+
+`settingSources` accepts `user`, `project`, and `local`. Omit it for the CLI's
+defaults, or pass `[]` for no file-based sources. `strictMcpConfig: true` passes
+`--strict-mcp-config`, so the CLI uses only explicitly supplied MCP configuration.
+Explicit `--settings` hooks and the driver's supplied MCP configuration still
+apply. These options apply to fresh and resumed launches; pass the same driver
+configuration when constructing a replacement driver. `nativeTools: 'none'`
+always selects no file-based settings sources and strict MCP configuration.
+
+### Append files and plugins
+
+```ts
+new ClaudeDriver({
+  cwd,
+  appendSystemPromptFile: '/srv/app/prompts/rules.txt',
+  pluginDirs: ['/srv/app/plugins/review', '/srv/app/plugins/extra.zip'],
+});
+```
+
+`appendSystemPromptFile` passes `--append-system-prompt-file`. `pluginDirs` accepts
+plugin directories or ZIP files and passes each entry as a separate `--plugin-dir`.
+Paths must be absolute strings without control characters or malformed Unicode.
+The constructor validates values and copies the plugin list; validation errors
+do not include path values or file contents. A nonempty plugin list is refused
+with `nativeTools: 'none'`; an empty list preserves that policy.
+
+Both options are passed on fresh, resumed and replacement launches. The CLI's
+[recorded system prompt](https://code.claude.com/docs/en/cli-reference#system-prompt-flags-in-resumed-conversations)
+still governs what the model receives: on Claude Code 2.1.311 and 2.1.312, resuming with a
+different append file retains the conversation's original prompt. Passing a new
+file does not immediately replace that recorded text. The driver preserves the
+CLI's snapshot policy.
+
 ## API keys instead of a subscription
 
 A deployment uses either the person's subscription or API keys, and an app may
@@ -465,6 +505,36 @@ checks its identity by resuming the captured id through `thread/resume`; omit
 `probeSession` when using Codex.
 
 ## Codex permissions
+
+`CodexDriverOptions.config` passes JSON configuration to `thread/start` and
+`thread/resume`, alongside the driver's MCP settings:
+
+```ts
+new CodexDriver({
+  cwd,
+  config: {
+    project_doc_max_bytes: 0,
+    'skills.config': [{ path: '/absolute/path/to/skill/SKILL.md', enabled: false }],
+  },
+});
+```
+
+Use `project_doc_max_bytes: 0` to omit project documents and list individual skill
+files with `enabled: false` to disable them. Set `'skills.include_instructions':
+false` to omit skill instructions, including skills added after a turn. Nested objects, arrays, booleans,
+finite numbers, strings and null are accepted. Dotted top-level paths are
+normalized to nested objects; overlapping paths are refused. Configuration is
+copied and recursively frozen at construction, so later edits to the caller's
+object do not change a pending launch. Supply it again when constructing a
+replacement driver.
+
+Driver-managed settings such as `mcp_servers`, model/provider selection, profiles,
+approval and sandbox choices, shell environment policy and shell snapshots are
+refused through `config`. Use the dedicated driver options where available.
+With `nativeTools: 'none'`, its feature/tool controls are also reserved; per-file
+skill settings and `skills.include_instructions: false` remain available. Values with accessors, custom prototypes,
+cycles, non-JSON types or excessive size/depth are refused before launch. This is
+trusted application configuration; never build it from model or ACP client input.
 
 `CodexDriver` accepts two trusted configuration options, sent on both `thread/start` and `thread/resume`:
 
@@ -937,7 +1007,7 @@ interrupt one. A driver that can implements `cancel()`, and declares
   `turn/start` has named the turn is sent as soon as it does; a prompt still
   queued behind startup is dropped and never reaches Codex.
 - **Claude** writes `{ "type": "control_request", "request_id": …,
-  "request": { "subtype": "interrupt" } }` to the CLI's stream-json stdin.
+  "request": { "subtype": "interrupt", "cancel_queued": true } }` to the CLI's stream-json stdin.
   - **Documented:** the [Agent SDK docs](https://code.claude.com/docs/en/agent-sdk/typescript)
     say a client may drive the CLI's control protocol directly with the
     `interrupt` control request. They also document the `control_request`
@@ -952,10 +1022,23 @@ interrupt one. A driver that can implements `cancel()`, and declares
     - the process stayed alive, and the next prompt ran normally.
   - An aborted result the driver did not ask for stays an error. Re-run the
     probe when the CLI changes.
-  - **`cancel_queued` is not set.** Measured without it, a message queued on
-    stdin at the moment of the interrupt still ran. Through ACP there is never
-    such a message, because a session runs one turn at a time. The flag's
-    effect on this CLI hasn't been measured.
+  - **Queued notices are cancelled too.** Claude Code 2.1.318 was measured on
+    2026-11-05 through `ClaudeDriver.prompt()` and `cancel()`, the direct entry
+    embedders use. Without `cancel_queued`, a notice written during a turn ran
+    after Stop. With it, the CLI dropped the notice without emitting a result.
+    Each prompt now has a fresh UUID: receipt-listed UUIDs end locally with
+    `cancelled`; the active prompt ends through its own result. Callbacks keep
+    submission order. A new prompt written after cancel can still run normally.
+    Lifecycle metadata is consumed silently and only corroborates the receipt.
+    Repeated or idle cancel sends no extra interrupt. A missing receipt (30s
+    control deadline) or inconsistent accounting ends every unfinished prompt
+    with the fixed raw marker `cancel accounting mismatch` and stops the uncertain
+    process. The host receives `onProtocolError` with the fixed reason
+    `cancel state uncertain; driver stopped`; later `prompt()` calls throw the
+    exported `ClaudeCancelStateError` (`code: 'claude_cancel_state_uncertain'`)
+    with the same reason. Start a new driver afterwards. Older serial CLI
+    results that omit UUIDs remain supported.
+    ACP itself continues to allow one turn per session.
 
 Once a client has cancelled, the prompt is answered `cancelled` even if the turn
 finished or failed in the race with the interrupt, as ACP requires. If the

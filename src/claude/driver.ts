@@ -24,7 +24,7 @@ import { claudeMcpServers, type McpServerReport } from '../mcp-status.js';
 import { assertModel } from '../meta.js';
 import { ClaudeTurnFailures, type TurnFailure } from '../turn-failure.js';
 import { isValidCliSessionId } from '../session-id.js';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { PermissionOutcome, PermissionRequest, ProblemDetail } from '../acp/agent.js';
 export type { ProblemDetail } from '../acp/agent.js';
 import { ApprovalServer, approvalCliVersion, approvalHookScript, approvalSettings, permissionRequestFor } from './approvals.js';
@@ -82,6 +82,14 @@ export interface ClaudeDriverOptions {
   readonly resumeSessionId?: string;
   /** Explicit per-session MCP servers; independent of the agent's environment. */
   readonly mcpServers?: readonly McpServer[];
+  /** CLI settings sources to load. Omit for native defaults; [] loads no file-based sources. */
+  readonly settingSources?: readonly ('user' | 'project' | 'local')[];
+  /** Use only explicitly supplied MCP configuration, ignoring other CLI MCP configurations. */
+  readonly strictMcpConfig?: boolean;
+  /** Absolute text file appended to the system prompt; native recorded-prompt behavior applies on resume. */
+  readonly appendSystemPromptFile?: string;
+  /** Absolute plugin directory or zip paths, each passed separately. Incompatible with nativeTools: 'none'. */
+  readonly pluginDirs?: readonly string[];
   /** Deny these inherited MCP names for this run, preserving unrelated servers and permission hooks. */
   readonly disabledMcpServers?: readonly string[];
   readonly permissionMode?: ClaudePermissionMode;
@@ -173,6 +181,10 @@ export interface ClaudeDriverEvents {
 // this helper must supply their own file path for non-empty mcpServers.
 export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string, settingsPath?: string): string[] {
   const restricted = nativeToolsDisabled(options);
+  const settingSources = claudeSettingSources(options.settingSources);
+  assertStrictMcpConfig(options.strictMcpConfig);
+  const appendSystemPromptFile = claudeAppendFile(options.appendSystemPromptFile);
+  const pluginDirs = claudePluginDirs(options.pluginDirs, restricted);
   const args = [
     '--print',
     '--output-format',
@@ -186,7 +198,13 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
   if (options.resumeSessionId !== undefined) args.push('--resume', options.resumeSessionId);
   if (options.permissionMode !== undefined) args.push('--permission-mode', options.permissionMode);
   if (options.model !== undefined) args.push('--model', assertModel(options.model));
+  if (appendSystemPromptFile !== undefined) args.push('--append-system-prompt-file', appendSystemPromptFile);
+  for (const plugin of pluginDirs ?? []) args.push('--plugin-dir', plugin);
   if (restricted) args.push('--tools', '', '--strict-mcp-config', '--setting-sources', '', '--restricted');
+  else {
+    if (settingSources !== undefined) args.push('--setting-sources', settingSources.join(','));
+    if (options.strictMcpConfig === true) args.push('--strict-mcp-config');
+  }
   if (options.allowedTools !== undefined && options.allowedTools.length > 0) {
     args.push('--allowed-tools', options.allowedTools.join(','));
   }
@@ -202,6 +220,42 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
   if (settingsPath !== undefined) args.push('--settings', settingsPath);
 
   return args;
+}
+
+function claudeSettingSources(value: ClaudeDriverOptions['settingSources']): ClaudeDriverOptions['settingSources'] {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error('settingSources must be an array of user, project, or local');
+  const sources = [...value];
+  if (sources.some(source => source !== 'user' && source !== 'project' && source !== 'local')) {
+    throw new Error('settingSources must contain only user, project, or local');
+  }
+  return Object.freeze(sources);
+}
+
+function assertStrictMcpConfig(value: ClaudeDriverOptions['strictMcpConfig']): void {
+  if (value !== undefined && typeof value !== 'boolean') throw new Error('strictMcpConfig must be a boolean');
+}
+
+function assertAbsoluteCliPath(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || !isAbsolute(value)
+    || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(value)
+    || /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/.test(value)) {
+    throw new Error(`${field} must be an absolute path without control characters or malformed Unicode`);
+  }
+}
+
+function claudeAppendFile(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  assertAbsoluteCliPath(value, 'appendSystemPromptFile');
+  return value;
+}
+
+function claudePluginDirs(value: ClaudeDriverOptions['pluginDirs'], restricted: boolean): ClaudeDriverOptions['pluginDirs'] {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error('pluginDirs must be an array of absolute paths');
+  const paths = [...value].map(entry => { assertAbsoluteCliPath(entry, 'pluginDirs'); return entry; });
+  if (restricted && paths.length > 0) throw new Error("pluginDirs cannot be combined with nativeTools: 'none'");
+  return Object.freeze(paths);
 }
 
 function nativeToolsDisabled(options: ClaudeDriverOptions): boolean {
@@ -241,11 +295,15 @@ function restrictedInitMatches(frame: Record<string, unknown>, servers: readonly
  * {@link promptBlocks} before a byte is written, naming the block.
  */
 export function promptLine(content: PromptContent): string {
+  return encodeLine(promptMessage(content));
+}
+
+function promptMessage(content: PromptContent): Record<string, unknown> {
   const blocks = promptBlocks(content, CLAUDE_DRIVER_CAPABILITIES.promptBlocks);
-  return encodeLine({
+  return {
     type: 'user',
     message: { role: 'user', content: blocks.map(claudeContent) },
-  });
+  };
 }
 
 function claudeContent(block: PromptBlock): Record<string, unknown> {
@@ -344,6 +402,13 @@ export function cliSessionIdOf(frame: unknown): string | null {
   return typeof frame.session_id === 'string' ? frame.session_id : null;
 }
 
+/** The process was stopped because its cancel receipt could not account for pending prompts. */
+export class ClaudeCancelStateError extends Error {
+  override readonly name = 'ClaudeCancelStateError';
+  readonly code = 'claude_cancel_state_uncertain';
+  constructor() { super('cancel state uncertain; driver stopped'); }
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -408,13 +473,17 @@ export class ClaudeDriver {
   #provider: ProviderProcess | null = null;
   #stderr = '';
   #stderrRedactor: SecretRedactor | null = null;
-  #pendingOutcome: TurnOutcome | null = null;
+  readonly #pendingOutcomes: TurnOutcome[] = [];
+  #flushingOutcomes = false;
+  #cancelFailure = false;
   /** The running turn's failure reason, read from its frames; taken at its `result`. */
   readonly #failures = new ClaudeTurnFailures();
-  /** Prompts written whose `result` has not arrived yet. */
+  /** Unfinished accepted prompts; a consistency backstop, not prompt identity. */
   #turnsInFlight = 0;
-  /** An interrupt was sent and the turn it targets has not ended yet. */
-  #interruptPending = false;
+  /** In submission order, including settled queued prompts awaiting an earlier result. */
+  readonly #turns = new Map<string, { outcome: TurnOutcome | null; started: boolean; lifecycleCancelled: boolean }>();
+  readonly #writtenTurns = new Set<string>();
+  #interrupt: { id: string; targets: Set<string>; received: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
   #controlSequence = 0;
   /** This driver's own control requests awaiting the CLI's control_response, by request_id. */
   readonly #controlWaiters = new Map<string, { resolve: (response: Record<string, unknown>) => void; reject: (cause: Error) => void }>();
@@ -463,11 +532,15 @@ export class ClaudeDriver {
 
   constructor(options: ClaudeDriverOptions, events: ClaudeDriverEvents = {}) {
     const restricted = nativeToolsDisabled(options);
+    const settingSources = claudeSettingSources(options.settingSources);
+    assertStrictMcpConfig(options.strictMcpConfig);
+    const appendSystemPromptFile = claudeAppendFile(options.appendSystemPromptFile);
+    const pluginDirs = claudePluginDirs(options.pluginDirs, restricted);
     if (options.permissionPrompts?.nodePath !== undefined && !isAbsolute(options.permissionPrompts.nodePath)) {
       throw new Error('permissionPrompts.nodePath must be an absolute executable path');
     }
     this.#mcpServers = readMcpServers(options.mcpServers);
-    this.#options = { ...options, ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
+    this.#options = { ...options, appendSystemPromptFile, pluginDirs, ...(settingSources === undefined ? {} : { settingSources }), ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
     if (options.processTree?.windowsStdio === 'local-pipes' && ((!restricted && this.#mcpServers.length > 0) || options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0)) {
       throw new ProcessTreeError('LOCAL transport does not support generated Claude MCP configuration or permission hooks');
     }
@@ -611,12 +684,12 @@ export class ClaudeDriver {
         }
         this.#approvalVersion = version;
         if (!this.#approvalStopped && this.#approvalFailure === null) {
-          for (const line of this.#heldPrompts.splice(0)) this.#io?.stdin?.write(line);
+          for (const line of this.#heldPrompts.splice(0)) this.#writePrompt(line);
           if (this.#heldEndInput) this.#io?.stdin?.end();
         }
       }
       if (this.#options.nativeTools === 'none' && this.#options.permissionPrompts === undefined && !this.#approvalStopped && this.#approvalFailure === null) {
-        for (const line of this.#heldPrompts.splice(0)) this.#io?.stdin?.write(line);
+        for (const line of this.#heldPrompts.splice(0)) this.#writePrompt(line);
         if (this.#heldEndInput) this.#io?.stdin?.end();
       }
       return availableModels;
@@ -639,6 +712,9 @@ export class ClaudeDriver {
       // Flush first: a frame can be complete without its trailing newline, and
       // the LAST frame of a turn is the `result` that carries the outcome.
       this.#emit(this.#framer.end());
+      this.#clearInterrupt();
+      for (const [id, turn] of this.#turns) if (turn.outcome === null) this.#settleTurn(id, { stopReason: null, isError: true, raw: 'Claude exited before prompt completion' });
+      this.#flushOutcomes();
       if (this.#stderrRedactor !== null) this.#releaseStderr(this.#stderrRedactor.end());
       this.#events.onExit?.(code, signal);
     };
@@ -649,19 +725,33 @@ export class ClaudeDriver {
   /** Send a user turn: text, or content blocks. A block it cannot send refuses the whole turn, naming it. */
   prompt(content: PromptContent): void {
     // Encoded first, so a refused prompt throws PromptRefused whether or not the CLI is running.
-    const line = promptLine(content);
+    const id = randomUUID();
+    const line = encodeLine({ ...promptMessage(content), uuid: id });
     const stdin = this.#io?.stdin;
-    if (stdin === null || stdin === undefined) {
-      throw new Error('driver is not started, or its stdin has closed');
-    }
+    if (this.#cancelFailure) throw new ClaudeCancelStateError();
     if (this.#approvalFailure !== null) throw new Error(this.#approvalFailure);
     if (this.#options.nativeTools === 'none' && this.#approvalStopped) throw new Error('restricted Claude session has stopped');
-    if ((this.#options.permissionPrompts !== undefined && this.#approvalVersion === null) || (this.#options.nativeTools === 'none' && !this.#restrictedInitialized)) {
-      if (this.#approvalStopped) throw new Error('Claude permission-hook initialization has stopped');
+    const initializing = (this.#options.permissionPrompts !== undefined && this.#approvalVersion === null) || (this.#options.nativeTools === 'none' && !this.#restrictedInitialized);
+    if (initializing && this.#approvalStopped) throw new Error('Claude permission-hook initialization has stopped');
+    if (stdin === null || stdin === undefined || stdin.destroyed || stdin.writableEnded || this.#child?.exitCode !== null) {
+      throw new Error('driver is not started, or its stdin has closed');
+    }
+    if (initializing) {
       if (this.#options.nativeTools === 'none' && this.#heldPrompts.length >= 1) throw new Error('restricted Claude startup accepts only one pending prompt');
       this.#heldPrompts.push(line);
-    } else stdin.write(line);
+    }
+    this.#turns.set(id, { outcome: null, started: false, lifecycleCancelled: false });
     this.#turnsInFlight += 1;
+    if (!this.#heldPrompts.includes(line)) {
+      try { this.#writePrompt(line); }
+      catch (cause) { this.#turns.delete(id); this.#writtenTurns.delete(id); this.#turnsInFlight -= 1; throw cause; }
+    }
+  }
+
+  #writePrompt(line: string): void {
+    const { uuid } = JSON.parse(line) as { uuid: string };
+    this.#writtenTurns.add(uuid);
+    this.#io?.stdin?.write(line);
   }
 
   /**
@@ -679,35 +769,116 @@ export class ClaudeDriver {
    * 'aborted_streaming', is_error: true }`, which is mapped here to a cancelled turn; the process stayed alive; the next
    * prompt ran to end_turn. Re-run the probe when the CLI changes.
    *
-   * `cancel_queued` is deliberately NOT set. Measured without it, a message queued on stdin at the moment of the
-   * interrupt still ran afterwards. Through ACP there is never such a message -- one turn at a time per session -- so
-   * the flag would change nothing for session/cancel, and its effect on this CLI has not been measured.
+   * Claude Code 2.1.318 was additionally measured on 2026-11-05 at the direct prompt()/cancel() entry used by Genie.
+   * With cancel_queued:true, the receipt lists dropped prompt UUIDs but those prompts emit no result. Each user line
+   * therefore carries a fresh UUID: dropped UUIDs finish locally, the active prompt through its own result. Lifecycle
+   * metadata corroborates the receipt only. ACP still accepts one turn per session; direct embedders can queue notices.
    *
-   * Resolves once the request is written; the turn ends through onTurnEnd. Nothing waits on the CLI's
-   * control_response, whose shape was not captured. No turn running: nothing is sent.
+   * Resolves once written, with outcomes delivered in submission order after output updates. Repeated cancel while
+   * the same interrupt is outstanding is a no-op. A missing/inconsistent receipt settles its remaining targets with
+   * a distinct fixed marker (30s control deadline) and stops the process. onProtocolError reports the fixed reason
+   * 'cancel state uncertain; driver stopped'; future prompt() calls throw ClaudeCancelStateError with that reason.
+   * The host must start a new driver. Valid receipts keep the CLI alive; idle cancel sends nothing.
    */
   cancel(): Promise<void> {
     if (this.#heldPrompts.length > 0) {
-      const count = this.#heldPrompts.length;
-      this.#heldPrompts = [];
-      this.#turnsInFlight = Math.max(0, this.#turnsInFlight - count);
-      for (let i = 0; i < count; i++) this.#events.onTurnEnd?.({ stopReason: 'cancelled', isError: false, raw: 'cancelled before permission-hook initialization' });
+      const held = this.#heldPrompts.splice(0);
+      for (const line of held) this.#settleTurn((JSON.parse(line) as { uuid: string }).uuid, { stopReason: 'cancelled', isError: false, raw: 'cancelled before permission-hook initialization' });
+      this.#flushOutcomes();
       return Promise.resolve();
     }
     const stdin = this.#io?.stdin;
     if (this.#turnsInFlight === 0 || stdin === null || stdin === undefined || stdin.destroyed) {
       return Promise.resolve();
     }
-    this.#interruptPending = true;
+    if (this.#interrupt !== null) return Promise.resolve();
     this.#controlSequence += 1;
+    const id = `prism-acp-interrupt-${this.#controlSequence}`;
+    const targets = new Set(this.#writtenTurns);
+    const timer = setTimeout(() => { if (this.#interrupt?.id === id) { this.#cancelMismatch(); this.#flushOutcomes(); } }, 30_000);
+    timer.unref();
+    this.#interrupt = { id, targets, received: false, timer };
     const request = encodeLine({
       type: 'control_request',
-      request_id: `prism-acp-interrupt-${this.#controlSequence}`,
-      request: { subtype: 'interrupt' },
+      request_id: id,
+      request: { subtype: 'interrupt', cancel_queued: true },
     });
     return new Promise<void>((resolve, reject) => {
-      stdin.write(request, (cause) => (cause ? reject(new Error('failed to write the Claude interrupt request')) : resolve()));
+      stdin.write(request, cause => {
+        if (!cause) { resolve(); return; }
+        if (this.#interrupt?.id === id) { this.#cancelMismatch(); this.#flushOutcomes(); }
+        reject(new Error('failed to write the Claude interrupt request'));
+      });
     });
+  }
+
+  #clearInterrupt(): void {
+    if (this.#interrupt !== null) clearTimeout(this.#interrupt.timer);
+    this.#interrupt = null;
+  }
+
+  #settleTurn(id: string, outcome: TurnOutcome): void {
+    const turn = this.#turns.get(id);
+    if (turn === undefined || turn.outcome !== null) return;
+    turn.outcome = outcome;
+    this.#writtenTurns.delete(id);
+    this.#turnsInFlight -= 1;
+    // Callback consumers have no UUID field: preserve the order they submitted prompts.
+    for (const [first, entry] of this.#turns) {
+      if (entry.outcome === null) break;
+      this.#turns.delete(first);
+      this.#pendingOutcomes.push(entry.outcome);
+    }
+    if (this.#interrupt?.received && ![...this.#interrupt.targets].some(target => this.#writtenTurns.has(target))) this.#clearInterrupt();
+  }
+
+  #flushOutcomes(): void {
+    if (this.#flushingOutcomes) return;
+    this.#flushingOutcomes = true;
+    try {
+      while (this.#pendingOutcomes.length > 0) {
+        const outcome = this.#pendingOutcomes.shift()!;
+        this.#events.onTurnEnd?.(outcome);
+      }
+    }
+    finally { this.#flushingOutcomes = false; }
+  }
+
+  #cancelMismatch(): void {
+    if (this.#interrupt === null) return;
+    // An untrustworthy receipt cannot tell whether a newly written prompt was dropped either.
+    // End every unfinished prompt and stop the uncertain process, before callbacks can submit more work.
+    const targets = [...this.#turns].filter(([, turn]) => turn.outcome === null).map(([id]) => id);
+    this.#clearInterrupt();
+    this.#cancelFailure = true;
+    this.#heldPrompts = [];
+    this.#approvalStopped = true;
+    for (const id of targets) this.#settleTurn(id, { stopReason: 'cancelled', isError: false, raw: 'cancel accounting mismatch' });
+    try { this.#events.onProtocolError?.('cancel state uncertain; driver stopped', { recoverable: false }); }
+    finally { void this.#provider?.stop({ graceMs: 0 }); }
+  }
+
+  #interruptReceipt(response: Record<string, unknown>): void {
+    const interrupt = this.#interrupt;
+    if (interrupt === null || interrupt.received) return;
+    const body = response.response;
+    const ids = (value: unknown): value is string[] => Array.isArray(value) && value.every(id => typeof id === 'string') && new Set(value).size === value.length;
+    if (response.subtype !== 'success' || !isObject(body) || !ids(body.cancelled) || !ids(body.still_queued)) { this.#cancelMismatch(); return; }
+    const cancelled = new Set(body.cancelled);
+    const queued = new Set(body.still_queued);
+    const all = [...cancelled, ...queued];
+    // The one active prompt gets a result. Every other pre-interrupt prompt must be named by the receipt.
+    const remaining = [...interrupt.targets].filter(id => this.#writtenTurns.has(id) && !cancelled.has(id) && !queued.has(id));
+    const unaccountedLifecycle = remaining.some(id => { const turn = this.#turns.get(id)!; return turn.lifecycleCancelled && !turn.started; });
+    const queuedBeforeCancel = [...queued].some(id => interrupt.targets.has(id));
+    if (all.some(id => !this.#writtenTurns.has(id)) || [...cancelled].some(id => queued.has(id)) || queuedBeforeCancel || remaining.length > 1 || unaccountedLifecycle || this.#turnsInFlight !== [...this.#turns.values()].filter(turn => turn.outcome === null).length) { this.#cancelMismatch(); return; }
+    interrupt.received = true;
+    clearTimeout(interrupt.timer);
+    for (const id of cancelled) {
+      // lifecycleCancelled, when observed, corroborates this UUID; it never settles a prompt independently.
+      this.#settleTurn(id, { stopReason: 'cancelled', isError: false, raw: 'dropped by cancel' });
+    }
+    if (![...interrupt.targets].some(id => this.#writtenTurns.has(id))) this.#clearInterrupt();
   }
 
   /**
@@ -766,6 +937,7 @@ export class ClaudeDriver {
 
   /** End the CLI and every process it started, now. */
   kill(signal: NodeJS.Signals = 'SIGTERM'): void {
+    this.#clearInterrupt();
     this.#approvalStopped = true;
     this.#heldPrompts = [];
     this.#provider?.kill(signal);
@@ -776,6 +948,7 @@ export class ClaudeDriver {
    * exit on its own, terminate the tree, and resolve once the tree is empty (or the wait gave up -- see the verdict).
    */
   stop(options?: StopOptions): Promise<StopVerdict> {
+    this.#clearInterrupt();
     this.#approvalStopped = true;
     this.#heldPrompts = [];
     if (this.#provider === null) return Promise.resolve({ graceful: true, empty: true, survivors: 0, verified: true });
@@ -796,13 +969,13 @@ export class ClaudeDriver {
     if (this.#approvalFailure !== null) return;
     this.#approvalFailure = reason;
     this.#approvalStopped = true;
-    const pending = this.#turnsInFlight;
     this.#heldPrompts = [];
-    this.#turnsInFlight = 0;
-    this.#pendingOutcome = null;
-    void this.#provider?.stop({ graceMs: 0 });
-    this.#events.onProtocolError?.(reason);
-    for (let i = 0; i < pending; i++) this.#events.onTurnEnd?.({ stopReason: 'refusal', isError: true, raw: reason });
+    this.#clearInterrupt();
+    // A later approval failure must not discard already settled queued cancellations waiting behind the active turn.
+    for (const [id, turn] of this.#turns) if (turn.outcome === null) this.#settleTurn(id, { stopReason: 'refusal', isError: true, raw: reason });
+    try { this.#events.onProtocolError?.(reason); }
+    finally { void this.#provider?.stop({ graceMs: 0 }); }
+    this.#flushOutcomes();
   }
 
   /** The permission-prompt channel closed and its private files removed (issue #1). */
@@ -852,7 +1025,7 @@ export class ClaudeDriver {
     // BEFORE mapping, because neither survives translation: the `result` frame
     // becomes a usage_update and the `init` frame maps to nothing at all.
     for (const frame of frames) {
-      if (this.#approvalFailure !== null) continue;
+      if (this.#approvalFailure !== null || this.#cancelFailure) continue;
       if (!frame.ok) {
         if (this.#options.nativeTools === 'none') {
           this.#refuseApprovals('Claude app MCP only refused a malformed protocol frame');
@@ -903,11 +1076,22 @@ export class ClaudeDriver {
       if (isObject(frame.value) && frame.value.type === 'system' && frame.value.subtype === 'init') {
         this.#mcpReports = claudeMcpServers(frame.value) ?? this.#mcpReports;
       }
-      // The CLI's answer to this driver's own control request: handed to whatever waits on it (initialize,
-      // set_model; nothing waits on interrupt, see cancel()). Not agent output, so neither mapped nor unmapped.
+      // Internal lifecycle metadata must never reach the mapper's content-retaining unknown-frame path.
+      if (isObject(frame.value) && frame.value.type === 'command_lifecycle') {
+        if (typeof frame.value.command_uuid === 'string') {
+          const turn = this.#turns.get(frame.value.command_uuid);
+          if (turn !== undefined) {
+            if (frame.value.state === 'cancelled') turn.lifecycleCancelled = true;
+            if (frame.value.state === 'started') turn.started = true;
+          }
+        }
+        continue;
+      }
+      // The CLI's answer to this driver's own request is never agent output or an unmapped frame.
       if (isObject(frame.value) && frame.value.type === 'control_response') {
         const response = isObject(frame.value.response) ? frame.value.response : undefined;
         const id = typeof response?.request_id === 'string' ? response.request_id : undefined;
+        if (response !== undefined && id === this.#interrupt?.id) this.#interruptReceipt(response);
         const waiter = id === undefined ? undefined : this.#controlWaiters.get(id);
         if (waiter !== undefined && id !== undefined && response !== undefined) {
           this.#controlWaiters.delete(id);
@@ -915,18 +1099,22 @@ export class ClaudeDriver {
         }
         continue;
       }
+      const outcome = turnOutcomeOf(frame.value);
+      let id: string | undefined;
+      if (outcome !== null) {
+        const nativeId = isObject(frame.value) ? frame.value.user_message_uuid : undefined;
+        // Older CLI serial results omitted the UUID. Explicit foreign/replayed IDs never consume another turn.
+        id = typeof nativeId === 'string' ? nativeId : this.#writtenTurns.values().next().value;
+        if (id === undefined || !this.#writtenTurns.has(id)) continue;
+      }
       acceptedFrames.push(frame);
       this.#failures.observe(frame.value);
-
-      const outcome = turnOutcomeOf(frame.value);
-      if (outcome !== null) {
-        this.#turnsInFlight = Math.max(0, this.#turnsInFlight - 1);
-        const interrupted = this.#interruptPending ? interruptedOutcomeOf(frame.value) : null;
-        this.#interruptPending = false;
+      if (outcome !== null && id !== undefined) {
+        const interrupted = this.#interrupt?.targets.has(id) ? interruptedOutcomeOf(frame.value) : null;
         // Taken for every turn, so a reason never leaks into the next one; attached only to a turn that failed.
         const failure = this.#failures.take();
         const settled = interrupted ?? outcome;
-        this.#pendingOutcome = settled.isError && failure !== undefined ? { ...settled, failure } : settled;
+        this.#settleTurn(id, settled.isError && failure !== undefined ? { ...settled, failure } : settled);
       }
     }
 
@@ -940,11 +1128,7 @@ export class ClaudeDriver {
     // already received everything the turn produced -- including the
     // usage_update that the same `result` frame generates. Firing first would
     // resolve session/prompt before its own usage arrived.
-    if (this.#pendingOutcome !== null) {
-      const outcome = this.#pendingOutcome;
-      this.#pendingOutcome = null;
-      this.#events.onTurnEnd?.(outcome);
-    }
+    this.#flushOutcomes();
   }
 
   #onStderr(chunk: string): void {

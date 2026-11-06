@@ -113,6 +113,10 @@ jobs:
       - run: npx vitest run test/codex-native-tools-live.test.ts test/codex-replay-live.test.ts test/codex-plugin-startup-live.test.ts
         env:
           PRISM_ACP_CODEX_NATIVE_TOOLS: '1'
+      - name: Native per-thread project document and skill configuration
+        run: npx vitest run test/codex-config-native.test.ts
+        env:
+          PRISM_ACP_CODEX_CONFIG: '1'
 
   claude-approval:
     name: Claude approval, ${{ matrix.os }}
@@ -181,6 +185,16 @@ jobs:
         run: npx vitest run test/claude-restricted-native.test.ts
         env:
           PRISM_ACP_CLAUDE_RESTRICTED: '1'
+          PRISM_ACP_CLAUDE_BINARY: ${{ github.workspace }}/.claude-restricted-cli/node_modules/@anthropic-ai/claude-code-${{ matrix.platform }}/${{ matrix.binary }}
+      - name: Native settings sources and strict MCP configuration
+        run: npx vitest run test/claude-settings-native.test.ts
+        env:
+          PRISM_ACP_CLAUDE_SETTINGS: '1'
+          PRISM_ACP_CLAUDE_BINARY: ${{ github.workspace }}/.claude-restricted-cli/node_modules/@anthropic-ai/claude-code-${{ matrix.platform }}/${{ matrix.binary }}
+      - name: Native append files and plugin directory or zip paths
+        run: npx vitest run test/claude-file-options-native.test.ts
+        env:
+          PRISM_ACP_CLAUDE_FILE_OPTIONS: '1'
           PRISM_ACP_CLAUDE_BINARY: ${{ github.workspace }}/.claude-restricted-cli/node_modules/@anthropic-ai/claude-code-${{ matrix.platform }}/${{ matrix.binary }}
       - name: Native startup and stdio MCP discovery in a zero-capability AppContainer
         if: runner.os == 'Windows'
