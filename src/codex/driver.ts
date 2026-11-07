@@ -11,10 +11,13 @@ import { codexMcpConfig, codexMcpSessionConfig, codexMcpShellPolicy, codexMcpDis
 import { isValidCliSessionId } from '../session-id.js';
 import { stripAnsiControlSequences } from '../text.js';
 import { assertRestrictedCli, assertRestrictedConfig, assertRestrictedModel, CODEX_NATIVE_TOOLS_NONE, CodexNativeToolsRefused, RESTRICTED_STARTUP_ARGS, restrictedToolConfig } from './native-tools.js';
-import { JsonRpcPeer } from '../jsonrpc.js';
+import { JsonRpcPeer, RpcError, RpcTimeoutError } from '../jsonrpc.js';
+import { SteerInputError, SteerLedger, SteerUnsupported, safeNativeId, steeringCliVersion, steeringVersionSupported, validSteerId, type SteerAcceptance, type SteerOptions, type SteerState, type SteerUpdate, type SteeringState } from '../steer.js';
 import { readCodexConfig, mergeCodexConfig, type CodexConfig } from './config.js';
 import {
   META_CLI_SESSION_ID,
+  META_STEER,
+  META_ACTIVE_TURN,
   META_MODEL,
   assertModel,
   META_EXEC_POLICY_AMENDMENT,
@@ -167,6 +170,7 @@ export const CODEX_DRIVER_CAPABILITIES = {
   promptBlocks: ['text', 'image', 'resource-text'],
   // session/cancel interrupts the turn with app-server `turn/interrupt` and keeps the app-server and thread (#16).
   cancel: true,
+  steer: true,
 } as const satisfies DriverCapabilities;
 
 /** The file extension of each image type a prompt may carry, for the localImage file Codex reads. */
@@ -254,6 +258,10 @@ export class CodexDriver implements AgentDriver {
   #threadId: string | null = null;
   /** A cancel that arrived before turn/start named its turn; sent the moment the id is known. */
   #pendingCancel: { promise: Promise<void>; resolve: () => void; reject: (cause: Error) => void } | null = null;
+  #cancellingTurn: string | null = null;
+  #cliVersion: string | null = null;
+  #steerMethodMissing = false;
+  readonly #steers: SteerLedger;
 
   withheldCredentials: readonly string[] = [];
   cliSessionId: string | null = null;
@@ -293,6 +301,7 @@ export class CodexDriver implements AgentDriver {
     this.#mcpConfig = mcp.config;
     this.#mcpEnv = mcp.env;
     this.#events = events;
+    this.#steers = new SteerLedger((update) => this.#publishSteer(update));
     this.#transportFactory = transportFactory;
     this.#turnInactivityTimeoutMs = options.turnInactivityTimeoutMs ?? DEFAULT_TURN_INACTIVITY_TIMEOUT_MS;
     if (!Number.isFinite(this.#turnInactivityTimeoutMs) || this.#turnInactivityTimeoutMs <= 0) {
@@ -348,6 +357,86 @@ export class CodexDriver implements AgentDriver {
       return;
     }
     this.#startTurn(input);
+  }
+
+  /** The runtime gate is separate from nativeTools:'none', whose exact measured matrix is unchanged. */
+  get steeringState(): SteeringState {
+    return Object.freeze({ supported: !this.#closed && this.#restrictedReady && !this.#steerMethodMissing && steeringVersionSupported(this.#cliVersion),
+      cliVersion: this.#cliVersion, activeTurnId: !this.#closed && safeNativeId(this.#activeTurn) ? this.#activeTurn : null, retainedRecords: this.#steers.size, capacity: 128 });
+  }
+
+  steerState(steerId: string): SteerState { return this.#steers.state(steerId); }
+  acknowledgeSteer(steerId: string): boolean { return this.#steers.acknowledge(steerId); }
+
+  /** Send once to the current known turn. Acceptance is not observation; the host retains its original input. */
+  async steer(content: PromptContent, options: SteerOptions): Promise<SteerAcceptance> {
+    const id = options?.clientId;
+    if (!validSteerId(id)) throw new SteerInputError();
+    const refuse = (reason: import('../steer.js').SteerRefusal): SteerAcceptance => ({ outcome: 'not_delivered', steerId: id, reason });
+    if (this.#closed) return refuse('session_closed');
+    if (!this.#started || !this.#restrictedReady) return refuse('not_ready');
+    if (!this.steeringState.supported) throw new SteerUnsupported();
+    if (!this.#turnInFlight) return refuse('no_active_turn');
+    const threadId = this.#threadId, turnId = this.#activeTurn;
+    if (threadId === null || turnId === null) return refuse('turn_id_pending');
+    if (!safeNativeId(threadId) || !safeNativeId(turnId)) return refuse('invalid_input');
+    if (options.expectedTurnId !== undefined && options.expectedTurnId !== turnId) return refuse('turn_mismatch');
+    if (this.#pendingCancel !== null || this.#cancellingTurn === turnId) return refuse('cancelling');
+    const capacity = this.#steers.refusal(id);
+    if (capacity !== null) return refuse(capacity);
+    let input: readonly InputItem[];
+    try { input = this.#inputItems(promptBlocks(content, CODEX_DRIVER_CAPABILITIES.promptBlocks)); }
+    catch { return refuse('invalid_input'); }
+    // Validation/conversion can invoke host getters. Never let that retarget a queued update.
+    if (this.#closed || this.#threadId !== threadId || this.#activeTurn !== turnId || !this.#turnInFlight) return refuse('turn_mismatch');
+    if (this.#pendingCancel !== null || this.#cancellingTurn === turnId) return refuse('cancelling');
+    const rechecked = this.#steers.refusal(id);
+    if (rechecked !== null) return refuse(rechecked);
+    this.#steers.reserve(id, threadId, turnId);
+    try {
+      const result = asObject(await this.#requirePeer().request('turn/steer', {
+        threadId, expectedTurnId: turnId, clientUserMessageId: id, input,
+      }, { timeoutMs: 30_000 }));
+      if (result?.turnId !== turnId) {
+        this.#steers.uncertain(id, 'malformed_reply', true);
+        return { outcome: 'unknown', steerId: id, reason: 'malformed_reply' };
+      }
+      this.#steers.accepted(id);
+      return { outcome: 'accepted', steerId: id, turnId };
+    } catch (cause) {
+      if (cause instanceof RpcError && cause.code === -32601) {
+        this.#steerMethodMissing = true;
+        this.#steers.refused(id, 'native_validation_refused');
+        throw new SteerUnsupported();
+      }
+      // Only measured exact native validation refusals establish no delivery. Never expose native error data.
+      if (cause instanceof RpcError && cause.code === -32600 && cause.message === 'no active turn to steer') {
+        this.#steers.refused(id, 'native_validation_refused');
+        return refuse('native_validation_refused');
+      }
+      const reason = cause instanceof RpcTimeoutError ? 'reply_timeout' : 'native_error';
+      this.#steers.uncertain(id, reason, true);
+      return { outcome: 'unknown', steerId: id, reason };
+    }
+  }
+
+  #publishSteer(update: SteerUpdate): void {
+    try { this.#events.onSteerUpdate?.(update); }
+    catch { this.#steerCallbackProblem('steering callback failed; retained state remains available'); }
+    try { this.#events.onUpdate?.(withMeta({ sessionUpdate: 'notice', notice: { level: 'debug', message: 'Codex steering state' } }, { [META_STEER]: update })); }
+    catch { this.#steerCallbackProblem('steering update callback failed; retained state remains available'); }
+  }
+
+  #steerCallbackProblem(message: string): void {
+    try { this.#events.onProtocolError?.(message, { recoverable: true }); }
+    catch { /* A failing application diagnostic listener must not prevent provider cleanup. State remains queryable. */ }
+  }
+
+  #publishActiveTurn(): void {
+    try {
+      this.#emit(withMeta({ sessionUpdate: 'notice', notice: { level: 'debug', message: 'Codex active turn' } },
+        { [META_ACTIVE_TURN]: this.steeringState }));
+    } catch { this.#steerCallbackProblem('active-turn callback failed; current state remains available'); }
   }
 
   /**
@@ -432,6 +521,7 @@ export class CodexDriver implements AgentDriver {
   async #interrupt(turnId: string): Promise<void> {
     const threadId = this.#threadId;
     if (threadId === null) return;
+    this.#cancellingTurn = turnId;
     try {
       await this.#requirePeer().request('turn/interrupt', { threadId, turnId });
     } catch (cause) {
@@ -514,7 +604,7 @@ export class CodexDriver implements AgentDriver {
     const handlers: CodexTransportHandlers = {
       onFrame: (frame) => this.#receive(frame),
       onStderr: (line) => this.#events.onStderr?.(line),
-      onProblem: (problem, detail) => this.#events.onProtocolError?.(problem, detail),
+      onProblem: (problem, detail) => { this.#steers.gap(); this.#events.onProtocolError?.(problem, detail); },
       onExit: (code, signal) => this.#onExit(code, signal),
     };
     const binaryArgs = this.#options.nativeTools === 'none'
@@ -533,7 +623,12 @@ export class CodexDriver implements AgentDriver {
     this.#transport = transport;
     this.#peer = new JsonRpcPeer({
       send: (message) => transport.send(message),
-      onProtocolError: (problem, frame) => this.#recordUnmapped(problem, frame),
+      onProtocolError: (problem, frame) => {
+        this.#steers.gap();
+        // A late/unknown reply may contain echoed input, private paths or provider error data.
+        if (asObject(frame)?.method === undefined) this.#recordUnmapped('Codex RPC response could not be correlated', { type: 'rpc_response_gap' });
+        else this.#recordUnmapped(problem, frame);
+      },
     });
 
     await transport.start();
@@ -542,6 +637,7 @@ export class CodexDriver implements AgentDriver {
       clientInfo: { name: '@particle-academy/prism-acp', version: '0.4.1' },
       capabilities: {},
     });
+    this.#cliVersion = steeringCliVersion(initialized);
     if (this.#options.nativeTools === 'none') assertRestrictedCli(initialized);
     peer.notify('initialized');
     if (keyed !== null) await loginWithApiKey(peer, keyed.apiKey);
@@ -608,6 +704,7 @@ export class CodexDriver implements AgentDriver {
     await this.#readInitialRateLimit();
     if (this.#closed) return;
     this.#restrictedReady = true;
+    this.#publishActiveTurn();
     const queued = this.#queuedPrompt;
     this.#queuedPrompt = null;
     if (queued !== null) this.#startTurn(queued);
@@ -798,6 +895,7 @@ export class CodexDriver implements AgentDriver {
         const id = asString(turn?.id);
         if (id !== undefined && !this.#completedTurns.has(id)) {
           this.#activeTurn = id;
+          this.#publishActiveTurn();
           this.#touchTurnDeadline();
           this.#sendPendingCancel(id);
         }
@@ -835,6 +933,7 @@ export class CodexDriver implements AgentDriver {
       try {
         frame = JSON.parse(raw) as unknown;
       } catch {
+        this.#steers.gap();
         this.#recordUnmapped(`malformed Codex JSON frame: string(${raw.length})`, {
           type: 'malformed_json',
           description: `string(${raw.length})`,
@@ -844,6 +943,7 @@ export class CodexDriver implements AgentDriver {
     }
     const object = asObject(frame);
     if (object === undefined) {
+      this.#steers.gap();
       this.#recordUnmapped('Codex frame was not an object', { description: describe(frame) });
       return;
     }
@@ -895,6 +995,10 @@ export class CodexDriver implements AgentDriver {
   #handleNotification(method: string, params: unknown): void {
     const object = asObject(params) ?? {};
     const turnId = asString(object.turnId) ?? asString(asObject(object.turn)?.id);
+    if (method === 'item/started' || method === 'item/completed') {
+      this.#steers.observe(object.threadId, object.turnId, object.item);
+      if (turnId !== undefined && this.#completedTurns.has(turnId)) return;
+    }
     if (this.#activeTurn !== null && turnId !== undefined && turnId !== this.#activeTurn) {
       this.#recordUnmapped(`Codex notification belongs to another turn: ${method}`, { method, params });
       return;
@@ -975,6 +1079,7 @@ export class CodexDriver implements AgentDriver {
         if (id !== undefined) {
           this.#activeTurn = id;
           this.#turnInFlight = true;
+          this.#publishActiveTurn();
           this.#sendPendingCancel(id);
         } else this.#recordUnmapped('turn/started omitted turn.id', object);
         return;
@@ -991,6 +1096,10 @@ export class CodexDriver implements AgentDriver {
           this.#recordUnmapped('turn/completed did not contain a turn id', object);
           return;
         }
+        if (object.threadId === this.#threadId && turn.id === id && typeof turn.status === 'string' && safeNativeId(id)
+          && ['completed', 'interrupted', 'canceled', 'cancelled', 'failed'].includes(status)) {
+          this.#steers.end(id, status === 'completed' ? 'completed' : status === 'failed' ? 'failed' : 'interrupted');
+        } else this.#steers.gap(id);
         if (status === 'completed') {
           this.#finishTurn({ stopReason: 'end_turn', isError: false, raw: status }, id);
         } else if (status === 'interrupted' || status === 'canceled' || status === 'cancelled') {
@@ -1638,6 +1747,7 @@ export class CodexDriver implements AgentDriver {
     this.#clearTurnDeadline();
     this.#releasePendingCancel();
     this.#activeTurn = null;
+    this.#cancellingTurn = null;
     this.#turnInFlight = false;
     // App Server clears its requests on turn completion; a delayed UI answer must never approve a later turn.
     for (const pending of [...this.#pendingApprovals.values()]) pending.resolved();
@@ -1646,12 +1756,14 @@ export class CodexDriver implements AgentDriver {
     this.#messageDeltas.clear();
     this.#reasoningDeltas.clear();
     this.#clearCommandOutputs();
+    this.#publishActiveTurn();
     this.#events.onTurnEnd?.(outcome);
   }
 
   #shutdown(signal: NodeJS.Signals, closeTransport = true): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#steers.close();
     this.#clearTurnDeadline();
     this.#releasePendingCancel();
     this.#removeImages();
@@ -1665,6 +1777,7 @@ export class CodexDriver implements AgentDriver {
   #onExit(code: number | null, signal: NodeJS.Signals | null): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#steers.close();
     this.#clearTurnDeadline();
     this.#releasePendingCancel();
     this.#removeImages();

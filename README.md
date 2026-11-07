@@ -993,6 +993,81 @@ indicators. Descriptions, summaries and errors have terminal control sequences
 stripped, with `providerTextSanitized: true` when anything was removed; a frame
 with no `task_id` is recorded as unmapped rather than sent.
 
+## Steering a running Codex turn
+
+`CodexDriver.steer(content, { clientId, expectedTurnId? })` explicitly adds input to the active native turn through
+`turn/steer`. `content` accepts the same text/image/text-resource blocks as `prompt()`. Ordinary `prompt()` and ACP
+`session/prompt` continue to refuse a second in-flight turn. Steering never queues for startup or a future turn,
+retargets, retries, starts another turn, changes model/tools/configuration, or grants a pending permission.
+
+`CODEX_DRIVER_CAPABILITIES.steer` advertises the API. `driver.steeringState` reports `supported`, `cliVersion`,
+`activeTurnId`, `retainedRecords` and `capacity: 128`. Support requires a completed handshake with stable Codex
+>=0.163.0; a missing native method disables it. Unsupported calls throw exported `SteerUnsupported` with
+`code: 'steer_unsupported'`. The independent, exact CLI/model restrictions for `nativeTools: 'none'` are unchanged.
+
+Before sending, the **host must durably retain the fresh UUID, target turn and original input** in its own transcript
+or outbox. The package retains metadata only, without a persistent outbox. For example, with the host's existing
+`outbox` and a running `driver`:
+
+```ts
+const clientId = crypto.randomUUID();
+const expectedTurnId = driver.steeringState.activeTurnId;
+if (expectedTurnId === null) throw new Error('No known active turn');
+await outbox.save({ clientId, expectedTurnId, content });
+const acceptance = await driver.steer(content, { clientId, expectedTurnId });
+// Keep the saved input pending until a matching observation or an explicit host decision.
+```
+
+Always supply `expectedTurnId` when targeting a previously displayed turn; the optional direct-call default pins the
+current turn at the call itself. The reply reports native `accepted`, definite pre-send/native-validation
+`not_delivered`, or `unknown`. A 30-second reply deadline, ambiguous write, malformed reply or other native error is
+`unknown`, never a reason for an automatic retry. Unsupported/invalid UUID errors are typed and contain fixed text.
+Other local refusals, including a stale target, cancellation, duplicate UUID or capacity, send nothing.
+
+`onSteerUpdate` and namespaced `_meta['particle.academy/steer']` updates report each native attempt. Retrieve the
+retained immutable record with `driver.steerState(clientId)`, including after a missed callback:
+
+| Record `kind` | Meaning |
+|---|---|
+| `accepted` | Native RPC accepted input; its appearance is still pending. |
+| `observed` | A live native user item has the exact `item.clientId`, owning thread and target turn. This does not prove obedience or semantic application. |
+| `turn_ended_unobserved` | Native completed/interrupted/failed turn and buffered frames drained without an observed matching item on a healthy stream. **Final.** Absence of observation does not prove no inference consumed the input. |
+| `not_delivered` | Native method/known validation refusal establishes no accepted send. Local refusals return directly without allocating a record. |
+| `unknown` | Native acceptance or item correlation is uncertain. Retain the original input for a deliberate host decision. |
+
+Each record keeps RPC `acceptance` separately, including `pending` when a matching item arrives before the reply.
+Unknown state can gain an exact live observation; a final `turn_ended_unobserved` is never changed to `observed`.
+A later match emits the separate `late_item_after_final` anomaly with the operation and native item IDs. A stream gap,
+missing correlation or conflicting native item IDs cannot justify a precise absence claim. Text, counts and arrival
+order are never used to match input. History replay cannot confirm a new send.
+
+After durably handling a final record **and its settled RPC acceptance**, call `driver.acknowledgeSteer(clientId)`.
+It returns false for pending/unknown IDs. At 128 unacknowledged records, new steering is refused before writing;
+acknowledgement frees capacity without evicting another record. Session shutdown surfaces remaining uncertainty
+before releasing that session's records. `steerState()` in a new driver process returns `{ kind: 'not_known' }`;
+resumed-history reconciliation is unmeasured and not implemented. The package does not promise exactly-once
+delivery. A repeated native client ID creates duplicate user items; this driver refuses reuse within its session,
+including after acknowledgement. Callers still need fresh IDs and their own durable input lifecycle.
+
+ACP exposes these **nonstandard namespaced extensions**:
+
+- `_particle.academy/session/steer`: `{ sessionId, clientId, expectedTurnId, prompt }`, where `prompt` is the ordinary
+  ACP content-block array. `expectedTurnId` is required. Returns acceptance only.
+- `_particle.academy/session/steer_state`: `{ sessionId, clientId }` for a retained record, or `{ sessionId }` for
+  runtime support/current-turn state.
+- `_particle.academy/session/acknowledge_steer`: `{ sessionId, clientId }`, returns `{ acknowledged: boolean }`.
+
+The server resolves the native thread from its owned session; a caller-supplied `threadId` is refused. Active turn
+identity is published through `_meta['particle.academy/active_turn']` on `session/update`. Claude and drivers without
+an explicit steering API do not claim this capability. PHP/Python steering parity is a separate follow-up.
+
+Native Codex 0.167.0 / gpt-6.1-sol was remeasured with the CLI's own ChatGPT login: steering accepted while a controlled
+host tool was held, with no agent delta until its release, and repeated native IDs produced distinct user items.
+Separate 0.167.0 approval measurements, without experimental API negotiation, observed exact client IDs after approval
+was declined, while interruption left accepted inputs unobserved. These agree with the earlier 0.163.0 measurements.
+An input refused after cancellation is `not_delivered`; an accepted but unseen input
+uses the final unobserved/unknown rules above. No approval was granted and no credential was read or copied.
+
 ## Stopping a turn: `session/cancel`
 
 `session/cancel` ends the **turn**, not the session, wherever the driver can

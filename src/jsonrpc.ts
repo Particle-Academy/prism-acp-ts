@@ -117,14 +117,24 @@ export class JsonRpcPeer {
   }
 
   /** Send a request and resolve with its result. */
-  async request(method: string, params?: unknown): Promise<unknown> {
+  async request(method: string, params?: unknown, options?: { readonly timeoutMs: number }): Promise<unknown> {
     if (this.#failure !== null) throw this.#failure;
 
     const id = this.#nextId++;
     const key = String(id);
 
-    return await new Promise<unknown>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = new Promise<unknown>((resolve, reject) => {
       this.#pending.set(key, { resolve, reject, method });
+      if (options !== undefined) {
+        if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
+          this.#pending.delete(key); reject(new Error('RPC timeout must be positive')); return;
+        }
+        timer = setTimeout(() => {
+          this.#pending.delete(key);
+          reject(new RpcTimeoutError());
+        }, options.timeoutMs);
+      }
       try {
         this.#send(payload(method, params, id));
       } catch (cause) {
@@ -134,6 +144,7 @@ export class JsonRpcPeer {
         reject(cause instanceof Error ? cause : new Error(String(cause)));
       }
     });
+    try { return await result; } finally { if (timer !== undefined) clearTimeout(timer); }
   }
 
   /** Send a notification. No response is expected or awaited. */
@@ -250,6 +261,11 @@ export class JsonRpcPeer {
 
     pending.resolve(frame.result ?? null);
   }
+}
+
+/** A reply deadline says nothing about whether the remote side consumed the request. */
+export class RpcTimeoutError extends Error {
+  constructor() { super('RPC reply deadline exceeded'); this.name = 'RpcTimeoutError'; }
 }
 
 function payload(method: string, params: unknown, id: RpcId | undefined): Record<string, unknown> {
