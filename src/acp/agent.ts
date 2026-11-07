@@ -30,6 +30,7 @@ import type { SessionModelState } from '../models.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
 import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
 import { PromptRefused, promptBlockKind, promptBlocks, type PromptBlockKind, type PromptContent } from '../prompt.js';
+import { SteerInputError, SteerUnsupported, safeNativeId, validSteerId, type SteerAcceptance, type SteerOptions, type SteerState, type SteerUpdate, type SteeringState } from '../steer.js';
 
 /** The protocol version this agent speaks. */
 export const PROTOCOL_VERSION = 1;
@@ -52,6 +53,10 @@ export interface AgentDriver {
    * {@link PromptRefused} for a block it cannot send, and the client is told which.
    */
   prompt(content: PromptContent): void;
+  steer?(content: PromptContent, options: SteerOptions): Promise<SteerAcceptance>;
+  readonly steeringState?: SteeringState;
+  steerState?(steerId: string): SteerState;
+  acknowledgeSteer?(steerId: string): boolean;
   /**
    * Interrupt the turn in flight, leaving the agent process and its session alive (issue #16). The turn still ends
    * through `onTurnEnd` -- with `stopReason: 'cancelled'` once the agent confirms -- and the next prompt runs as
@@ -97,6 +102,7 @@ export interface ProblemDetail {
 }
 
 export interface DriverEvents {
+  readonly onSteerUpdate?: (update: SteerUpdate) => void;
   readonly onUpdate?: (update: AcpUpdate) => void;
   /** Ask the ACP client to decide a Codex permission request. */
   readonly onRequestPermission?: (
@@ -166,6 +172,8 @@ export interface AcpAgentOptions {
 
 /** Provider differences clients need to know. */
 export interface DriverCapabilities {
+  /** Explicit steering API exists; inspect runtime steeringState for the installed CLI's support. */
+  readonly steer?: boolean;
   readonly permissionRequests: boolean;
   readonly transcriptReplay: boolean;
   readonly mcpCapabilities?: McpCapabilities;
@@ -217,12 +225,50 @@ export class AcpAgent {
       .handle('session/set_model', async (params) => await this.#sessionSetModel(params))
       .handle('session/prompt', async (params) => await this.#sessionPrompt(params));
 
+    peer.handle('_particle.academy/session/steer', (params) => this.#sessionSteer(params))
+      .handle('_particle.academy/session/steer_state', (params) => this.#sessionSteerState(params, false))
+      .handle('_particle.academy/session/acknowledge_steer', (params) => this.#sessionSteerState(params, true));
+
     peer.onNotify('session/cancel', (params) => this.#sessionCancel(params));
   }
 
   /** Session ids currently open. */
   get sessionIds(): readonly string[] {
     return [...this.#sessions.keys()];
+  }
+
+  #steerSession(params: unknown): { session: Session; object: Record<string, unknown> } {
+    const object = asObject(params), id = asString(object?.sessionId);
+    const session = id === undefined ? undefined : this.#sessions.get(id);
+    if (object === undefined || session === undefined || session.exited || 'threadId' in object) {
+      throw new RpcError(RPC_INVALID_PARAMS, 'steering requires an owned live session');
+    }
+    return { session, object };
+  }
+
+  async #sessionSteer(params: unknown): Promise<SteerAcceptance> {
+    const { session, object } = this.#steerSession(params);
+    if (session.driver.steer === undefined) throw new RpcError(RPC_INVALID_PARAMS, 'steer_unsupported');
+    if (!validSteerId(object.clientId) || !safeNativeId(object.expectedTurnId)) {
+      throw new RpcError(RPC_INVALID_PARAMS, 'steering requires clientId and expectedTurnId');
+    }
+    try {
+      return await session.driver.steer(this.#promptContent(object.prompt), { clientId: object.clientId, expectedTurnId: object.expectedTurnId });
+    } catch (cause) {
+      // Private native failures/input paths are never reflected through the ACP error channel.
+      throw new RpcError(RPC_INVALID_PARAMS, cause instanceof SteerUnsupported ? 'steer_unsupported'
+        : cause instanceof SteerInputError ? 'invalid_input' : 'steering request failed');
+    }
+  }
+
+  #sessionSteerState(params: unknown, acknowledge: boolean): unknown {
+    const { session, object } = this.#steerSession(params);
+    if (session.driver.steerState === undefined || session.driver.acknowledgeSteer === undefined) {
+      throw new RpcError(RPC_INVALID_PARAMS, 'steer_unsupported');
+    }
+    if (object.clientId === undefined && !acknowledge) return session.driver.steeringState;
+    if (!validSteerId(object.clientId)) throw new RpcError(RPC_INVALID_PARAMS, 'steering requires a UUID clientId');
+    return acknowledge ? { acknowledged: session.driver.acknowledgeSteer(object.clientId) } : session.driver.steerState(object.clientId);
   }
 
   /** Stop every session's process. */

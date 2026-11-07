@@ -36,6 +36,8 @@ export {
   META_SUBAGENTS,
   assertModel,
   META_DRIVER_CAPABILITIES,
+  META_STEER,
+  META_ACTIVE_TURN,
   META_EXEC_POLICY_AMENDMENT,
   META_PERMISSION_DENIED,
   META_MCP_SERVERS,
@@ -117,6 +119,8 @@ export { ClaudeTurnFailures, codexFailureOf } from './turn-failure.js';
 export type { TurnFailure, TurnFailureKind } from './turn-failure.js';
 
 export { CODEX_DRIVER_CAPABILITIES, CodexDriver } from './codex/driver.js';
+export { SteerInputError, SteerUnsupported } from './steer.js';
+export type { SteerOptions, SteerAcceptance, SteerRefusal, SteerUncertainty, SteerKind, SteerRecord, SteerUpdate, SteerState, SteeringState } from './steer.js';
 export { CODEX_NATIVE_TOOLS_NONE } from './codex/native-tools.js';
 export type { CodexConfig, CodexConfigValue } from './codex/config.js';
 export type { CodexDriverOptions, CodexTransportFactory } from './codex/driver.js';

@@ -104,6 +104,8 @@ export const META_PERMISSION_DENIED = metaKey('permission_denied');
 
 /** Measured capabilities of the selected agent driver. */
 export const META_DRIVER_CAPABILITIES = metaKey('driver_capabilities');
+export const META_STEER = metaKey('steer');
+export const META_ACTIVE_TURN = metaKey('active_turn');
 
 /** A command-line approval's persistent execpolicy amendment, tied to its ACP option. */
 export const META_EXEC_POLICY_AMENDMENT = metaKey('execpolicy_amendment');
