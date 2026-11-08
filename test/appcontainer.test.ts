@@ -1,12 +1,13 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { prepareProcessTree } from '../src/process-tree.js';
+import { authenticodeImage } from '../src/authenticode.js';
 
 const exec = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -22,6 +23,7 @@ describe.runIf(process.platform === 'win32' && process.env.PRISM_ACP_APPCONTAINE
     writeFileSync(join(foreign, 'owned-secret'), 'owned-foreign-marker');
     copyFileSync(process.execPath, join(root, 'program', 'node.exe'));
     cpSync(resolve(here, '../dist'), join(root, 'program', 'dist'), { recursive: true });
+    cpSync(resolve(here, '../native'), join(root, 'program', 'native'), { recursive: true });
     copyFileSync(join(here, 'fixtures', 'appcontainer-worker.mjs'), join(root, 'program', 'worker.mjs'));
     copyFileSync(join(here, 'fixtures', 'appcontainer-target.mjs'), join(root, 'program', 'target.mjs'));
     if (process.env.PRISM_ACP_CLAUDE_RESTRICTED === '1') {
@@ -32,22 +34,16 @@ describe.runIf(process.platform === 'win32' && process.env.PRISM_ACP_APPCONTAINE
     executable = join(root, 'program', 'fixture-host.exe');
     const csc = join(process.env.SystemRoot!, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
     await exec(csc, ['-nologo', '-optimize+', '-target:exe', `-out:${executable}`, join(here, 'fixtures', 'appcontainer-host.cs')], { windowsHide: true, timeout: 20_000 });
-    await prepareProcessTree({ directory: join(root, 'program', 'supervisor') });
+    await prepareProcessTree();
     const stalled = join(root, 'program', 'stalled-supervisor'); mkdirSync(stalled);
     const source = join(stalled, 'owned-stall.cs');
     writeFileSync(source, 'static class OwnedStall { static void Main() { System.Threading.Thread.Sleep(10000); } }');
     const stalledExe = join(stalled, 'prism-acp-supervisor.exe');
-    await exec(csc, ['-nologo', '-target:exe', `-out:${stalledExe}`, source], { windowsHide: true, timeout: 20_000 });
-    const stalledHash = createHash('sha256').update(readFileSync(stalledExe)).digest('hex');
-    renameSync(stalledExe, join(stalled, `prism-acp-supervisor-${stalledHash}.exe`));
-    writeFileSync(join(stalled, 'prism-acp-supervisor.current.sha256'), stalledHash);
+    await exec(csc, ['-nologo', '-platform:x64', '-target:exe', `-out:${stalledExe}`, source], { windowsHide: true, timeout: 20_000 });
     const exiting = join(root, 'program', 'exiting-supervisor'); mkdirSync(exiting);
     const exitSource = join(exiting, 'owned-exit.cs'), exitExe = join(exiting, 'prism-acp-supervisor.exe');
     writeFileSync(exitSource, 'static class OwnedExit { static int Main() { return 123; } }');
-    await exec(csc, ['-nologo', '-target:exe', `-out:${exitExe}`, exitSource], { windowsHide: true, timeout: 20_000 });
-    const exitHash = createHash('sha256').update(readFileSync(exitExe)).digest('hex');
-    renameSync(exitExe, join(exiting, `prism-acp-supervisor-${exitHash}.exe`));
-    writeFileSync(join(exiting, 'prism-acp-supervisor.current.sha256'), exitHash);
+    await exec(csc, ['-nologo', '-platform:x64', '-target:exe', `-out:${exitExe}`, exitSource], { windowsHide: true, timeout: 20_000 });
     writeFileSync(join(root, 'program', 'owned-invalid.exe'), 'owned invalid executable; must never run');
   }, 60_000);
   afterAll(() => {
@@ -61,9 +57,23 @@ describe.runIf(process.platform === 'win32' && process.env.PRISM_ACP_APPCONTAINE
 
   async function probe(mode: string, timeout = 5000) {
     for (const file of ['tree-pids', 'proof-pids', 'proof-ack']) rmSync(join(root, 'workspace', file), { force: true });
-    const result = await exec(executable, [root, join(root, 'program', 'node.exe'), join(root, 'program', 'worker.mjs'), mode, join(foreign, 'owned-secret'), String(timeout)], {
-      timeout: timeout + 10_000, maxBuffer: 128_000, windowsHide: true,
-    });
+    const native = join(root, 'program', 'native');
+    cpSync(resolve(here, '../native'), native, { recursive: true });
+    if (mode === 'deadline' || mode === 'early-exit') {
+      // Trusted protocol-failure fixture: change ONLY this disposable package's
+      // image and manifest together. Production bytes/pins are never modified.
+      const bytes = readFileSync(join(root, 'program', mode === 'deadline' ? 'stalled-supervisor' : 'exiting-supervisor', 'prism-acp-supervisor.exe'));
+      const image = authenticodeImage(bytes); expect(image.architecture).toBe('x64');
+      const manifestFile = join(native, 'supervisor-manifest.json'), manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
+      manifest.binaries.x64 = { file: 'win32-x64/prism-acp-supervisor.exe', bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), authenticodeSha256: image.sha256 };
+      writeFileSync(join(native, 'win32-x64', 'prism-acp-supervisor.exe'), bytes); writeFileSync(manifestFile, JSON.stringify(manifest));
+    }
+    let result;
+    try {
+      result = await exec(executable, [root, join(root, 'program', 'node.exe'), join(root, 'program', 'worker.mjs'), mode, join(foreign, 'owned-secret'), String(timeout)], {
+        timeout: timeout + 10_000, maxBuffer: 128_000, windowsHide: true,
+      });
+    } finally { cpSync(resolve(here, '../native'), native, { recursive: true }); }
     const lines = result.stdout.split(/\r?\n/).filter((line) => line.startsWith('{')).map((line) => JSON.parse(line));
     expect(lines.find((line) => line.fixture === 'identity')?.appContainer).toBe(true);
     expect(lines.find((line) => line.stage === 'foreign_refused')).toBeDefined();

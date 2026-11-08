@@ -1,12 +1,12 @@
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, extname, isAbsolute, join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { launchWindowsLocal } from './process-tree-local.js';
-import { SUPERVISOR_CS } from './process-tree-supervisor-cs.js';
+import { NativeSupervisorError, packagedSupervisorPath, prepareWindowsSupervisor, resolveWindowsSupervisor, type WindowsSupervisorArchitecture } from './windows-supervisor.js';
 
 /**
  * A PROVIDER'S WHOLE PROCESS TREE ENDS WITH IT (tynn, Genie, 2026-10-20). On Windows the provider used to be spawned
@@ -16,7 +16,7 @@ import { SUPERVISOR_CS } from './process-tree-supervisor-cs.js';
  *
  * Every provider now runs under a SUPERVISOR, a small process that owns the tree:
  *
- *  - Windows: the supervisor (C#, built once per install from {@link SUPERVISOR_CS} and hash-checked before every launch) creates the provider SUSPENDED,
+ *  - Windows: the shipped supervisor (C#, built reproducibly in CI and Authenticode-digest checked before every launch) creates the provider SUSPENDED,
  *    assigns it to a Job Object with KILL_ON_JOB_CLOSE and no breakaway, and only then resumes it, so nothing the
  *    provider starts can escape the job, `detached` children included. Only the supervisor holds the job handle, and
  *    the supervisor sits in libuv's own kill-on-close job, so the host's death ends the supervisor and with it the tree.
@@ -431,95 +431,16 @@ function isFile(path: string): boolean {
   }
 }
 
-let supervisorDirectoryOverride: string | null = null;
-
-/** Where the supervisor is built: once per install, keyed by its source, so a new release builds its own. */
-function supervisorDirectory(): string {
-  if (supervisorDirectoryOverride !== null) return supervisorDirectoryOverride;
-  const base = process.env.LOCALAPPDATA ?? tmpdir();
-  const version = createHash('sha256').update(SUPERVISOR_CS).digest('hex').slice(0, 16);
-  return join(base, 'prism-acp', `supervisor-${version}`);
-}
-
-const sha256Of = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
-
-/** Read one atomic pointer, then verify the immutable executable named by that digest. */
-function verifiedSupervisor(directory: string): { state: 'ok'; executable: string } | { state: 'missing' | 'mismatch' } {
-  const pointer = join(directory, 'prism-acp-supervisor.current.sha256');
-  if (!isFile(pointer)) return { state: 'missing' };
-  try {
-    if (statSync(pointer).size > 80) return { state: 'mismatch' };
-    const hash = readFileSync(pointer, 'utf8').trim();
-    if (!/^[0-9a-f]{64}$/.test(hash)) return { state: 'mismatch' };
-    const executable = join(directory, `prism-acp-supervisor-${hash}.exe`);
-    if (!isFile(executable)) return { state: 'missing' };
-    return sha256Of(executable) === hash ? { state: 'ok', executable } : { state: 'mismatch' };
-  } catch {
-    return { state: 'missing' };
-  }
-}
-
-/**
- * The supervisor executable: built once per install with the csc.exe of .NET Framework 4 (Framework64, FrameworkArm64
- * or Framework, whichever exists), its SHA-256 recorded at build, and verified before EVERY launch. A mismatch rebuilds
- * once, then refuses. Every failure is a ProcessTreeError that names its cause; an uncontained provider is never
- * offered as a fallback.
- */
+/** Verify the shipped payload before every launch; there is no compiler/cache fallback. */
 function windowsSupervisor(): string {
-  const directory = supervisorDirectory();
-  const state = verifiedSupervisor(directory);
-  if (state.state === 'ok') return state.executable;
+  try { return resolveWindowsSupervisor(); }
+  catch (cause) { throw new ProcessTreeError(cause instanceof NativeSupervisorError ? cause.message : 'cannot verify the shipped Windows supervisor'); }
+}
 
-  const windowsDirectory = process.env.SystemRoot ?? process.env.windir ?? 'C:\Windows';
-  const csc = ['Framework64', 'FrameworkArm64', 'Framework']
-    .map((bits) => join(windowsDirectory, 'Microsoft.NET', bits, 'v4.0.30319', 'csc.exe'))
-    .find(isFile);
-  if (csc === undefined) {
-    throw new ProcessTreeError('cannot contain the provider: the .NET Framework 4 compiler (csc.exe) was not found');
-  }
-  try {
-    mkdirSync(directory, { recursive: true });
-  } catch {
-    throw new ProcessTreeError('cannot contain the provider: the supervisor directory could not be created');
-  }
-  const unique = randomBytes(6).toString('hex');
-  const source = join(directory, `supervisor-${unique}.cs`);
-  const built = join(directory, `prism-acp-supervisor-${unique}.exe`);
-  const pointer = join(directory, 'prism-acp-supervisor.current.sha256');
-  const pendingPointer = join(directory, `supervisor-${unique}.sha256`);
-  try {
-    writeFileSync(source, SUPERVISOR_CS);
-    execFileSync(csc, ['-nologo', '-optimize+', '-target:exe', `-out:${built}`, source], { stdio: 'ignore', windowsHide: true });
-  } catch {
-    rmSync(built, { force: true });
-    throw new ProcessTreeError('cannot contain the provider: the supervisor failed to compile');
-  } finally {
-    rmSync(source, { force: true });
-  }
-  if (!isFile(built)) {
-    throw new ProcessTreeError('cannot contain the provider: the supervisor was removed right after it was built (antivirus quarantine is the likely cause)');
-  }
-  const hash = sha256Of(built);
-  const executable = join(directory, `prism-acp-supervisor-${hash}.exe`);
-  try {
-    // Compilers can produce different bytes concurrently. Never replace an executable another reader may launch:
-    // publish immutable bytes first, then atomically replace only the small pointer to that complete generation.
-    try { linkSync(built, executable); }
-    catch { if (!isFile(executable) || sha256Of(executable) !== hash) throw new Error('supervisor publication failed'); }
-    if (sha256Of(executable) !== hash) throw new Error('supervisor publication hash mismatch');
-    writeFileSync(pendingPointer, hash, { flag: 'wx' });
-    renameSync(pendingPointer, pointer);
-  } catch {
-    // A competing publisher may have won. Only its independently verified complete generation is accepted below.
-  } finally {
-    rmSync(built, { force: true });
-    rmSync(pendingPointer, { force: true });
-  }
-  const after = verifiedSupervisor(directory);
-  if (after.state === 'ok') return after.executable;
-  throw new ProcessTreeError(after.state === 'mismatch'
-    ? 'cannot contain the provider: the supervisor does not match the hash recorded when it was built, and could not be replaced'
-    : 'cannot contain the provider: the supervisor is missing after it was built (antivirus quarantine is the likely cause)');
+/** The packaged asset, for hosts that unpack and sign native executables. */
+export function supervisorPath(architecture?: WindowsSupervisorArchitecture): string {
+  try { return packagedSupervisorPath(architecture); }
+  catch (cause) { throw new ProcessTreeError(cause instanceof NativeSupervisorError ? cause.message : 'cannot resolve the shipped Windows supervisor'); }
 }
 
 /** Prepare the hash-verified native approval adapter BEFORE Claude starts. No interpreter/unguarded fallback. */
@@ -557,18 +478,25 @@ export function createWindowsPrivateDirectory(directory: string): void {
 }
 
 /**
- * Build (or verify) the Windows supervisor ahead of the first session, so a missing compiler or a quarantined
- * executable surfaces once, at startup, as a ProcessTreeError. A no-op elsewhere. `directory` overrides where it is
- * kept (default: %LOCALAPPDATA%/prism-acp/supervisor-<source hash>); set it before the first launch.
+ * Verify the shipped Windows supervisor ahead of the first session. A host may
+ * supply an unpacked, signed copy with the same pinned image digest. No compiler
+ * is invoked and no executable is copied or written. A no-op elsewhere.
  */
-export async function prepareProcessTree(options: { readonly directory?: string } = {}): Promise<void> {
-  if (options.directory !== undefined) {
-    if (!isAbsolute(options.directory)) throw new ProcessTreeError('the supervisor directory must be absolute');
-    supervisorDirectoryOverride = options.directory;
+let warnedSupervisorDirectory = false;
+export async function prepareProcessTree(options: {
+  /** @deprecated No executable cache is created. Use executable for a host-owned signed copy. */
+  readonly directory?: string;
+  readonly executable?: string;
+} = {}): Promise<void> {
+  const executable = options.executable;
+  if (options.directory !== undefined && !warnedSupervisorDirectory) {
+    warnedSupervisorDirectory = true;
+    process.emitWarning('prepareProcessTree({ directory }) is deprecated and ignored; use executable for an unpacked signed supervisor', { code: 'PRISM_ACP_SUPERVISOR_DIRECTORY_DEPRECATED' });
   }
   if (process.platform !== 'win32') return;
   await new Promise<void>((resolve) => setImmediate(resolve));
-  windowsSupervisor();
+  try { prepareWindowsSupervisor(executable); }
+  catch (cause) { throw new ProcessTreeError(cause instanceof NativeSupervisorError ? cause.message : 'cannot verify the shipped Windows supervisor'); }
 }
 
 /**

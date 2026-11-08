@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { prepareProcessTree, launchProvider, ClaudeDriver, CodexDriver, listModels } from './dist/index.js';
-import { createWindowsPrivateDirectory } from './dist/process-tree.js';
+import { createWindowsPrivateDirectory, windowsApprovalAdapter } from './dist/process-tree.js';
 
 const [root, mode, foreign] = process.argv.slice(2);
 const say = (stage, detail = {}) => process.stdout.write(JSON.stringify({ stage, ...detail }) + '\n');
@@ -16,7 +16,7 @@ writeFileSync(root + '/home/owned-marker', 'owned');
 say('assigned_write');
 
 if (mode === 'claude-native-mcp') {
-  await prepareProcessTree({ directory: root + '/program/supervisor' });
+  await prepareProcessTree();
   const home = root + '/home/owned-provider'; mkdirSync(home);
   const marker = root + '/workspace/owned-mcp-methods';
   say('native_private_location', { insideOwnedRoot: tmpdir().replaceAll('\\', '/').toLowerCase().startsWith(root.replaceAll('\\', '/').toLowerCase() + '/'), exists: existsSync(tmpdir()) });
@@ -48,7 +48,7 @@ if (mode === 'claude-native-mcp') {
   } catch (error) { say('error', { name: error.name, message: error.message, stderr: driver.stderr.slice(-2000) }); process.exitCode = 4; }
   finally { clearTimeout(timer); say('stop', { verdict: await driver.stop({ graceMs: 0 }) }); }
 } else if (mode.startsWith('private-temp-')) {
-  await prepareProcessTree({ directory: root + '/program/supervisor' });
+  await prepareProcessTree();
   const missing = mode === 'private-temp-missing';
   const parent = tmpdir();
   if (!parent.replaceAll('\\', '/').toLowerCase().startsWith((root + '/home/').replaceAll('\\', '/').toLowerCase())) throw new Error('effective fixture TEMP escaped its owned home');
@@ -81,15 +81,13 @@ if (mode === 'claude-native-mcp') {
     if (config !== undefined && existsSync(config)) throw new Error('protected fixture config survived stop');
   }
 } else if (mode === 'private-probe') {
-  await prepareProcessTree({ directory: root + '/program/supervisor' });
+  await prepareProcessTree();
   const directory = root + '/home/owned-native-probe';
-  const hash = readFileSync(root + '/program/supervisor/prism-acp-supervisor.current.sha256', 'utf8').trim();
-  if (!/^[a-f0-9]{64}$/.test(hash)) throw new Error('owned native probe digest invalid');
-  const result = spawnSync(root + '/program/supervisor/prism-acp-supervisor-' + hash + '.exe', ['--create-private-directory', directory], { stdio: 'inherit', windowsHide: true, timeout: 5000 });
+  const result = spawnSync(windowsApprovalAdapter(), ['--create-private-directory', directory], { stdio: 'inherit', windowsHide: true, timeout: 5000 });
   say('native_private_diagnostic', { status: result.status, signal: result.signal, spawnCode: result.error?.code });
   process.exitCode = result.status === 0 ? 0 : 3;
 } else if (mode === 'private-config') {
-  await prepareProcessTree({ directory: root + '/program/supervisor' });
+  await prepareProcessTree();
   const directory = root + '/home/owned-private';
   createWindowsPrivateDirectory(directory);
   writeFileSync(directory + '/mcp.json', JSON.stringify({ owned: 'synthetic-mcp-header' }), { flag: 'wx', mode: 0o600 });
@@ -112,7 +110,7 @@ if (mode === 'claude-native-mcp') {
   child.stderr?.resume();
   child.once('exit', (code) => process.exit(code ?? 1));
 } else if (mode === 'native-failure' || mode === 'early-exit') {
-  await prepareProcessTree({ directory: root + '/program/' + (mode === 'early-exit' ? 'exiting-supervisor' : 'supervisor') });
+  await prepareProcessTree();
   const time = Date.now();
   const provider = launchProvider(mode === 'native-failure' ? root + '/program/owned-invalid.exe' : process.execPath, [], {
     cwd: root + '/workspace', env: process.env, windowsStdio: 'local-pipes', startupTimeoutMs: 2000,
@@ -123,14 +121,14 @@ if (mode === 'claude-native-mcp') {
   await provider.closed;
   say('stop', { verdict: await provider.stop({ graceMs: 0 }) });
 } else if (mode === 'deadline') {
-  await prepareProcessTree({ directory: root + '/program/stalled-supervisor' });
+  await prepareProcessTree();
   const started = Date.now();
   const provider = launchProvider(process.execPath, ['--version'], { cwd: root + '/workspace', env: process.env, windowsStdio: 'local-pipes', startupTimeoutMs: 150 });
   try { await provider.started; process.exitCode = 5; }
   catch (error) { say('deadline', { elapsed: Date.now() - started, message: error.message }); }
   say('stop', { verdict: await provider.stop({ graceMs: 0 }) });
 } else if (mode.startsWith('driver-') || mode.startsWith('models-')) {
-  await prepareProcessTree({ directory: root + '/program/supervisor' });
+  await prepareProcessTree();
   const kind = mode.endsWith('claude') ? 'claude' : 'codex';
   const options = { cwd: root + '/workspace', binary: process.execPath,
     binaryArgs: ['--preserve-symlinks', '--preserve-symlinks-main', root + '/program/target.mjs', kind],
@@ -146,7 +144,7 @@ if (mode === 'claude-native-mcp') {
     }
   } catch (error) { say('error', { name: error.name, message: error.message }); process.exitCode = 4; }
 } else {
-  await prepareProcessTree({ directory: root + '/program/supervisor' });
+  await prepareProcessTree();
   say('supervisor_prepared');
   const target = root + '/program/target.mjs';
   const args = mode === 'acl' ? ['--pipe-acl']
