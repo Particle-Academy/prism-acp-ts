@@ -1,4 +1,5 @@
 import type { ProcessTree, ProcessTreeOptions, StopOptions, StopVerdict } from '../process-tree.js';
+import { observeStopVerdict, stopVerdictSnapshot } from '../stop-verdict.js';
 import { codexModelsOf, type AvailableModel, type SessionModelState } from '../models.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -239,6 +240,7 @@ export class CodexDriver implements AgentDriver {
   #itemSequence = 0;
   #approvalSequence = 0;
   #transport: CodexTransport | null = null;
+  #stopPromise: Promise<StopVerdict> | null = null;
   /** The model this thread uses: what thread/start reported, a reroute, or setModel(). Null until known. */
   #currentModelId: string | null = null;
   /** Chosen by setModel(); sent with the next turn/start, which applies it to that turn and every later one. */
@@ -327,6 +329,7 @@ export class CodexDriver implements AgentDriver {
 
   start(): void {
     if (this.#started) throw new Error('driver already started');
+    this.#stopPromise = null;
     this.#started = true;
 
     if (this.#options.resumeSessionId !== undefined && !isValidCliSessionId(this.#options.resumeSessionId)) {
@@ -626,6 +629,7 @@ export class CodexDriver implements AgentDriver {
    * that cannot report is closed, and the verdict says nothing was verified.
    */
   stop(options?: StopOptions): Promise<StopVerdict> {
+    if (this.#stopPromise !== null) return this.#stopPromise;
     const transport = this.#transport;
     const verdict = transport?.stop !== undefined
       ? transport.stop(options)
@@ -633,7 +637,12 @@ export class CodexDriver implements AgentDriver {
         ? { graceful: true, empty: true, survivors: 0, verified: true }
         : { graceful: false, empty: false, survivors: null, verified: false });
     this.#shutdown('SIGTERM', transport?.stop === undefined);
-    return verdict;
+    this.#stopPromise = verdict.then(native => {
+      const snapshot = stopVerdictSnapshot(native);
+      observeStopVerdict(this.#events.onStopVerdict, snapshot);
+      return snapshot;
+    });
+    return this.#stopPromise;
   }
 
   /**

@@ -27,6 +27,7 @@ import type { AcpUpdate } from '../claude/to-acp.js';
 import type { StopReason, TurnOutcome } from '../claude/driver.js';
 import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, META_MODEL_INFO, META_PERMISSION_REASON, META_TURN_FAILURE, withMeta } from '../meta.js';
 import type { SessionModelState } from '../models.js';
+import { observeStopVerdict } from '../stop-verdict.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
 import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
 import { PromptRefused, promptBlockKind, promptBlocks, type PromptBlockKind, type PromptContent } from '../prompt.js';
@@ -113,6 +114,8 @@ export interface DriverEvents {
   ) => Promise<PermissionOutcome>;
   readonly onTurnEnd?: (outcome: TurnOutcome) => void;
   readonly onProtocolError?: (problem: string, detail?: ProblemDetail) => void;
+  /** Observation only; emitted once after the driver's idempotent stop settles. */
+  readonly onStopVerdict?: (verdict: StopVerdict) => void;
   readonly onStderr?: (line: string) => void;
   readonly onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
@@ -171,6 +174,8 @@ export interface AcpAgentOptions {
   readonly newSessionId?: () => string;
   readonly onStderr?: (sessionId: string, line: string) => void;
   readonly onProtocolError?: (sessionId: string, problem: string, detail?: ProblemDetail) => void;
+  /** Host observation, with no ACP wire extension. Throwing/rejecting observers are isolated. */
+  readonly onStopVerdict?: (sessionId: string, verdict: StopVerdict) => void;
 }
 
 /** Provider differences clients need to know. */
@@ -542,6 +547,7 @@ export class AcpAgent {
         },
         onStderr: (line) => this.#options.onStderr?.(id, line),
         onProtocolError: (problem, detail) => this.#options.onProtocolError?.(id, problem, detail),
+        onStopVerdict: verdict => observeStopVerdict(value => this.#options.onStopVerdict?.(id, value), verdict),
         onExit: (code) => {
           session.exited = true;
           // A turn still in flight when the process dies must be settled, or

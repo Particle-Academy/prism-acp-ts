@@ -33,6 +33,7 @@ import { ModelListError, claudeModelsOf, type SessionModelState } from '../model
 import { ProcessTreeError, launchProvider, windowsApprovalAdapter, createWindowsPrivateDirectory, type ProcessTree, type ProcessTreeOptions, type ProviderIo, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
 import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
 import type { DriverCapabilities } from '../acp/agent.js';
+import { observeStopVerdict, stopVerdictSnapshot } from '../stop-verdict.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
 
 /**
@@ -145,6 +146,8 @@ export interface ClaudeDriverEvents {
   readonly onStderr?: (line: string) => void;
   /** A frame that arrived but could not be framed or parsed. */
   readonly onProtocolError?: (problem: string, detail?: ProblemDetail) => void;
+  /** Final native facts, once stop settles. Observer failures are isolated; kill() does not wait for a verdict. */
+  readonly onStopVerdict?: (verdict: StopVerdict) => void;
   readonly onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
   /**
    * One turn finished.
@@ -408,7 +411,12 @@ export function cliSessionIdOf(frame: unknown): string | null {
 export class ClaudeCancelStateError extends Error {
   override readonly name = 'ClaudeCancelStateError';
   readonly code = 'claude_cancel_state_uncertain';
-  constructor() { super('cancel state uncertain; driver stopped'); }
+  /** Immutable facts at throw time. Before cleanup settles, verified:false means unknown, not survived. */
+  readonly stopVerdict: StopVerdict;
+  constructor(verdict: StopVerdict = { graceful: false, empty: false, survivors: null, verified: false }) {
+    super('cancel state uncertain; driver stopped');
+    this.stopVerdict = stopVerdictSnapshot(verdict);
+  }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -473,6 +481,8 @@ export class ClaudeDriver {
   #child: ChildProcess | null = null;
   #io: ProviderIo | ChildProcess | null = null;
   #provider: ProviderProcess | null = null;
+  #stopPromise: Promise<StopVerdict> | null = null;
+  #stopVerdict: StopVerdict = stopVerdictSnapshot({ graceful: false, empty: false, survivors: null, verified: false });
   #stderr = '';
   #stderrRedactor: SecretRedactor | null = null;
   readonly #pendingOutcomes: TurnOutcome[] = [];
@@ -561,6 +571,8 @@ export class ClaudeDriver {
 
   start(): void {
     if (this.#child !== null) throw new Error('driver already started');
+    this.#stopPromise = null;
+    this.#stopVerdict = stopVerdictSnapshot({ graceful: false, empty: false, survivors: null, verified: false });
     // Build/hash verification is a startup prerequisite, before credentials/configuration or any CLI process.
     if (this.#options.permissionPrompts !== undefined && process.platform === 'win32') windowsApprovalAdapter();
 
@@ -731,7 +743,7 @@ export class ClaudeDriver {
     const id = randomUUID();
     const line = encodeLine({ ...promptMessage(content), uuid: id });
     const stdin = this.#io?.stdin;
-    if (this.#cancelFailure) throw new ClaudeCancelStateError();
+    if (this.#cancelFailure) throw new ClaudeCancelStateError(this.#stopVerdict);
     if (this.#approvalFailure !== null) throw new Error(this.#approvalFailure);
     if (this.#options.nativeTools === 'none' && this.#approvalStopped) throw new Error('restricted Claude session has stopped');
     const initializing = (this.#options.permissionPrompts !== undefined && this.#approvalVersion === null) || (this.#options.nativeTools === 'none' && !this.#restrictedInitialized);
@@ -858,7 +870,7 @@ export class ClaudeDriver {
     this.#approvalStopped = true;
     for (const id of targets) this.#settleTurn(id, { stopReason: 'cancelled', isError: false, raw: 'cancel accounting mismatch' });
     try { this.#events.onProtocolError?.('cancel state uncertain; driver stopped', { recoverable: false }); }
-    finally { void this.#provider?.stop({ graceMs: 0 }); }
+    finally { void this.stop({ graceMs: 0 }); }
   }
 
   #interruptReceipt(response: Record<string, unknown>): void {
@@ -951,11 +963,21 @@ export class ClaudeDriver {
    * exit on its own, terminate the tree, and resolve once the tree is empty (or the wait gave up -- see the verdict).
    */
   stop(options?: StopOptions): Promise<StopVerdict> {
+    if (this.#stopPromise !== null) return this.#stopPromise;
     this.#clearInterrupt();
     this.#approvalStopped = true;
     this.#heldPrompts = [];
-    if (this.#provider === null) return Promise.resolve({ graceful: true, empty: true, survivors: 0, verified: true });
-    return this.#provider.stop(options);
+    const provider = this.#provider;
+    const stopping = provider === null
+      ? Promise.resolve<StopVerdict>({ graceful: true, empty: true, survivors: 0, verified: true })
+      : provider.stop(options);
+    this.#stopPromise = stopping.then(verdict => {
+      const snapshot = stopVerdictSnapshot(verdict);
+      if (this.#provider === provider) this.#stopVerdict = snapshot;
+      observeStopVerdict(this.#events.onStopVerdict, snapshot);
+      return snapshot;
+    });
+    return this.#stopPromise;
   }
 
   /** The CLI's pid and what holds its tree; null until it is running. */

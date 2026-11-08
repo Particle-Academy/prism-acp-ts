@@ -1215,6 +1215,13 @@ interrupt one. A driver that can implements `cancel()`, and declares
     results that omit UUIDs remain supported.
     ACP itself continues to allow one turn per session.
 
+    `ClaudeCancelStateError.stopVerdict` is an immutable snapshot of native
+    cleanup facts at the time the error is thrown. Until cleanup settles it
+    reports `{ graceful: false, empty: false, survivors: null, verified: false }`.
+    This means unknown; it does not establish that a process survived. The
+    immediate `onProtocolError` notification still precedes cleanup. Observe
+    `onStopVerdict` for the eventual result rather than relying on an early error.
+
 Once a client has cancelled, the prompt is answered `cancelled` even if the turn
 finished or failed in the race with the interrupt, as ACP requires. If the
 interrupt itself is refused, the agent is stopped instead, so Stop always stops.
@@ -1248,6 +1255,27 @@ const verdict = await driver.stop({ graceMs: 5_000 }); // close stdin, wait, end
 // { graceful: false, empty: true, survivors: 0, verified: true }
 driver.processTree; // { providerPid, supervisorPid, containment: { kind: 'job-object' } | { kind: 'process-group', pgid } }
 ```
+
+Both drivers accept an optional `onStopVerdict(verdict)` event. It receives an
+immutable copy of the native facts once the idempotent `stop()` settles, including
+Claude's automatic stop after uncertain cancellation. Repeated calls share that
+stop and emit once; the first call's stop options apply. A throwing or rejecting
+observer is isolated and cannot change the verdict or delay cleanup. `kill()`
+does not wait for or publish a verdict.
+
+The ACP host can observe the same result through
+`AcpAgentOptions.onStopVerdict(sessionId, verdict)`. This is a host callback with
+the owning session ID; it adds no ACP method or notification. `StopVerdict` is
+exported from the package root. Preserve `verified: false` and a null survivor
+count when the supervisor could not report, including custom Codex transports
+without `stop()`. Even `empty: true` can accompany an unverified count; do not
+turn that into observed zero survivors. Direct Codex interrupt refusal still
+rejects without stopping its running driver; explicitly call `stop()` when the
+host intends to end that driver.
+
+Version 0.40.0 adds observability only. No tree-kill defect was reproduced in the
+native uncertain-cancel measurements; supervision, stop grace, interrupt timing
+and existing callback ordering are unchanged.
 
 `kill()` ends the tree too, without waiting to report. On Windows a `.cmd` is run only if it is an npm shim (as node +
 its script), and the current directory is never searched for the binary. To run a script as the provider, name the
