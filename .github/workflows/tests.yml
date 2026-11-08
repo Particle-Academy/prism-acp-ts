@@ -9,6 +9,50 @@ permissions:
   contents: read
 
 jobs:
+  # G255 bootstrap: CI is the only producer of native candidates. The runtime
+  # remains unchanged until these exact outputs and their pins have been reviewed.
+  native-supervisor-build:
+    name: Deterministic Windows supervisor candidates
+    needs: third-party
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      DOTNET_INSTALL_DIR: ${{ runner.temp }}/g255-dotnet-sdk
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+      DOTNET_NOLOGO: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5, exact reviewed action
+        with:
+          dotnet-version: 10.0.403
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Build identical source in two isolated roots
+        shell: pwsh
+        run: |
+          node tools/supervisor-native/build.mjs "$env:RUNNER_TEMP/g255-first"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/supervisor-native/build.mjs "$env:RUNNER_TEMP/g255-second"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/supervisor-native/compare.mjs "$env:RUNNER_TEMP/g255-first" "$env:RUNNER_TEMP/g255-second"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve source-bound CI candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-supervisor-candidates
+          path: ${{ runner.temp }}/g255-first/
+          if-no-files-found: error
+
   test:
     name: node ${{ matrix.node }}
     runs-on: ubuntu-latest
