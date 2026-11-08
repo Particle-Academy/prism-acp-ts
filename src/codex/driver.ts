@@ -357,17 +357,17 @@ export class CodexDriver implements AgentDriver {
 
   /** Send a user turn: text, or content blocks. A block it cannot send refuses the whole turn, naming it. */
   prompt(content: PromptContent): void {
-    // A slash request is an operation, never a prompt that merely asks the model to emulate one.
+    // Reserve only exact whole text-only native commands. Every other prompt keeps 0.38's text semantics.
     const commandBlocks = typeof content === 'string' ? [{ type: 'text', text: content }] : content;
-    const first = commandBlocks.find(block => block.type === 'text' && block.text.trim().length > 0);
-    if (first?.type === 'text' && first.text.trimStart().startsWith('/')) {
-      const value = commandBlocks.map(block => block.type === 'text' ? block.text : '').join('\n').trim();
+    if (Array.isArray(commandBlocks) && commandBlocks.length > 0
+      && commandBlocks.every(block => block?.type === 'text' && typeof block.text === 'string')) {
+      const value = commandBlocks.map(block => block.text).join('\n').trim();
       const match = /^\/(compact|review)\s*$/.exec(value);
-      if (match === null) throw new CommandUnsupported(/^\/[^\s]+\s+\S/.test(value) ? 'invalid_arguments' : 'unknown_command');
-      if (commandBlocks.some(block => block.type !== 'text')) throw new CommandUnsupported('invalid_arguments');
-      const command = this.#prepareCommand(match[1]);
-      void this.#sendCommand(command).catch(() => { /* The turn outcome is emitted by #sendCommand. */ });
-      return;
+      if (match !== null) {
+        const command = this.#prepareCommand(match[1]);
+        void this.#sendCommand(command).catch(() => { /* The turn outcome is emitted by #sendCommand. */ });
+        return;
+      }
     }
     if (!this.#started || this.#closed) throw new Error('driver is not started, or has exited');
     if (this.#turnInFlight || this.#queuedPrompt !== null) throw new Error('Codex turn already in flight');

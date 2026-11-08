@@ -84,23 +84,34 @@ describe('native Codex operations, not model slash emulation', () => {
     expect(native.sent.some(f => f.method === 'turn/start' || f.method === 'command/exec')).toBe(false);
     native.end('review-turn'); expect(outcomes).toHaveLength(1);
   });
-  it.each(['/unknown', '/compact extra', '/review\nINJECT', '/review /compact'])('refuses %s without sending anything', async content => {
-    const { driver, native } = await setup(); const before = native.sent.length;
-    expect(() => driver.prompt(content)).toThrow(CommandUnsupported); expect(native.sent).toHaveLength(before);
-    driver.prompt('ordinary'); expect(native.sent.at(-1)?.method).toBe('turn/start');
+  it.each(['/etc/hosts looks wrong', '/unknown', '/help me with X', '/compact extra', '/review\nINJECT', '/review /compact', '  /unknown text \n'])('forwards ordinary text %s unchanged', async content => {
+    const { driver, native } = await setup(); driver.prompt(content);
+    expect(native.sent.find(f => f.method === 'turn/start')?.params.input).toEqual([{ type: 'text', text: content }]);
+    expect(native.sent.some(f => f.method === 'thread/compact/start' || f.method === 'review/start' || f.method === 'command/exec')).toBe(false);
   });
-  it('refuses mixed slash content as a whole, and invalid direct names without reflecting their contents', async () => {
+  it('explicit runCommand refuses unknown names without reflecting their contents or forwarding model text', async () => {
     const { driver, native } = await setup(); const before = native.sent.length;
-    expect(() => driver.prompt([{ type: 'text', text: '/compact' }, { type: 'image', data: 'abc', mimeType: 'image/png' }])).toThrow(CommandUnsupported);
+    await expect(driver.runCommand('unknown')).rejects.toMatchObject({ code: 'command_unsupported', reason: 'unknown_command' });
     await expect(driver.runCommand('SECRET\n/private')).rejects.toThrow('command_unsupported: unknown_command');
     expect(native.sent).toHaveLength(before);
   });
-  it('does not bypass command dispatch through empty leading blocks or a leading image', async () => {
+  it('forwards mixed content and reserves only whole text-only commands, including empty leading text', async () => {
     const { driver, native } = await setup();
-    expect(() => driver.prompt([{ type: 'image', data: 'abc', mimeType: 'image/png' }, { type: 'text', text: '/compact' }])).toThrow(CommandUnsupported);
+    driver.prompt([{ type: 'image', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=', mimeType: 'image/png' }, { type: 'text', text: '/compact' }]);
+    const input = native.sent.find(f => f.method === 'turn/start')?.params.input;
+    expect(input !== undefined).toBe(true);
+    expect(input.map((x: any) => x.type)).toEqual(['localImage', 'text']);
+    expect(input[1]).toEqual({ type: 'text', text: '/compact' });
+    expect(native.sent.some(f => f.method === 'thread/compact/start')).toBe(false);
+    await tick(); native.end('ordinary-turn');
     driver.prompt([{ type: 'text', text: '' }, { type: 'text', text: '/compact' }]); await tick();
     expect(native.sent.filter(f => f.method === 'thread/compact/start')).toHaveLength(1);
-    expect(native.sent.some(f => f.method === 'turn/start')).toBe(false);
+    expect(native.sent.filter(f => f.method === 'turn/start')).toHaveLength(1);
+  });
+  it.each(['/compact', ' \n /compact \t '])('runs exact whole-prompt %j as native compact', async content => {
+    const { driver, native } = await setup(); driver.prompt(content); await tick();
+    expect(native.sent.filter(f => f.method === 'thread/compact/start')).toHaveLength(1);
+    expect(native.sent.some(f => f.method === 'turn/start' || f.method === 'command/exec')).toBe(false);
   });
   it('refuses before ready/after close rather than queuing an operation', async () => {
     const d = new CodexDriver({ cwd: '/owned' }); drivers.push(d);
@@ -156,8 +167,8 @@ describe('native Codex operations, not model slash emulation', () => {
   });
 });
 
-describe('ACP command refusals remain typed', () => {
-  it.each([false, true])('returns command_unsupported for native refusal=%s and leaves no hung ACP prompt', async nativeRefusal => {
+describe('ACP preserves ordinary slash text and typed native refusals', () => {
+  it.each([false, true])('routes ACP prompt correctly (native method missing=%s)', async nativeRefusal => {
     const sent: Record<string, any>[] = []; let native!: Native; let driver!: CodexDriver;
     const peer = new JsonRpcPeer({ send: frame => sent.push(frame) });
     new AcpAgent(peer, { newSessionId: () => 'owned', driverFactory: (_options, events) => {
@@ -166,10 +177,15 @@ describe('ACP command refusals remain typed', () => {
     const call = async (id: number, method: string, params: unknown) => { await peer.receive({ jsonrpc: '2.0', id, method, params }); return sent.find(f => f.id === id)!; };
     await call(1, 'session/new', { cwd: '/owned' }); await driver.ready;
     if (nativeRefusal) native.commandError = { code: -32601, message: 'SECRET /private' };
-    const reply = await call(2, 'session/prompt', { sessionId: 'owned', prompt: [{ type: 'text', text: nativeRefusal ? '/compact' : '/unknown' }] });
-    expect(reply.error.code).toBe(-32602); expect(reply.error.message).toBe('command_unsupported');
-    expect(reply.error.data).toMatchObject({ code: 'command_unsupported', reason: nativeRefusal ? 'native_method_missing' : 'unknown_command' });
-    expect(JSON.stringify(reply)).not.toContain('SECRET'); expect(native.sent.some(f => f.method === 'turn/start')).toBe(false);
+    const pending = call(2, 'session/prompt', { sessionId: 'owned', prompt: [{ type: 'text', text: nativeRefusal ? '/compact' : '/unknown' }] });
+    if (!nativeRefusal) { await tick(); expect(native.sent.find(f => f.method === 'turn/start')?.params.input).toEqual([{ type: 'text', text: '/unknown' }]); native.end('ordinary-turn'); }
+    const reply = await pending;
+    if (nativeRefusal) {
+      expect(reply.error.code).toBe(-32602); expect(reply.error.message).toBe('command_unsupported');
+      expect(reply.error.data).toMatchObject({ code: 'command_unsupported', reason: 'native_method_missing' });
+      expect(native.sent.some(f => f.method === 'turn/start')).toBe(false);
+    } else { expect(reply.error).toBeUndefined(); expect(reply.result.stopReason).toBe('end_turn'); }
+    expect(JSON.stringify(reply)).not.toContain('SECRET');
   });
 });
 

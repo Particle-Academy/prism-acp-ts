@@ -1003,12 +1003,18 @@ as incomplete; other CLI versions and `nativeTools: 'none'` report `null`.
 After `await driver.ready`, call `await driver.runCommand('compact')` or
 `await driver.runCommand('review')`. Acceptance resolves that promise; native
 completion still arrives through `onTurnEnd`. Review assesses uncommitted changes
-in the same thread. A client using ACP sends `/compact` or `/review` as its
-`session/prompt` text. Arguments and mixed image/resource content are unsupported.
-Unknown commands, unavailable methods, a busy session and other refusals raise
+in the same thread. `prompt()` and ACP `session/prompt` intercept only an exact,
+whole, text-only `/compact` or `/review`, with optional surrounding whitespace.
+Every other prompt reaches the model unchanged, including `/unknown`,
+`/etc/hosts looks wrong`, extra text and mixed image/resource content, as in 0.38.
+Hosts decide how to interpret unadvertised slash text.
+
+The explicit `runCommand(name)` API accepts only the advertised operation names.
+Unknown names, unavailable methods, a busy session and other refusals raise
 `CommandUnsupported` with `code: 'command_unsupported'` and a fixed `reason`.
-ACP reports that code/reason as invalid-request-parameter error data. Slash text
-is never forwarded as a model prompt or substituted with a host shell command.
+ACP reports an exact native command's refusal as invalid-request-parameter error
+data. Native command execution never falls back to model emulation or a host shell
+command.
 Cancellation uses the native turn once its ID is known. A lost or malformed
 acknowledgement or an unexpected native error closes the session because execution
 may have begun.
