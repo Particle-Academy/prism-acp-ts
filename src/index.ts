@@ -27,6 +27,12 @@ export {
   META_BACKGROUND_TASKS,
   META_CLI_SESSION_ID,
   META_COMMAND_SOURCE,
+  META_NATIVE_ITEM_TYPE,
+  META_NATIVE_ITEM,
+  META_FILE_EDITS,
+  META_NATIVE_METHOD,
+  META_COMMAND_CATALOG,
+  META_OMITTED,
   META_COMPACTION,
   META_LOCAL_COMMAND,
   META_PERMISSION_REASON,
@@ -58,6 +64,8 @@ export {
 } from './meta.js';
 
 export { PROMPT_IMAGE_TYPES, PromptRefused, fileAsText, promptBlockKind, promptBlocks } from './prompt.js';
+export { CommandUnsupported } from './codex/commands.js';
+export type { CodexCommand, CommandRefusal } from './codex/commands.js';
 export type {
   BlobResource,
   ImageBlock,
@@ -74,6 +82,8 @@ export type { SanitizedProviderText } from './text.js';
 
 export { ClaudeToAcp } from './claude/to-acp.js';
 export type { AcpUpdate, ToolStatus } from './claude/to-acp.js';
+export type { FileEdit, FileEditKind } from './edits.js';
+export type { MetadataOmission, InlineMetadataOmission, ToolDescriptionOmission } from './meta.js';
 
 export { claudeMcpServers, codexListedReport, codexStartupReport } from './mcp-status.js';
 export type { McpServerReport, McpServerState } from './mcp-status.js';
