@@ -40,17 +40,20 @@ jobs:
       - name: Build identical source in two isolated roots
         shell: pwsh
         run: |
-          node tools/supervisor-native/build.mjs "$env:RUNNER_TEMP/g255-first"
+          $candidateRoot = Join-Path $env:RUNNER_TEMP 'g255-candidates'
+          if (Test-Path -LiteralPath $candidateRoot) { throw 'Refuse to replace prior native candidates' }
+          [System.IO.Directory]::CreateDirectory($candidateRoot) | Out-Null
+          node tools/supervisor-native/build.mjs "$candidateRoot/first"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node tools/supervisor-native/build.mjs "$env:RUNNER_TEMP/g255-second"
+          node tools/supervisor-native/build.mjs "$candidateRoot/second"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node tools/supervisor-native/compare.mjs "$env:RUNNER_TEMP/g255-first" "$env:RUNNER_TEMP/g255-second"
+          node tools/supervisor-native/compare.mjs "$candidateRoot/first" "$candidateRoot/second"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Preserve source-bound CI candidates
         uses: actions/upload-artifact@v4
         with:
           name: windows-supervisor-candidates
-          path: ${{ runner.temp }}/g255-first/
+          path: ${{ runner.temp }}/g255-candidates/
           if-no-files-found: error
 
   test:
