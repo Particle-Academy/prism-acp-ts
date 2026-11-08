@@ -187,7 +187,9 @@ describe('Codex history replay provenance and opt-out',()=>{
   for(const replayHistory of [undefined,true])it(`default/explicit replay marks every projected update and one summary (${String(replayHistory)})`,async()=>{
     const state=setup({resumeSessionId:'thread-captured',...(replayHistory===undefined?{}:{replayHistory})},{},items,true);
     state.driver.start();await state.driver.ready;
-    const projected=state.updates.filter(u=>u.sessionUpdate!=='notice');
+    const commands=state.updates.filter(u=>u.sessionUpdate==='available_commands_update');
+    expect(commands).toHaveLength(1);expect(meta(commands[0])?.[META_REPLAY]).toBeUndefined();
+    const projected=state.updates.filter(u=>u.sessionUpdate!=='notice'&&u.sessionUpdate!=='available_commands_update');
     expect(projected).toHaveLength(8);
     for(const update of projected)expect(meta(update)?.[META_REPLAY]).toBe(true);
     expect(projected.find(u=>u.sessionUpdate==='agent_thought_chunk')).toMatchObject({messageId:'reason-history'});

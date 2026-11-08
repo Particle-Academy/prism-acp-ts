@@ -993,6 +993,100 @@ indicators. Descriptions, summaries and errors have terminal control sequences
 stripped, with `providerTextSanitized: true` when anything was removed; a frame
 with no `task_id` is recorded as unmapped rather than sent.
 
+## Native commands and file edits
+
+Codex CLI 0.167.0 sessions emit `available_commands_update` in the same shape as
+Claude, offering `compact` and `review`. These are measured App Server operations,
+not discovery of the full TUI catalog. `META_COMMAND_CATALOG` marks that catalog
+as incomplete; other CLI versions and `nativeTools: 'none'` report `null`.
+
+After `await driver.ready`, call `await driver.runCommand('compact')` or
+`await driver.runCommand('review')`. Acceptance resolves that promise; native
+completion still arrives through `onTurnEnd`. Review assesses uncommitted changes
+in the same thread. A client using ACP sends `/compact` or `/review` as its
+`session/prompt` text. Arguments and mixed image/resource content are unsupported.
+Unknown commands, unavailable methods, a busy session and other refusals raise
+`CommandUnsupported` with `code: 'command_unsupported'` and a fixed `reason`.
+ACP reports that code/reason as invalid-request-parameter error data. Slash text
+is never forwarded as a model prompt or substituted with a host shell command.
+Cancellation uses the native turn once its ID is known. A lost or malformed
+acknowledgement or an unexpected native error closes the session because execution
+may have begun.
+
+Codex tool updates use `name: 'shell'` for native command execution,
+`name: '<server>.<tool>'` for MCP calls and `name: 'edit'` for file changes.
+`META_NATIVE_ITEM_TYPE` and `META_NATIVE_ITEM` retain the native type and a
+detached native item snapshot. These values contain the session's tool data;
+applications decide where to store or display it. Missing native MCP server or
+tool names are not filled with guesses. Live and replayed items share this mapping.
+
+`_meta[META_FILE_EDITS]` (`particle.academy/file_edits`) carries the exported
+`readonly FileEdit[]` type:
+
+```ts
+interface FileEdit {
+  readonly path: string; // workspace-relative, forward slashes
+  readonly movePath?: string; // rename destination; path remains the source
+  readonly kind: 'add' | 'delete' | 'update';
+  readonly newText?: string;
+  readonly oldText?: string;
+  readonly diff: string;
+  readonly textScope: 'file' | 'fragment';
+}
+```
+
+Codex additions include the full `newText`; deletions include the full `oldText`.
+Updates include only native hunks with standard unified headers, without invented
+old/new bodies. A rename keeps `path` as the source and adds `movePath` as its
+workspace-relative destination; a pure rename has no content hunk. Claude omits
+`movePath`. Headers use `--- a/path` and `+++ b/path`, with `/dev/null` on
+the absent side of additions/deletions. Native moves use `diff --git`, `rename from`,
+`rename to`, `--- a/path` and `+++ b/movePath` headers. Codex's display footer is
+removed only when it exactly names the validated native `move_path`; other trailing
+text withholds the normalized edit list.
+Empty files use Git's regular-file mode marker; native events do not supply
+original permissions, so this data does not promise permission restoration.
+Unrepresentable paths or patches stay in `rawInput` and native metadata with a
+diagnostic; they do not become a false empty edit list. The mapper never reads
+the workspace to reconstruct content.
+Edit metadata on a pending or failed tool describes the native proposed change;
+it is not proof the edit was applied. Check the tool's status and native outcome
+before offering a revert.
+
+The additive metadata has a frame budget under the 64,000,000-byte transport cap,
+with 4 KiB reserved for the enclosing notification. If it does not fit, the debug
+`native_item` copy is omitted first; `file_edits` is omitted only if necessary
+after that. Existing tool fields, the native type and name are preserved. Nothing
+is truncated and an omitted edit list is never replaced with `[]`.
+`_meta[META_OMITTED]` (`particle.academy/omitted`) reports
+`{ native_item?: 'frame_budget', file_edits?: 'frame_budget', frameBytes }`.
+`frameBytes` counts the encoded update's UTF-8 bytes before omission, excluding
+the surrounding ACP envelope. Genie should display **diff unavailable (too large)**
+when `file_edits` is marked, rather than reporting no changes.
+
+At the cap edge, even the new name, native type and inline marker may not fit.
+The driver then sends the tool row exactly as 0.38 did, followed immediately by a
+small debug `notice` on the existing notice channel. Its `META_OMITTED` value is
+`{ toolCallId, fields: ['name', 'native_type', 'native_item', 'file_edits'],
+reason: 'frame_budget', frameBytes }`. `frameBytes` counts the candidate update
+after the ordered payload omissions. Genie should display **too large to describe**
+for that row. The notice never contains tool payloads; malformed identifiers over
+200 code units become `null`. Claude's notice lists only `file_edits`, its additive
+field. An already oversized legacy frame retains the legacy framing rejection.
+
+Claude `Edit` and `MultiEdit` share this type: `file_path`, `old_string` and
+`new_string` supply exact replacement fragments, marked `textScope: 'fragment'`.
+Their diff coordinates are fragment-relative and do not identify the fragment's
+position in the complete file. A standalone `ClaudeToAcp` mapper needs its optional
+workspace argument to project edits; `ClaudeDriver` supplies it automatically.
+
+Genie can count added/removed lines from `diff`. Whole-file Codex update bodies
+are unavailable: revert uses reverse-applied hunks, after `git apply -R --check`
+confirms they still apply cleanly. Measured native updates supplied zero context
+at a file edge and one line on each side of a middle edit; there is no three-line
+context guarantee. Modified or ambiguous files and Claude fragment-only diffs may
+fail that check. Refuse an unsafe revert rather than reconstructing guessed text.
+
 ## Steering a running Codex turn
 
 `CodexDriver.steer(content, { clientId, expectedTurnId? })` explicitly adds input to the active native turn through

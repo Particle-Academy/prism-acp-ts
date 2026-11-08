@@ -326,6 +326,8 @@ export interface TurnOutcome {
   readonly raw: string | null;
   /** Why a failed turn failed, when the provider said (tynn #791). Absent on a turn that completed. */
   readonly failure?: TurnFailure;
+  /** Native operation refusal, separate from provider turn failures. */
+  readonly commandFailure?: { readonly code: 'command_unsupported'; readonly reason: import('../codex/commands.js').CommandRefusal };
 }
 
 /**
@@ -467,7 +469,7 @@ export class ClaudeDriver {
   readonly #options: ClaudeDriverOptions;
   readonly #events: ClaudeDriverEvents;
   readonly #framer = new NdjsonFramer();
-  readonly #mapper = new ClaudeToAcp();
+  readonly #mapper: ClaudeToAcp;
   #child: ChildProcess | null = null;
   #io: ProviderIo | ChildProcess | null = null;
   #provider: ProviderProcess | null = null;
@@ -544,6 +546,7 @@ export class ClaudeDriver {
     if (options.processTree?.windowsStdio === 'local-pipes' && ((!restricted && this.#mcpServers.length > 0) || options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0)) {
       throw new ProcessTreeError('LOCAL transport does not support generated Claude MCP configuration or permission hooks');
     }
+    this.#mapper = new ClaudeToAcp(this.#options.cwd);
     this.#events = events;
   }
 

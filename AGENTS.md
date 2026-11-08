@@ -100,7 +100,7 @@ Build the child's environment and leave `process.env` alone. An adapter that
 every other consumer, wearing the disguise of tidying up.
 
 **Pinned framing values are identical in every port, or they are a bug.** A
-trailing `\r` is stripped rather than tolerated; `MAX_LINE_BYTES` is 1,000,000
+trailing `\r` is stripped rather than tolerated; `MAX_LINE_BYTES` is 64,000,000
 everywhere; a framing error reports size and never content. A cap that differs
 per language means one implementation dies where another succeeds on the same
 stream.
@@ -114,9 +114,10 @@ signature — dropping it must be a written choice, not the silent consequence o
 an exhaustive switch nobody noticed was lossy.
 
 **`null` means "cannot see"; `[]` means "none".** Not interchangeable.
-Collapsing them is the bug. Codex exposes no slash-command list at all, so
-`available_commands_update` reports `null` — reporting `[]` would assert that
-the agent offers no commands, which is a different and false claim. The
+Collapsing them is the bug. Codex exposes no complete slash-command list. On
+measured CLI 0.167.0, `available_commands_update` offers only native compact/review
+operations, marked as an incomplete catalog in namespaced metadata. Unmeasured
+CLI versions report `null`; they must not inherit a guessed TUI catalog. The
 corollary: never render a dash for an unknown number, because a dash reads as
 zero.
 

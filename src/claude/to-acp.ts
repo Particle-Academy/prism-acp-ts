@@ -31,6 +31,8 @@ import {
   META_BACKGROUND_TASKS,
   META_CLI_SESSION_ID,
   META_COMMAND_SOURCE,
+  META_FILE_EDITS,
+  projectBudgetedToolMeta,
   META_MODEL,
   META_PERMISSION_DENIED,
   META_PLUGINS,
@@ -50,6 +52,7 @@ import {
 import { claudeMcpServers } from '../mcp-status.js';
 import { stripAnsiControlSequences } from '../text.js';
 import { rateLimitNotice, readRateLimit } from './rate-limit.js';
+import { claudeFileEdits, FileEditRefused } from '../edits.js';
 
 /** An ACP `session/update` payload: the `update` object, without the sessionId. */
 export type AcpUpdate = Record<string, unknown> & { readonly sessionUpdate: string };
@@ -92,6 +95,11 @@ interface BlockState {
 }
 
 export class ClaudeToAcp {
+  readonly #cwd: string | undefined;
+
+  /** A known workspace enables file-relative normalisation; the legacy standalone mapper needs no root. */
+  constructor(cwd?: string) { this.#cwd = cwd; }
+
   /** Live content blocks, keyed by the index the CLI assigns them. */
   readonly #blocks = new Map<number, BlockState>();
 
@@ -356,7 +364,20 @@ export class ClaudeToAcp {
     // _meta. Only when they parse: handing a client a half-written string under
     // a field named rawInput would be worse than omitting it.
     const parsed = tryParse(state.rawInputJson);
-    return [parsed === undefined ? update : { ...update, rawInput: parsed }];
+    if (parsed === undefined) return [update];
+    const mapped = { ...update, rawInput: parsed };
+    if (this.#cwd === undefined) return [mapped];
+    try {
+      const edits = claudeFileEdits(state.name, parsed, this.#cwd);
+      if (edits === undefined) return [mapped];
+      const projection = projectBudgetedToolMeta(mapped, mapped, { [META_FILE_EDITS]: edits }, { fields: ['file_edits'] });
+      return projection.notice === undefined ? [projection.update] : [projection.update, projection.notice];
+    } catch (cause) {
+      if (!(cause instanceof FileEditRefused)) throw cause;
+      return [mapped, { sessionUpdate: 'notice', notice: {
+        level: 'warning', message: 'The native edit remains in rawInput; a workspace diff could not be represented.',
+      } }];
+    }
   }
 
   #userFrame(input: Record<string, unknown>): AcpUpdate[] {

@@ -19,6 +19,12 @@ import {
   META_STEER,
   META_ACTIVE_TURN,
   META_MODEL,
+  META_COMMAND_SOURCE,
+  META_COMMAND_CATALOG,
+  META_NATIVE_METHOD,
+  META_NATIVE_ITEM,
+  META_NATIVE_ITEM_TYPE,
+  META_FILE_EDITS,
   assertModel,
   META_EXEC_POLICY_AMENDMENT,
   META_MCP_SERVERS,
@@ -28,8 +34,11 @@ import {
   META_UNMAPPED_FRAME,
   META_USAGE,
   withMeta,
+  projectBudgetedToolMeta,
 } from '../meta.js';
 import { codexListedReport, codexStartupReport, type McpServerReport } from '../mcp-status.js';
+import { codexFileEdits, FileEditRefused, type FileEdit } from '../edits.js';
+import { codexCommand, commandsMeasured, CommandUnsupported, type CodexCommand } from './commands.js';
 import type {
   AgentDriver,
   DriverEvents,
@@ -246,6 +255,7 @@ export class CodexDriver implements AgentDriver {
   #imageSequence = 0;
   #activeTurn: string | null = null;
   #turnInFlight = false;
+  #turnGeneration = 0;
   #turnDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
   #turnDeadlineExpiresAt = 0;
   #turnDeadlineRemainingMs = 0;
@@ -261,6 +271,7 @@ export class CodexDriver implements AgentDriver {
   #cancellingTurn: string | null = null;
   #cliVersion: string | null = null;
   #steerMethodMissing = false;
+  readonly #missingCommands = new Set<CodexCommand>();
   readonly #steers: SteerLedger;
 
   withheldCredentials: readonly string[] = [];
@@ -346,17 +357,91 @@ export class CodexDriver implements AgentDriver {
 
   /** Send a user turn: text, or content blocks. A block it cannot send refuses the whole turn, naming it. */
   prompt(content: PromptContent): void {
+    // A slash request is an operation, never a prompt that merely asks the model to emulate one.
+    const commandBlocks = typeof content === 'string' ? [{ type: 'text', text: content }] : content;
+    const first = commandBlocks.find(block => block.type === 'text' && block.text.trim().length > 0);
+    if (first?.type === 'text' && first.text.trimStart().startsWith('/')) {
+      const value = commandBlocks.map(block => block.type === 'text' ? block.text : '').join('\n').trim();
+      const match = /^\/(compact|review)\s*$/.exec(value);
+      if (match === null) throw new CommandUnsupported(/^\/[^\s]+\s+\S/.test(value) ? 'invalid_arguments' : 'unknown_command');
+      if (commandBlocks.some(block => block.type !== 'text')) throw new CommandUnsupported('invalid_arguments');
+      const command = this.#prepareCommand(match[1]);
+      void this.#sendCommand(command).catch(() => { /* The turn outcome is emitted by #sendCommand. */ });
+      return;
+    }
     if (!this.#started || this.#closed) throw new Error('driver is not started, or has exited');
     if (this.#turnInFlight || this.#queuedPrompt !== null) throw new Error('Codex turn already in flight');
     // Checked before anything changes: a refused prompt starts no turn and leaves the session promptable.
     const blocks = promptBlocks(content, CODEX_DRIVER_CAPABILITIES.promptBlocks);
     const input = this.#inputItems(blocks);
     this.#turnInFlight = true;
+    this.#turnGeneration++;
     if (this.#peer === null || this.#threadId === null || (this.#options.nativeTools === 'none' && !this.#restrictedReady)) {
       this.#queuedPrompt = input;
       return;
     }
     this.#startTurn(input);
+  }
+
+  /** Resolves on native acceptance; completion/cancellation still arrives through onTurnEnd. No arguments are supported. */
+  async runCommand(name: string): Promise<void> {
+    const command = this.#prepareCommand(name);
+    await this.#sendCommand(command);
+  }
+
+  #prepareCommand(name: unknown): { command: CodexCommand; generation: number } {
+    const command = codexCommand(name);
+    if (this.#closed) throw new CommandUnsupported('session_closed');
+    if (!this.#started || !this.#restrictedReady || this.#threadId === null || this.#peer === null) throw new CommandUnsupported('not_ready');
+    if (this.#options.nativeTools === 'none') throw new CommandUnsupported('native_tools_restricted');
+    if (!commandsMeasured(this.#cliVersion)) throw new CommandUnsupported('unmeasured_cli');
+    if (this.#missingCommands.has(command)) throw new CommandUnsupported('native_method_missing');
+    if (this.#turnInFlight || this.#queuedPrompt !== null) throw new CommandUnsupported('busy');
+    this.#turnInFlight = true;
+    this.#beginTurnDeadline();
+    return { command, generation: ++this.#turnGeneration };
+  }
+
+  async #sendCommand({ command, generation }: { command: CodexCommand; generation: number }): Promise<void> {
+    try {
+      const reply = await this.#requirePeer().request(command === 'compact' ? 'thread/compact/start' : 'review/start', {
+        threadId: this.#threadId,
+        ...(command === 'review' ? { target: { type: 'uncommittedChanges' }, delivery: 'inline' } : {}),
+      }, { timeoutMs: 30_000 });
+      if (generation !== this.#turnGeneration || this.#closed) return;
+      if (command === 'compact' && (asObject(reply) === undefined || Object.keys(reply as object).length !== 0)) {
+        throw new Error('invalid native command acknowledgement');
+      }
+      if (command === 'review') {
+        const object = asObject(reply), id = asString(asObject(object?.turn)?.id);
+        if (object?.reviewThreadId !== this.#threadId || !safeNativeId(id)) throw new Error('invalid native command acknowledgement');
+        if (!this.#closed && !this.#completedTurns.has(id)) {
+          this.#activeTurn = id;
+          this.#publishActiveTurn();
+          this.#sendPendingCancel(id);
+        }
+      }
+    } catch (cause) {
+      const rejected = cause instanceof RpcError;
+      const missing = rejected && (cause.code === -32601 || cause.code === -32600 && /unknown (?:variant|method)|method not found/i.test(cause.message));
+      if (generation !== this.#turnGeneration || this.#closed) throw new CommandUnsupported(missing ? 'native_method_missing' : 'native_refused');
+      if (missing) this.#missingCommands.add(command);
+      // A lost/malformed acknowledgement cannot prove that execution never began. Close before another operation.
+      if (!missing) this.#shutdown('SIGTERM');
+      const reason = missing ? 'native_method_missing' : 'native_refused';
+      this.#finishTurn({ stopReason: null, isError: true, raw: 'command_unsupported', commandFailure: { code: 'command_unsupported', reason } });
+      if (missing) this.#publishCommands();
+      throw new CommandUnsupported(reason);
+    }
+  }
+
+  #publishCommands(): void {
+    const supported = this.#options.nativeTools !== 'none' && commandsMeasured(this.#cliVersion);
+    this.#emit(withMeta({ sessionUpdate: 'available_commands_update', availableCommands: supported
+      ? (['compact', 'review'] as const).filter(name => !this.#missingCommands.has(name)).map(name => ({
+        name, description: name === 'compact' ? 'Compact this thread' : 'Review uncommitted changes',
+        _meta: { [META_COMMAND_SOURCE]: 'command', [META_NATIVE_METHOD]: name === 'compact' ? 'thread/compact/start' : 'review/start' },
+      })) : null }, { [META_COMMAND_CATALOG]: { source: 'native_operations', complete: false, cliVersion: this.#cliVersion } }));
   }
 
   /** The runtime gate is separate from nativeTools:'none', whose exact measured matrix is unchanged. */
@@ -704,6 +789,7 @@ export class CodexDriver implements AgentDriver {
     await this.#readInitialRateLimit();
     if (this.#closed) return;
     this.#restrictedReady = true;
+    this.#publishCommands();
     this.#publishActiveTurn();
     const queued = this.#queuedPrompt;
     this.#queuedPrompt = null;
@@ -1196,6 +1282,20 @@ export class CodexDriver implements AgentDriver {
     const emit = (update: AcpUpdate) => this.#emit(replay ? withMeta(update, { [META_REPLAY]: true }) : update);
     const diagnostic = (reason: string, frame: unknown) => this.#recordUnmapped(reason, frame, replayState);
     const type = asString(item.type) ?? 'unknown';
+    const emitTool = (update: AcpUpdate, edits?: readonly FileEdit[]): void => {
+      // Separate snapshots also keep application callbacks from mutating retained native items.
+      let projected: { update: AcpUpdate; notice?: AcpUpdate };
+      try {
+        const legacy = structuredClone(update);
+        delete legacy.name; // This name is additive in 0.39; all 0.38 tool fields keep their original order and values.
+        const required = withMeta({ ...legacy, ...(Object.hasOwn(update, 'name') ? { name: update.name } : {}) }, { [META_NATIVE_ITEM_TYPE]: type });
+        projected = projectBudgetedToolMeta(legacy, required, { [META_NATIVE_ITEM]: structuredClone(item),
+          ...(edits === undefined ? {} : { [META_FILE_EDITS]: edits }) });
+      }
+      catch (cause) { if (cause instanceof DOMException && cause.name === 'DataCloneError') { diagnostic('Codex tool item could not be copied', { type }); return; } throw cause; }
+      emit(projected.update);
+      if (projected.notice !== undefined) emit(projected.notice);
+    };
     const id = asString(item.id) ?? asString(item.itemId) ?? `codex-${type}-${++this.#itemSequence}`;
     const finished = completed || replay;
     const toolUpdate = completed && !replay ? 'tool_call_update' : 'tool_call';
@@ -1257,9 +1357,10 @@ export class CodexDriver implements AgentDriver {
       const command = asString(item.command) ?? '';
       const output = asString(item.aggregatedOutput) ?? (!replay ? this.#commandOutputs.get(id)?.text : undefined);
       if (finished && !replay) this.#clearCommandOutput(id);
-      emit({
+      emitTool({
         sessionUpdate: toolUpdate,
         toolCallId: id,
+        name: 'shell',
         title: command.length === 0 ? 'Run command' : stripAnsiControlSequences(command).text,
         kind: 'execute',
         status: finished ? statusOf(item.status, item.exitCode) : 'in_progress',
@@ -1278,19 +1379,27 @@ export class CodexDriver implements AgentDriver {
       if (!finished) this.#items.set(id, item);
       const changes = item.changes ?? item.fileChanges ?? item.patch;
       if (changes === undefined) diagnostic('Codex file-change item omitted changes', item);
-      emit({
+      let edits: readonly FileEdit[] | undefined;
+      if (changes !== undefined) {
+        try { edits = codexFileEdits(changes, this.#options.cwd); }
+        catch (cause) { if (!(cause instanceof FileEditRefused)) throw cause; diagnostic('Codex file changes could not be represented as workspace diffs', { type, itemId: id }); }
+      }
+      emitTool({
         sessionUpdate: toolUpdate,
         toolCallId: id,
+        name: 'edit',
         title: 'Apply file changes',
         kind: 'edit',
         status: finished ? statusOf(item.status) : 'in_progress',
         ...(changes === undefined ? {} : { rawInput: changes }),
-      });
+      }, edits);
       if (completed) this.#items.delete(id);
       return;
     }
 
     if (type === 'mcpToolCall' || type === 'dynamicToolCall') {
+      const tool = asString(item.tool) ?? asString(item.name), server = asString(item.server);
+      const name = type === 'mcpToolCall' ? server && tool ? server + '.' + tool : undefined : tool || undefined;
       const output = type === 'mcpToolCall'
         ? item.result ?? item.error
         : { contentItems: item.contentItems ?? null, success: item.success ?? null };
@@ -1308,9 +1417,10 @@ export class CodexDriver implements AgentDriver {
       }) : [];
       const errorMessage = asString(asObject(item.error)?.message);
       if (errorMessage !== undefined) text.push(...textToolContent(errorMessage));
-      emit({
+      emitTool({
         sessionUpdate: toolUpdate,
         toolCallId: id,
+        ...(name === undefined ? {} : { name }),
         title: stripAnsiControlSequences(asString(item.tool) ?? asString(item.name) ?? 'Tool call').text,
         status: finished ? (item.success === false || item.error != null ? 'failed' : statusOf(item.status)) : 'in_progress',
         ...(item.arguments === undefined ? {} : { rawInput: item.arguments }),

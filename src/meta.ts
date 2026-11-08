@@ -54,6 +54,8 @@
  * Domain-shaped, following the convention the spec's own examples use, so a key
  * of ours can never collide with a key of theirs or a future protocol field.
  */
+import { MAX_LINE_BYTES } from './ndjson.js';
+
 export const META_NS = 'particle.academy';
 
 /**
@@ -166,6 +168,87 @@ export const META_MODEL = metaKey('model');
  * a client runs either by sending `/<name>` as the prompt.
  */
 export const META_COMMAND_SOURCE = metaKey('command_source');
+
+/** The measured native item discriminator, without translating it into a tool label. */
+export const META_NATIVE_ITEM_TYPE = metaKey('native_item_type');
+/** A detached snapshot of the native tool item, including its original file-change shape. */
+export const META_NATIVE_ITEM = metaKey('native_item');
+/** Normalised FileEdit[]; textScope distinguishes whole-file text from replacement fragments. */
+export const META_FILE_EDITS = metaKey('file_edits');
+/** Native app-server method behind an advertised command. */
+export const META_NATIVE_METHOD = metaKey('native_method');
+/** Known native-backed operations are a partial view, not the CLI's complete slash-command catalog. */
+export const META_COMMAND_CATALOG = metaKey('command_catalog');
+/** Additive payload omitted whole for framing, never an empty edit list or truncated native shape. */
+export const META_OMITTED = metaKey('omitted');
+
+export interface InlineMetadataOmission {
+  readonly native_item?: 'frame_budget';
+  readonly file_edits?: 'frame_budget';
+  /** UTF-8 bytes of the encoded update before omission, excluding its surrounding ACP envelope. */
+  readonly frameBytes: number;
+}
+
+export interface ToolDescriptionOmission {
+  /** Null only for a missing or unbounded malformed native identifier; never echo unbounded data in a notice. */
+  readonly toolCallId: string | null;
+  readonly fields: readonly ('name' | 'native_type' | 'native_item' | 'file_edits')[];
+  readonly reason: 'frame_budget';
+  readonly frameBytes: number;
+}
+
+export type MetadataOmission = InlineMetadataOmission | ToolDescriptionOmission;
+
+/** Reserve space for the enclosing ACP notification, session ID, replay provenance and the omission marker. */
+const TOOL_METADATA_MARGIN_BYTES = 4096;
+
+/** Internal projection helper: never removes an existing field. Only complete additive payloads may be omitted. */
+export function withBudgetedToolMeta<T extends Record<string, unknown>>(
+  base: T,
+  additions: Readonly<Record<string, unknown>>,
+  budget = MAX_LINE_BYTES - TOOL_METADATA_MARGIN_BYTES,
+): T & { _meta: Record<string, unknown> } {
+  const extra = { ...additions };
+  const full = withMeta(base, extra);
+  const frameBytes = Buffer.byteLength(JSON.stringify(full), 'utf8');
+  if (frameBytes <= budget) return full;
+  const omitted: { native_item?: 'frame_budget'; file_edits?: 'frame_budget'; frameBytes: number } = { frameBytes };
+  const project = () => withMeta(base, { ...extra, [META_OMITTED]: { ...omitted } });
+  if (Object.hasOwn(extra, META_NATIVE_ITEM)) {
+    delete extra[META_NATIVE_ITEM]; omitted.native_item = 'frame_budget';
+    const reduced = project();
+    if (Buffer.byteLength(JSON.stringify(reduced), 'utf8') <= budget) return reduced;
+  }
+  if (Object.hasOwn(extra, META_FILE_EDITS)) {
+    delete extra[META_FILE_EDITS]; omitted.file_edits = 'frame_budget';
+  }
+  // A base frame which already fills its budget is never repaired by deleting legacy fields.
+  return project();
+}
+
+/** Keep the exact legacy row at the cap edge; explain missing description on the existing notice channel. */
+export function projectBudgetedToolMeta<T extends Record<string, unknown>>(
+  legacy: T,
+  required: T,
+  additions: Readonly<Record<string, unknown>>,
+  options: { readonly budgetBytes?: number; readonly capBytes?: number; readonly fields?: ToolDescriptionOmission['fields'] } = {},
+): { update: T; notice?: { sessionUpdate: 'notice'; notice: { level: 'debug'; message: string }; _meta: Record<string, unknown> } } {
+  const budget = options.budgetBytes ?? MAX_LINE_BYTES - TOOL_METADATA_MARGIN_BYTES;
+  const cap = options.capBytes ?? MAX_LINE_BYTES;
+  // Preserve the old frame, including its old rejection at the receiving framer. No new payload or notice repairs it.
+  if (Buffer.byteLength(JSON.stringify(legacy), 'utf8') > cap) return { update: legacy };
+  const update = withBudgetedToolMeta(required, additions, budget);
+  const frameBytes = Buffer.byteLength(JSON.stringify(update), 'utf8');
+  if (frameBytes <= budget) return { update };
+  const id = legacy.toolCallId;
+  const omitted: ToolDescriptionOmission = {
+    toolCallId: typeof id === 'string' && id.length <= 200 ? id : null,
+    fields: options.fields ?? ['name', 'native_type', 'native_item', 'file_edits'],
+    reason: 'frame_budget', frameBytes,
+  };
+  return { update: legacy, notice: withMeta({ sessionUpdate: 'notice' as const,
+    notice: { level: 'debug' as const, message: 'Tool description unavailable: frame budget exceeded.' } }, { [META_OMITTED]: omitted }) };
+}
 
 /**
  * The plugins the agent loaded, on the `available_commands_update` from Claude's `init`:

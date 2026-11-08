@@ -30,6 +30,7 @@ import type { SessionModelState } from '../models.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
 import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
 import { PromptRefused, promptBlockKind, promptBlocks, type PromptBlockKind, type PromptContent } from '../prompt.js';
+import { CommandUnsupported } from '../codex/commands.js';
 import { SteerInputError, SteerUnsupported, safeNativeId, validSteerId, type SteerAcceptance, type SteerOptions, type SteerState, type SteerUpdate, type SteeringState } from '../steer.js';
 
 /** The protocol version this agent speaks. */
@@ -53,6 +54,8 @@ export interface AgentDriver {
    * {@link PromptRefused} for a block it cannot send, and the client is told which.
    */
   prompt(content: PromptContent): void;
+  /** Native operation acceptance; completion still arrives through onTurnEnd. Codex supports compact/review on its measured CLI. */
+  runCommand?(name: string): Promise<void>;
   steer?(content: PromptContent, options: SteerOptions): Promise<SteerAcceptance>;
   readonly steeringState?: SteeringState;
   steerState?(steerId: string): SteerState;
@@ -584,6 +587,7 @@ export class AcpAgent {
     const content = this.#promptContent(object?.prompt);
 
     let refused: PromptRefused | null = null;
+    let commandRefused: CommandUnsupported | null = null;
     const outcome = await new Promise<TurnOutcome>((resolve) => {
       session.turn = { settle: resolve, cancelled: false };
       try {
@@ -591,11 +595,14 @@ export class AcpAgent {
       } catch (cause) {
         session.turn = null;
         if (cause instanceof PromptRefused) refused = cause;
+        if (cause instanceof CommandUnsupported) commandRefused = cause;
         resolve({ stopReason: null, isError: true, raw: messageOf(cause) });
       }
     });
     // A block the driver would not send is the client's request to fix, not a turn that failed.
     if (refused !== null) throw new RpcError(RPC_INVALID_PARAMS, (refused as PromptRefused).message);
+    if (commandRefused !== null) throw new RpcError(RPC_INVALID_PARAMS, 'command_unsupported', { code: 'command_unsupported', reason: (commandRefused as CommandUnsupported).reason });
+    if (outcome.commandFailure !== undefined) throw new RpcError(RPC_INVALID_PARAMS, 'command_unsupported', outcome.commandFailure);
 
     // ACP's five stop reasons all describe a turn that FINISHED. None of them
     // describes a crash, so a failed turn is reported as an ERROR rather than
