@@ -17,7 +17,8 @@ for (const [index, arch] of ['x64', 'arm64'].entries()) {
   assert.equal(image.bodyBytes, manifest.binaries[arch].bytes);
   assert.equal(row.rawBefore, manifest.binaries[arch].sha256);
   assert.equal(createHash('sha256').update(bytes).digest('hex'), row.rawAfter); assert.notEqual(row.rawAfter, row.rawBefore);
-  assert.equal(row.signature, 'Authenticode'); assert.equal(row.chain, 'NotTrusted');
+  assert.equal(row.signature, 'Authenticode'); assert.equal(row.chain, 'UntrustedRoot');
+  assert.equal(row.cmsSignatureVerified, true); assert.equal(row.cmsContentSha256, image.sha256);
 }
 assert(!fs.existsSync(path.join(directory, 'disposable-key.pfx')));
 console.log(JSON.stringify({ signedSupervisorImageOracle: 'PASS', architectures: ['x64', 'arm64'], independentWindowsSip: true, genuineSignatures: true, trustedPublisherAcceptance: 'UNMEASURED' }));

@@ -214,6 +214,7 @@ jobs:
           PRISM_ACP_SIGNED_SUPERVISOR_ROOT: ${{ runner.temp }}/g255-signed-images
         run: npx vitest run test/signed-supervisor.test.ts
       - name: Preserve signed images and independent digest receipts, never keys
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-signed-supervisor-oracle

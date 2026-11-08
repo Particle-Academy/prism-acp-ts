@@ -84,11 +84,15 @@ describe('shipped supervisor selection and immutable image pins', () => {
   it('refuses a directory supplied as an executable', async () => {
     const api = await load(); expect(() => api.prepareWindowsSupervisor(directory)).toThrow(/regular file/);
   });
-  it('snapshots the public executable option before its asynchronous yield', async () => {
+  it.runIf(process.platform === 'win32')('snapshots the public executable option before its asynchronous yield', async () => {
     const api = await load(), file = join(directory, 'host-snapshot.exe'); fs.copyFileSync(api.packagedSupervisorPath('x64'), file);
     const { prepareProcessTree, windowsApprovalAdapter } = await import('../src/process-tree.js');
     const options = { executable: file }, pending = prepareProcessTree(options); options.executable = 'relative-and-refused.exe';
     await expect(pending).resolves.toBeUndefined(); expect(windowsApprovalAdapter()).toBe(file);
+  });
+  it.runIf(process.platform !== 'win32')('keeps public preparation a no-op on POSIX without reading a Windows executable', async () => {
+    const { prepareProcessTree } = await import('../src/process-tree.js');
+    await expect(prepareProcessTree({ executable: 'relative-and-not-installed.exe' })).resolves.toBeUndefined();
   });
   it('does not guess unsupported architectures', async () => {
     const api = await load(); system.machine = 'unknown'; expect(() => api.resolveWindowsSupervisor()).toThrow(/requires x64/);
