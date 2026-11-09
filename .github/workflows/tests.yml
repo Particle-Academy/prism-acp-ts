@@ -140,7 +140,7 @@ jobs:
 
   supervisor-shipped:
     name: Shipped supervisor, ${{ matrix.arch }}
-    needs: [third-party, native-supervisor-build]
+    needs: [third-party, native-supervisor-build, supervisor-signed]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions:
@@ -165,8 +165,18 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      - name: Fetch this run's independently verified signed public images
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-signed-supervisor-oracle
+          path: ${{ runner.temp }}/g255-signed-images
+      - name: Verify both downloaded images against the package pins
+        shell: pwsh
+        run: node tools/supervisor-native/verify-signed.mjs "$env:RUNNER_TEMP/g255-signed-images"
       - name: Native shipped image and containment boundaries
-        run: npx vitest run test/authenticode.test.ts test/windows-supervisor.test.ts test/process-tree-supervisor.test.ts test/process-tree.test.ts test/process-tree-options.test.ts test/private-directory.test.ts test/claude-approval-adapter.test.ts test/stop-verdict-observer.test.ts test/uncertain-cancel-tree.test.ts
+        run: npx vitest run test/authenticode.test.ts test/windows-supervisor.test.ts test/process-tree-supervisor.test.ts test/process-tree.test.ts test/process-tree-options.test.ts test/private-directory.test.ts test/claude-approval-adapter.test.ts test/stop-verdict-observer.test.ts test/uncertain-cancel-tree.test.ts test/signed-supervisor.test.ts
+        env:
+          PRISM_ACP_SIGNED_SUPERVISOR_ROOT: ${{ runner.temp }}/g255-signed-images
       - name: Twenty batches of eight independent processes, with no compiler or executable writes
         shell: pwsh
         env:
