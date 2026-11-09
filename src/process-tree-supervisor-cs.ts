@@ -1,6 +1,6 @@
 /**
- * The Windows process-tree supervisor, as C# source. It is compiled once per process with the csc.exe that ships with
- * .NET Framework 4.8 (part of every supported Windows 10 and 11), so this package carries no binary and no dependency.
+ * The Windows process-tree supervisor, as C# source. CI reproducibly builds the shipped x64 and ARM64 images with
+ * the pinned .NET SDK; runtime verifies the shipped or explicitly supplied image and never invokes a compiler.
  * See process-tree.ts for the protocol and why it exists.
  */
 export const SUPERVISOR_CS = String.raw`// prism-acp process-tree supervisor (Windows). Runs ONE provider inside a Job Object and ends the whole tree with it.

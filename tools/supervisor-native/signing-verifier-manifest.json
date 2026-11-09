@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {
+      "file": "dist/authenticode.js",
+      "mode": "lf",
+      "sha256": "4a85e5b235bd9f8dabf8bb1a8a225cf2bb21fff40200d888f5d79d1434f5cf58"
+    },
+    {
+      "file": "native/supervisor-manifest.json",
+      "mode": "raw",
+      "sha256": "2bb6e13c936a0210e0aa1be29a51bb1989e0238382d577709103cead78ea2e70"
+    },
+    {
+      "file": "package.json",
+      "mode": "lf",
+      "sha256": "fb493ca59a70d360e7fb9e5d0507662b2a5e152d9dc4dc1f4a3ad2a6b6fadf17"
+    },
+    {
+      "file": "tools/supervisor-native/publisher-signature.ps1",
+      "mode": "lf",
+      "sha256": "9589a2e6a5b4e99f16ec61c0d5c5c494b1a34bbf780ba78a97ab293f5abd84ff"
+    },
+    {
+      "file": "tools/supervisor-native/release-payload.mjs",
+      "mode": "lf",
+      "sha256": "3e7d739ee6c2bb947f19857299c07b1ffb2b38650162efe25eed549984bd5f70"
+    },
+    {
+      "file": "tools/supervisor-native/signing-policy.mjs",
+      "mode": "lf",
+      "sha256": "403bb859205520003a25ca619c9b6f1b20abd8162db5749d54a1fc84fc85df66"
+    }
+  ]
+}

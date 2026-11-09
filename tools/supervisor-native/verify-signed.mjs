@@ -3,6 +3,7 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { authenticodeImage } from '../../dist/authenticode.js';
+import { verifyImage } from './release-payload.mjs';
 const directory = process.argv[2];
 assert(directory && path.isAbsolute(directory));
 const receipt = JSON.parse(fs.readFileSync(path.join(directory, 'signed-image-receipt.json'), 'utf8'));
@@ -19,6 +20,11 @@ for (const [index, arch] of ['x64', 'arm64'].entries()) {
   assert.equal(createHash('sha256').update(bytes).digest('hex'), row.rawAfter); assert.notEqual(row.rawAfter, row.rawBefore);
   assert.equal(row.signature, 'Authenticode'); assert.equal(row.chain, 'UntrustedRoot');
   assert.equal(row.cmsSignatureVerified, true); assert.equal(row.cmsContentSha256, image.sha256);
+  // Real signed files, not a synthetic certificate-table fixture: signature
+  // changes preserve the pin, while an executable-body mutation must refuse.
+  verifyImage(bytes, arch, manifest.binaries[arch], true);
+  const modified = Buffer.from(bytes); modified[image.bodyBytes - 1] ^= 1;
+  assert.throws(() => verifyImage(modified, arch, manifest.binaries[arch], true), /Reviewed image digest required/);
 }
 assert(!fs.existsSync(path.join(directory, 'disposable-key.pfx')));
 console.log(JSON.stringify({ signedSupervisorImageOracle: 'PASS', architectures: ['x64', 'arm64'], independentWindowsSip: true, genuineSignatures: true, trustedPublisherAcceptance: 'UNMEASURED' }));
