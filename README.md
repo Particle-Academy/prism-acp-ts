@@ -296,13 +296,33 @@ by this suite. `system/init` arrives after the first user prompt on 2.1.310, so 
 Inside Electron, the hook runs the app executable with `ELECTRON_RUN_AS_NODE=1` for that hook only. The script removes
 the flag before its worker or any child starts; the POSIX supervisor also removes its injected flag before starting
 a provider. Hook paths are passed as arguments rather than interpolated into shell commands. Windows uses an approval
-mode in the existing native C# supervisor; POSIX uses `/bin/sh`. The Windows adapter is built once and hash-checked
-at driver startup, before Claude starts. Missing, quarantined or unverified binaries that cannot be rebuilt and verified
-refuse startup. The existing .NET Framework compiler requirement applies; there is no interpreter fallback. Its byte
+mode in the shipped native C# supervisor; POSIX uses `/bin/sh`. Windows x64 and ARM64 executables are built
+reproducibly in CI and verified against pinned Authenticode image digests before every use. There is no runtime
+compiler, executable cache or interpreter fallback. Missing, quarantined or altered executables refuse startup. Its byte
 handles preserve JSON output, and a per-call Job Object ends helper descendants when the adapter exits. If an Electron
 build disables Node mode, the call denies. An app can supply
 `permissionPrompts.nodePath` as a trusted absolute ordinary Node executable instead. This option belongs to app
 configuration and must never come from model or ACP client input.
+
+Windows x64 requires Windows 10/11 with the installed CLR4. Native ARM64 requires Windows 11 with .NET Framework
+4.8.1 (included in Windows 11 22H2 and later); Windows 10 ARM64 is refused before a provider starts. The package
+selects the physical machine architecture and does not fall back to an emulated supervisor.
+
+Electron hosts can unpack and sign the executable as part of their own distribution:
+
+```ts
+import { prepareProcessTree, supervisorPath } from '@particle-academy/prism-acp';
+
+const packagedExecutable = supervisorPath('x64'); // Also accepts 'arm64' when staging a distribution.
+// Copy packagedExecutable to your unpacked assets and sign that copy in your distribution pipeline.
+await prepareProcessTree({ executable: absoluteUnpackedExecutable });
+```
+
+`executable` is trusted host configuration, never model or ACP client input. The selected file is checked on each use.
+Authenticode signing can change the certificate table and checksum while preserving the pinned program image;
+the image check does not validate a certificate chain or grant publisher trust. Files inside an `.asar` archive must be
+unpacked first. The old `directory` option remains accepted and ignored, with one
+`PRISM_ACP_SUPERVISOR_DIRECTORY_DEPRECATED` warning directing hosts to `executable`.
 
 `permissionPrompts.timeoutSeconds` sets the approval deadline (integer 1–86400, default 86400). The hook denies before
 the native hook timeout. The permission hook is an application approval mechanism; it is not OS isolation.

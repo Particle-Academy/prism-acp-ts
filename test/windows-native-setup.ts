@@ -20,8 +20,8 @@ export default async function setup(): Promise<void> {
     return milliseconds;
   };
 
-  // The production preparation uses synchronous csc. Bound that command as well as the ACL probe;
-  // a timer alone cannot interrupt execFileSync. Restore builtins before any test worker starts.
+  // Bound the synchronous ACL probe; a timer alone cannot interrupt execFileSync.
+  // Supervisor preparation only verifies shipped bytes. Restore builtins before any worker starts.
   childProcess.execFileSync = ((command: string, args: readonly string[], options: any = {}) =>
     original(command, args, { ...options, timeout: Math.min(options.timeout || remaining(), remaining()) })) as typeof original;
   syncBuiltinESMExports();

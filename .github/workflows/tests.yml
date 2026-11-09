@@ -9,6 +9,54 @@ permissions:
   contents: read
 
 jobs:
+  # CI is the only producer. Rebuild both architectures in two isolated roots,
+  # then compare both with the reviewed bytes shipped in this exact checkout.
+  native-supervisor-build:
+    name: Deterministic Windows supervisor candidates
+    needs: third-party
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+      DOTNET_NOLOGO: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5, exact reviewed action
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/g255-dotnet-sdk
+        with:
+          dotnet-version: 10.0.403
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Build identical source in two isolated roots
+        shell: pwsh
+        run: |
+          $candidateRoot = Join-Path $env:RUNNER_TEMP 'g255-candidates'
+          if (Test-Path -LiteralPath $candidateRoot) { throw 'Refuse to replace prior native candidates' }
+          [System.IO.Directory]::CreateDirectory($candidateRoot) | Out-Null
+          node tools/supervisor-native/build.mjs "$candidateRoot/first"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/supervisor-native/build.mjs "$candidateRoot/second"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/supervisor-native/compare.mjs "$candidateRoot/first" "$candidateRoot/second" "${{ github.workspace }}/native"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve source-bound CI candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-supervisor-candidates
+          path: ${{ runner.temp }}/g255-candidates/
+          if-no-files-found: error
+
   test:
     name: node ${{ matrix.node }}
     runs-on: ubuntu-latest
@@ -37,7 +85,7 @@ jobs:
       - run: npm run build
       - run: npx vitest run
 
-  # Windows has its own containment (a Job Object, a csc-built supervisor), its own command resolution (npm shims, no
+  # Windows has its own containment (a Job Object, a shipped supervisor), its own command resolution (npm shims, no
   # shell) and its own quoting, and none of it runs on Linux. It is verified here, never on a developer's desktop:
   # 0.21.0 shipped passing --settings and --mcp-config paths wrapped in quotes that only a Windows run could see.
   windows:
@@ -62,7 +110,7 @@ jobs:
           PRISM_ACP_APPCONTAINER: '1'
 
   supervisor-cold-cache:
-    name: Windows supervisor, parallel cold installs
+    name: Historical Windows compiler-cache regression
     runs-on: windows-latest
     needs: third-party
     timeout-minutes: 10
@@ -75,7 +123,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - name: Released producer must fail; current producer must pass the same 20x8 oracle
+      - name: Released 0.31 must fail; immutable 0.40 must pass the same 20x8 oracle
         run: |
           node --test scripts/supervisor-cold-evidence.check.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -88,6 +136,102 @@ jobs:
           name: windows-supervisor-cold-cache
           path: .cold-cache-evidence/
           include-hidden-files: true
+          if-no-files-found: error
+
+  supervisor-shipped:
+    name: Shipped supervisor, ${{ matrix.arch }}
+    needs: [third-party, native-supervisor-build, supervisor-signed]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+          - os: windows-11-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          architecture: ${{ matrix.arch }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Fetch this run's independently verified signed public images
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-signed-supervisor-oracle
+          path: ${{ runner.temp }}/g255-signed-images
+      - name: Verify both downloaded images against the package pins
+        shell: pwsh
+        run: node tools/supervisor-native/verify-signed.mjs "$env:RUNNER_TEMP/g255-signed-images"
+      - name: Native shipped image and containment boundaries
+        run: npx vitest run test/authenticode.test.ts test/windows-supervisor.test.ts test/process-tree-supervisor.test.ts test/process-tree.test.ts test/process-tree-options.test.ts test/private-directory.test.ts test/claude-approval-adapter.test.ts test/stop-verdict-observer.test.ts test/uncertain-cancel-tree.test.ts test/signed-supervisor.test.ts
+        env:
+          PRISM_ACP_SIGNED_SUPERVISOR_ROOT: ${{ runner.temp }}/g255-signed-images
+      - name: Twenty batches of eight independent processes, with no compiler or executable writes
+        shell: pwsh
+        env:
+          PRISM_ACP_SUPERVISOR_SHIPPED: '1'
+        run: |
+          New-Item -ItemType Directory -Path .shipped-supervisor-evidence | Out-Null
+          node -e "console.log(JSON.stringify({head:process.env.GITHUB_SHA,arch:require('node:os').machine(),node:process.version}))" > .shipped-supervisor-evidence/checkout.json
+          npx vitest run test/shipped-supervisor-measure.test.ts > .shipped-supervisor-evidence/native.log 2>&1
+          exit $LASTEXITCODE
+      - name: Preserve new shipped-runtime measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-shipped-supervisor-${{ matrix.arch }}
+          path: .shipped-supervisor-evidence/
+          include-hidden-files: true
+          if-no-files-found: error
+
+  supervisor-signed:
+    name: Windows SIP and genuinely signed host copies
+    needs: [third-party, native-supervisor-build]
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Compare actual Windows SIP digests before and after disposable signing
+        shell: pwsh
+        run: |
+          ./tools/supervisor-native/authenticode-oracle.ps1 -OutputRoot "$env:RUNNER_TEMP/g255-signed-images"
+          node tools/supervisor-native/verify-signed.mjs "$env:RUNNER_TEMP/g255-signed-images"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Execute a signed unpacked copy through every native mode
+        shell: pwsh
+        env:
+          PRISM_ACP_SIGNED_SUPERVISOR_ROOT: ${{ runner.temp }}/g255-signed-images
+        run: npx vitest run test/signed-supervisor.test.ts
+      - name: Preserve signed images and independent digest receipts, never keys
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-signed-supervisor-oracle
+          path: |
+            ${{ runner.temp }}/g255-signed-images/signed-image-receipt.json
+            ${{ runner.temp }}/g255-signed-images/x64-signed.exe
+            ${{ runner.temp }}/g255-signed-images/arm64-signed.exe
           if-no-files-found: error
 
   codex-native-tools:

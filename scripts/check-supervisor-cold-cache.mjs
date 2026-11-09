@@ -10,6 +10,7 @@ import { coldBaselineConfig, coldHashFailureKind } from './supervisor-cold-evide
 if(process.platform!=='win32')throw Error('The Windows cold-cache gate must run on Windows');
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
 const baseline='8200070239c343e06cabe868f5e33a0ae32f94b5'; // Published 0.31.0; identical old cache producer to held cf1077b.
+const lastCompilerPublisher='ba70175a8cd44cc03ee165640458e6210f14c251'; // Immutable published 0.40.0; 0.41 never compiles at runtime.
 const source=join(root,'src','process-tree.ts');
 const original=readFileSync(source);
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -59,6 +60,7 @@ if(oldSource.status!==0||!oldSource.stdout.includes('function windowsSupervisor(
 const temporaryParent=realpathSync(tmpdir());
 const owned=mkdtempSync(join(temporaryParent,'prism-cold-baseline-'));
 const project=join(owned,'baseline');
+const repairedProject=join(owned,'repaired-040');
 let before,after,baselineError,currentError;
 try{
  // Compile the immutable old publisher in its own package copy. The production
@@ -69,15 +71,28 @@ try{
  const baselineConfig=join(project,'tsconfig.json');
  writeFileSync(baselineConfig,JSON.stringify(coldBaselineConfig(project,root),null,2)+'\n');
  build(baselineConfig,'baseline-build');
+ let repairedSource=run('git',['show',lastCompilerPublisher+':src/process-tree.ts']);
+ if(repairedSource.status!==0){
+  const fetched=run('git',['fetch','--no-tags','--depth=1','https://github.com/Particle-Academy/prism-acp-ts.git',lastCompilerPublisher]);
+  if(fetched.status!==0)throw Error('Cannot fetch immutable released 0.40 publisher');
+  repairedSource=run('git',['show',lastCompilerPublisher+':src/process-tree.ts']);
+ }
+ if(repairedSource.status!==0||!repairedSource.stdout.includes('function windowsSupervisor()'))throw Error('Immutable released 0.40 publisher is missing');
+ cpSync(join(root,'src'),join(repairedProject,'src'),{recursive:true});
+ writeFileSync(join(repairedProject,'src','process-tree.ts'),repairedSource.stdout);
+ writeFileSync(join(repairedProject,'package.json'),'{"type":"module"}\n');
+ const repairedConfig=join(repairedProject,'tsconfig.json');
+ writeFileSync(repairedConfig,JSON.stringify(coldBaselineConfig(repairedProject,root),null,2)+'\n');
+ build(repairedConfig,'repaired-040-build');
  build();
  try{before=measure('baseline',pathToFileURL(join(project,'dist','process-tree.js')).href);}catch(error){baselineError=error.message;}
- try{after=measure('current',pathToFileURL(join(root,'dist','process-tree.js')).href);}catch(error){currentError=error.message;}
+ try{after=measure('repaired-040',pathToFileURL(join(repairedProject,'dist','process-tree.js')).href);}catch(error){currentError=error.message;}
  const productionUnchanged=hash(readFileSync(source))===originalHash&&hash(readFileSync(supervisorSource))===originalSupervisorHash;
- writeFileSync(join(logs,'summary.json'),JSON.stringify({baselineRef:baseline,baselineSourceSha256:hash(Buffer.from(oldSource.stdout)),currentSourceSha256:originalHash,supervisorSourceSha256:originalSupervisorHash,restored:productionUnchanged,productionUnchanged,before,after,baselineError,currentError},null,2)+'\n');
+ writeFileSync(join(logs,'summary.json'),JSON.stringify({baselineRef:baseline,repairedRef:lastCompilerPublisher,repairedSourceSha256:hash(Buffer.from(repairedSource.stdout)),baselineSourceSha256:hash(Buffer.from(oldSource.stdout)),currentSourceSha256:originalHash,supervisorSourceSha256:originalSupervisorHash,restored:productionUnchanged,productionUnchanged,before,after,baselineError,currentError,historicalOnly:true,shippedSupervisorProof:false},null,2)+'\n');
  if(!productionUnchanged)throw Error('Production publisher or supervisor source changed during the cold oracle');
  if(baselineError||!before||!before.varianceValid||!before.scheduleValid||before.scheduledHashRefusals!==1||before.exit!==1||before.failed<1||before.hashRefusals<1)throw Error('The old producer did not reproduce a proven hash refusal under valid compiler variance and the native publication schedule');
  if(currentError||!after||!after.varianceValid||!after.scheduleValid||after.exit!==0||after.failed!==0||after.approvalVerified!==160)throw Error('Current producer failed the cold-cache/approval oracle, publication schedule or compiler-variance precondition');
- console.log('Windows cold-cache regression verified: baseline '+before.failed+'/160 refusals; current 0/160; 160 approval adapters verified.');
+ console.log('Historical Windows cache regression verified: 0.31 '+before.failed+'/160 refusals; immutable 0.40 0/160; 160 approval adapters verified. Not a 0.41 shipped-supervisor proof.');
 }finally{
  const unchanged=hash(readFileSync(source))===originalHash&&hash(readFileSync(supervisorSource))===originalSupervisorHash;
  if(dirname(realpathSync(owned))!==temporaryParent)throw Error('Owned baseline cleanup escaped temporary parent');

@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "sourceSha256": "f982bbd052cfba56c8bc487ff57f23b4b3a4061ad7f86ca3a7fdf27328c25c9c",
+  "toolchain": {
+    "sdk": "10.0.403",
+    "runtime": "10.0.14",
+    "compilerSha256": "f9ea6e4b51f4ac07b9005fddf3e5a0022d9d60cf95a1c404809de63ba6d0eb3b",
+    "references": [
+      {
+        "file": "mscorlib.dll",
+        "sha256": "6b35530467b914b0b195146ca1d1485ddd219afaad6461103f16f54e952f75a9"
+      },
+      {
+        "file": "System.dll",
+        "sha256": "2fe343569f794f2ca92ee14a41875571a9f21bf92637b8f8ee86306534209cca"
+      },
+      {
+        "file": "System.Core.dll",
+        "sha256": "94a1fc97eb0d36f13acd209bb7207da504c8be10caf7e5096b2c46e671dc6fe2"
+      }
+    ]
+  },
+  "binaries": {
+    "x64": {
+      "file": "win32-x64/prism-acp-supervisor.exe",
+      "bytes": 17920,
+      "sha256": "d91419bc8155b85f75344076b28f3d4baa56b4300840dbd4eefd496d016d3de1",
+      "authenticodeSha256": "c3a189e6fff867b7dac468d305fd227edf40e48431d0e5a5d311f906b9a05094"
+    },
+    "arm64": {
+      "file": "win32-arm64/prism-acp-supervisor.exe",
+      "bytes": 17920,
+      "sha256": "0f9cd0ff89704cd924e397a496eb896dd3e89e0f3fae04f9a2d14ae7fe99e361",
+      "authenticodeSha256": "bd593ec470bb62da59256fe60a8aa3bf8f9904dc3dd4f5b78ecb33943ae60a97"
+    }
+  }
+}
