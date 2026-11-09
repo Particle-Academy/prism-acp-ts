@@ -199,17 +199,15 @@ jobs:
     needs: guard
     runs-on: windows-2022
     timeout-minutes: 10
-    environment: release
     permissions:
       contents: read
-      id-token: write
     outputs:
-      payload-sha256: ${{ steps.release-payload.outputs.sha256 }}
+      unsigned-sha256: ${{ steps.stage-supervisors.outputs.sha256 }}
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
       DOTNET_NOLOGO: '1'
-      REQUIRE_SUPERVISOR_SIGNING: ${{ needs.guard.outputs.require-signing }}
+      REQUIRE_SUPERVISOR_SIGNING: 'false'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -239,24 +237,79 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/supervisor-native/compare.mjs "$tagRoot/first" "$tagRoot/second" "${{ github.workspace }}/native"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Stage reviewed images and refuse incomplete required signing configuration
+      - name: Stage unsigned images and the reviewed dependency-free verifier bundle
+        id: stage-supervisors
+        run: node tools/supervisor-native/stage-signing-bundle.mjs "$env:RUNNER_TEMP/g256-staged-supervisors"
+      - name: Preserve staged unsigned release inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-supervisor-staged
+          path: ${{ runner.temp }}/g256-staged-supervisors/
+          if-no-files-found: error
+      - name: Preserve exact-tag reproduction evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-supervisor-exact-tag
+          path: ${{ runner.temp }}/g255-tag-native/
+          if-no-files-found: error
+
+  sign-supervisor:
+    name: Sign only reviewed supervisor images with the protected publisher identity
+    needs: [guard, native-supervisor]
+    if: needs.guard.outputs.require-signing == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      payload-sha256: ${{ steps.release-payload.outputs.sha256 }}
+    env:
+      NODE_OPTIONS: ''
+      NODE_PATH: ''
+      REQUIRE_SUPERVISOR_SIGNING: 'true'
+      SUPERVISOR_UNSIGNED_RELEASE_SHA256: ${{ needs.native-supervisor.outputs.unsigned-sha256 }}
+      ARTIFACT_SIGNING_ENDPOINT: https://eus.codesigning.azure.net
+      ARTIFACT_SIGNING_ACCOUNT: renaissance-analytics
+      ARTIFACT_SIGNING_PROFILE: genie-public
+      G256_VERIFIER_BOOTSTRAP_SHA256: '21db21a9d050d13cf90b60bf54861b1ef1a61565e7d95cc3849e64a114a85d0b'
+      G256_UNSIGNED_X64_SHA256: 'd91419bc8155b85f75344076b28f3d4baa56b4300840dbd4eefd496d016d3de1'
+      G256_UNSIGNED_ARM64_SHA256: '0f9cd0ff89704cd924e397a496eb896dd3e89e0f3fae04f9a2d14ae7fe99e361'
+    steps:
+      - name: Download this run's staged unsigned inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-supervisor-staged
+          path: ${{ runner.temp }}/g256-staged-supervisors
+      - name: Verify immutable bootstrap and all reviewed code before executing downloaded verifiers
+        shell: pwsh
         env:
+          G256_BUNDLE: ${{ runner.temp }}/g256-staged-supervisors
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          ARTIFACT_SIGNING_ENDPOINT: https://eus.codesigning.azure.net
-          ARTIFACT_SIGNING_ACCOUNT: renaissance-analytics
-          ARTIFACT_SIGNING_PROFILE: genie-public
-        run: node tools/supervisor-native/release-payload.mjs prepare "$env:RUNNER_TEMP/g256-release-supervisors"
+        run: |
+          $imagePins = @{ x64 = $env:G256_UNSIGNED_X64_SHA256; arm64 = $env:G256_UNSIGNED_ARM64_SHA256 }
+          foreach ($arch in @('x64', 'arm64')) {
+            $image = Join-Path $env:G256_BUNDLE ('unsigned/win32-' + $arch + '/prism-acp-supervisor.exe')
+            $rawDigest = (Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($rawDigest -cne $imagePins[$arch]) { throw ('Reviewed unsigned supervisor required: ' + $arch) }
+          }
+          $bootstrap = Join-Path $env:G256_BUNDLE 'tools/supervisor-native/verify-signing-bundle.mjs'
+          $digest = (Get-FileHash -LiteralPath $bootstrap -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:G256_VERIFIER_BOOTSTRAP_SHA256) { throw 'Reviewed verifier bootstrap required' }
+          node "$bootstrap" "$env:G256_BUNDLE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node "$env:G256_BUNDLE/tools/supervisor-native/release-payload.mjs" prepare-signed "$env:RUNNER_TEMP/g256-release-supervisors" "$env:G256_BUNDLE/unsigned"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Azure login with the release environment federated identity
-        if: needs.guard.outputs.require-signing == 'true'
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2, exact reviewed commit
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Publisher sign both reproduced supervisor copies
-        if: needs.guard.outputs.require-signing == 'true'
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           endpoint: https://eus.codesigning.azure.net
@@ -281,23 +334,17 @@ jobs:
           exclude-interactive-browser-credential: true
       - name: Verify reviewed image digests and required trusted timestamped signatures
         id: release-payload
-        run: node tools/supervisor-native/release-payload.mjs finalize "$env:RUNNER_TEMP/g256-release-supervisors"
+        run: node "$env:RUNNER_TEMP/g256-staged-supervisors/tools/supervisor-native/release-payload.mjs" finalize "$env:RUNNER_TEMP/g256-release-supervisors"
       - name: Preserve verified supervisor release payload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4, exact reviewed commit
         with:
           name: windows-supervisor-release
           path: ${{ runner.temp }}/g256-release-supervisors/
           if-no-files-found: error
-      - name: Preserve exact-tag reproduction evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-supervisor-exact-tag
-          path: ${{ runner.temp }}/g255-tag-native/
-          if-no-files-found: error
-
   publish:
     name: Build and publish to npm
-    needs: [guard, native-supervisor]
+    needs: [guard, native-supervisor, sign-supervisor]
+    if: always() && needs.guard.result == 'success' && needs.native-supervisor.result == 'success' && (needs.guard.outputs.require-signing != 'true' || needs.sign-supervisor.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -334,19 +381,27 @@ jobs:
           fi
 
       - name: Download this run's verified Windows supervisor payload
+        if: needs.guard.outputs.require-signing == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: windows-supervisor-release
           path: ${{ runner.temp }}/g256-release-supervisors
+      - name: Download this run's unsigned supervisor payload when signing is disabled
+        if: needs.guard.outputs.require-signing != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-supervisor-staged
+          path: ${{ runner.temp }}/g256-staged-supervisors
       - name: Bind npm assets and the packed tarball to the Windows producer receipt
         env:
           REQUIRE_SUPERVISOR_SIGNING: ${{ needs.guard.outputs.require-signing }}
-          SUPERVISOR_RELEASE_SHA256: ${{ needs.native-supervisor.outputs.payload-sha256 }}
+          SUPERVISOR_RELEASE_SHA256: ${{ needs.guard.outputs.require-signing == 'true' && needs.sign-supervisor.outputs.payload-sha256 || needs.native-supervisor.outputs.unsigned-sha256 }}
+          G256_PAYLOAD_ROOT: ${{ runner.temp }}/${{ needs.guard.outputs.require-signing == 'true' && 'g256-release-supervisors' || 'g256-staged-supervisors/unsigned' }}
         run: |
-          node tools/supervisor-native/release-payload.mjs install "$RUNNER_TEMP/g256-release-supervisors"
+          node tools/supervisor-native/release-payload.mjs install "$G256_PAYLOAD_ROOT"
           mkdir "$RUNNER_TEMP/g256-pack"
           npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/g256-pack"
-          node tools/supervisor-native/verify-pack.mjs "$RUNNER_TEMP/g256-release-supervisors" "$RUNNER_TEMP/g256-pack"
+          node tools/supervisor-native/verify-pack.mjs "$G256_PAYLOAD_ROOT" "$RUNNER_TEMP/g256-pack"
 
       # `--provenance` records WHICH workflow, at which commit, built this
       # tarball, and npm shows it on the package page. It is the npm half of the

@@ -325,9 +325,13 @@ unpacked first. The old `directory` option remains accepted and ignored, with on
 `PRISM_ACP_SUPERVISOR_DIRECTORY_DEPRECATED` warning directing hosts to `executable`.
 
 Release CI can publisher-sign both Windows images with [Azure Artifact Signing](https://github.com/Azure/artifact-signing-action).
-The Windows job first reproduces the committed unsigned images in two clean roots, then signs copies using GitHub
-OIDC in the protected `release` environment. It checks the reviewed image digests, a valid Windows Authenticode
-signature and timestamp, then records the signed files' SHA-256 values. The npm job checks that receipt and the
+The Windows build job reproduces the committed unsigned images in two clean roots without an Azure identity.
+A separate signing job uses GitHub OIDC in the protected `release` environment and runs no dependency installation
+or build. Inline PowerShell first checks both unsigned executable SHA-256 values against reviewed workflow literals.
+A bootstrap hash pinned in that workflow then authorizes the downloaded verifier manifest and code before
+execution; producer-generated hashes cannot authorize changed code or native-image pins. The signer checks
+the reviewed image digests, a valid Windows Authenticode signature and timestamp, then records the signed files'
+SHA-256 values. The npm job selects the signed payload when required and the staged unsigned payload otherwise. It checks that receipt and the
 actual tarball before publishing. Runtime image verification and the host-supplied executable option are unchanged.
 
 The repository variable `REQUIRE_SUPERVISOR_SIGNING=true` requires signing and refuses publication if any of these
@@ -335,10 +339,15 @@ The repository variable `REQUIRE_SUPERVISOR_SIGNING=true` requires signing and r
 The workflow uses the existing `renaissance-analytics` account, `genie-public` profile and
 `https://eus.codesigning.azure.net` endpoint; it requires signer subject name `Renaissance Analytics`. Authentication uses a federated
 identity with subject `repo:Particle-Academy/prism-acp-ts:environment:release`; no stored signing secret or key is used.
-Until the owner enables that repository gate, an unset or exactly `false` value publishes the same reviewed unsigned
+Until the owner enables that repository gate, an unset or exactly `false` value skips the signing job and publishes the same reviewed unsigned
 images as 0.41.0. Other gate values refuse publication. The npm job remains outside the `release` environment.
 The signing workflow's real Azure execution and publisher trust must be measured after account configuration;
 offline tests and disposable test signatures do not establish that acceptance.
+
+When changing the release verifier, generated image parser or package version, run `npm run build`, then
+`node tools/supervisor-native/pin-signing-verifiers.mjs --write` and review the manifest, bootstrap and workflow
+pin diffs together. `--check` refuses drift. Pin updates are a source-review action; a build artifact's own hashes
+cannot change the reviewed workflow's authorization of verifier code.
 
 `permissionPrompts.timeoutSeconds` sets the approval deadline (integer 1–86400, default 86400). The hook denies before
 the native hook timeout. The permission hook is an application approval mechanism; it is not OS isolation.

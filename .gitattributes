@@ -1,3 +1,5 @@
 *.sh text eol=lf
 native/supervisor-manifest.json text eol=lf
+tools/supervisor-native/signing-verifier-manifest.json text eol=lf
+tools/supervisor-native/verify-signing-bundle.mjs text eol=lf
 native/**/*.exe binary

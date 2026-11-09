@@ -109,10 +109,15 @@ export function installPayload(options) {
   for (const row of receipt.rows) assert.equal(sha256(readFile(path.join(options.nativeRoot, row.file))), row.sha256);
   return receipt;
 }
+export function prepareSignedPayload({ nativeRoot, unsignedRoot, outputRoot, env, version, expectedReceipt }) {
+  assert.equal(signingConfiguration(env).required, true, 'Required signing policy expected');
+  verifyPayload({ nativeRoot, outputRoot: unsignedRoot, env: { ...env, REQUIRE_SUPERVISOR_SIGNING: 'false' }, version, expectedReceipt });
+  return preparePayload({ nativeRoot: unsignedRoot, outputRoot, env, version });
+}
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [operation, outputRoot] = process.argv.slice(2); assert(['prepare', 'finalize', 'install'].includes(operation)); assert(outputRoot && path.isAbsolute(outputRoot));
+  const [operation, outputRoot, unsignedRoot] = process.argv.slice(2); assert(['prepare', 'prepare-signed', 'finalize', 'install'].includes(operation)); assert(outputRoot && path.isAbsolute(outputRoot));
   const options = { nativeRoot: path.join(repository, 'native'), outputRoot, env: process.env, version: JSON.parse(fs.readFileSync(path.join(repository, 'package.json'))).version, expectedReceipt: process.env.SUPERVISOR_RELEASE_SHA256 };
-  const result = operation === 'prepare' ? preparePayload(options) : operation === 'finalize' ? finalizePayload(options) : installPayload(options);
+  const result = operation === 'prepare' ? preparePayload(options) : operation === 'prepare-signed' ? prepareSignedPayload({ ...options, unsignedRoot, expectedReceipt: process.env.SUPERVISOR_UNSIGNED_RELEASE_SHA256 }) : operation === 'finalize' ? finalizePayload(options) : installPayload(options);
   if (operation === 'finalize') { assert(process.env.GITHUB_OUTPUT); fs.appendFileSync(process.env.GITHUB_OUTPUT, 'sha256=' + result.sha256 + '\n'); }
   console.log(JSON.stringify({ supervisorReleasePayload: operation, required: result.required, sha256: operation === 'finalize' ? result.sha256 : undefined }));
 }

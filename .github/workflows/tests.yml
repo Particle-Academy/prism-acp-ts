@@ -104,6 +104,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npx vitest run
+      - run: node tools/supervisor-native/pin-signing-verifiers.mjs --check
 
   # Windows has its own containment (a Job Object, a shipped supervisor), its own command resolution (npm shims, no
   # shell) and its own quoting, and none of it runs on Linux. It is verified here, never on a developer's desktop:
@@ -123,11 +124,22 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npx vitest run
+      - run: node tools/supervisor-native/pin-signing-verifiers.mjs --check
 
       - name: AppContainer transport (owned profiles; no model or network access)
         run: npx vitest run test/appcontainer.test.ts
         env:
           PRISM_ACP_APPCONTAINER: '1'
+
+      - name: Actual isolated signing bootstrap with fake identity and token-request canaries
+        run: node tools/supervisor-native/check-signing-bootstrap.mjs "$env:RUNNER_TEMP/g256-bootstrap-proof"
+      - name: Preserve bootstrap positive and producer-tamper refusal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supervisor-signing-bootstrap-proof
+          path: ${{ runner.temp }}/g256-bootstrap-proof/
+          if-no-files-found: error
 
   supervisor-cold-cache:
     name: Historical Windows compiler-cache regression
