@@ -8,6 +8,8 @@ function checkGraph(text: string): void {
   const jobs = new Map([...text.matchAll(/^  ([a-z][a-z0-9-]*):\n([\s\S]*?)(?=^  [a-z][a-z0-9-]*:\n|$(?![\s\S]))/gm)].map(match => [match[1], match[2]]));
   const guard = jobs.get('guard')!, native = jobs.get('native-supervisor')!, signer = jobs.get('sign-supervisor')!, publish = jobs.get('publish')!;
   expect(guard).toContain('require-signing: ${{ steps.signing-policy.outputs.required }}'); expect(guard).not.toContain('environment: release');
+  expect(guard.indexOf('node .third-party-allowlist/third-party/check.mjs --repo .')).toBeGreaterThan(0);
+  expect(guard.indexOf('run: node tools/supervisor-native/signing-policy.mjs')).toBeGreaterThan(guard.indexOf('node .third-party-allowlist/third-party/check.mjs --repo .'));
   expect(native).toMatch(/^    needs: guard$/m); expect(native).not.toMatch(/^    environment:/m); expect(native).not.toContain('id-token:');
   expect(native).toContain('npm ci'); expect(native).toContain('npm run build');
   expect(native.indexOf('node tools/supervisor-native/compare.mjs')).toBeGreaterThan(0);
@@ -51,6 +53,7 @@ function checkGraph(text: string): void {
 describe('isolated publisher signing job graph', () => {
   it('separates dependency/build code from the Azure identity and pins every privileged verifier', () => checkGraph(workflow));
   it.each([
+    ['pre-gate signing policy', (s: string) => s.replace('      - name: Fetch the third-party allowlist', '      - run: node tools/supervisor-native/signing-policy.mjs\n      - name: Fetch the third-party allowlist')],
     ['privileged producer', (s: string) => s.replace('      contents: read\n    outputs:\n      unsigned-sha256:', '      contents: read\n      id-token: write\n    outputs:\n      unsigned-sha256:')],
     ['producer environment', (s: string) => s.replace('name: Reproduce exact reviewed Windows payloads from this tag', 'name: Reproduce exact reviewed Windows payloads from this tag\n    environment: release')],
     ['identity-bearing dependency install', (s: string) => s.replace('      - name: Download this run\'s staged unsigned inputs', '      - run: npm ci\n      - name: Download this run\'s staged unsigned inputs')],
