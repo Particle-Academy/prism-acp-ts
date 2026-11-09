@@ -9,6 +9,26 @@ permissions:
   contents: read
 
 jobs:
+  workflow-lint:
+    name: Release and test workflow lint
+    needs: third-party
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate YAML, expressions, action inputs and job dependencies
+        env:
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          lint_root="$RUNNER_TEMP/g256-actionlint"
+          mkdir "$lint_root"
+          curl --fail --location --max-time 60 --output "$lint_root/actionlint.tar.gz" https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$lint_root/actionlint.tar.gz" | sha256sum --check --strict
+          tar --extract --gzip --file "$lint_root/actionlint.tar.gz" --directory "$lint_root" actionlint
+          "$lint_root/actionlint" -shellcheck= -pyflakes= .github/workflows/*.yml
+
   # CI is the only producer. Rebuild both architectures in two isolated roots,
   # then compare both with the reviewed bytes shipped in this exact checkout.
   native-supervisor-build:

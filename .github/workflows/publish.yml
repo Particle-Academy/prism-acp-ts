@@ -24,10 +24,20 @@ jobs:
     permissions:
       contents: read
       actions: read
+    outputs:
+      require-signing: ${{ steps.signing-policy.outputs.required }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Resolve the repository signing policy before entering the release environment
+        id: signing-policy
+        env:
+          REQUIRE_SUPERVISOR_SIGNING: ${{ vars.REQUIRE_SUPERVISOR_SIGNING }}
+        run: node tools/supervisor-native/signing-policy.mjs
 
       # Run again at publish time, not only when the commit landed: a dependency
       # that has since gone unmaintained, or an approval since withdrawn from the
@@ -189,12 +199,17 @@ jobs:
     needs: guard
     runs-on: windows-2022
     timeout-minutes: 10
+    environment: release
     permissions:
       contents: read
+      id-token: write
+    outputs:
+      payload-sha256: ${{ steps.release-payload.outputs.sha256 }}
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
       DOTNET_NOLOGO: '1'
+      REQUIRE_SUPERVISOR_SIGNING: ${{ needs.guard.outputs.require-signing }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -224,10 +239,55 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/supervisor-native/compare.mjs "$tagRoot/first" "$tagRoot/second" "${{ github.workspace }}/native"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      # Publisher signing is deliberately disabled until the owner provisions
-      # Azure Trusted Signing. Future signing uses GitHub OIDC, never a stored
-      # key, and must preserve the reviewed Authenticode image pins. Unsigned
-      # reviewed assets are approved for 0.41; no signing credentials are used.
+      - name: Stage reviewed images and refuse incomplete required signing configuration
+        env:
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARTIFACT_SIGNING_ENDPOINT: https://eus.codesigning.azure.net
+          ARTIFACT_SIGNING_ACCOUNT: renaissance-analytics
+          ARTIFACT_SIGNING_PROFILE: genie-public
+        run: node tools/supervisor-native/release-payload.mjs prepare "$env:RUNNER_TEMP/g256-release-supervisors"
+      - name: Azure login with the release environment federated identity
+        if: needs.guard.outputs.require-signing == 'true'
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2, exact reviewed commit
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Publisher sign both reproduced supervisor copies
+        if: needs.guard.outputs.require-signing == 'true'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: https://eus.codesigning.azure.net
+          signing-account-name: renaissance-analytics
+          certificate-profile-name: genie-public
+          files: |
+            ${{ runner.temp }}/g256-release-supervisors/win32-x64/prism-acp-supervisor.exe
+            ${{ runner.temp }}/g256-release-supervisors/win32-arm64/prism-acp-supervisor.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          cache-dependencies: false
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+      - name: Verify reviewed image digests and required trusted timestamped signatures
+        id: release-payload
+        run: node tools/supervisor-native/release-payload.mjs finalize "$env:RUNNER_TEMP/g256-release-supervisors"
+      - name: Preserve verified supervisor release payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-supervisor-release
+          path: ${{ runner.temp }}/g256-release-supervisors/
+          if-no-files-found: error
       - name: Preserve exact-tag reproduction evidence
         uses: actions/upload-artifact@v4
         with:
@@ -273,6 +333,21 @@ jobs:
             exit 1
           fi
 
+      - name: Download this run's verified Windows supervisor payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-supervisor-release
+          path: ${{ runner.temp }}/g256-release-supervisors
+      - name: Bind npm assets and the packed tarball to the Windows producer receipt
+        env:
+          REQUIRE_SUPERVISOR_SIGNING: ${{ needs.guard.outputs.require-signing }}
+          SUPERVISOR_RELEASE_SHA256: ${{ needs.native-supervisor.outputs.payload-sha256 }}
+        run: |
+          node tools/supervisor-native/release-payload.mjs install "$RUNNER_TEMP/g256-release-supervisors"
+          mkdir "$RUNNER_TEMP/g256-pack"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/g256-pack"
+          node tools/supervisor-native/verify-pack.mjs "$RUNNER_TEMP/g256-release-supervisors" "$RUNNER_TEMP/g256-pack"
+
       # `--provenance` records WHICH workflow, at which commit, built this
       # tarball, and npm shows it on the package page. It is the npm half of the
       # same argument as verifying Packagist actually serves a version: a
@@ -312,7 +387,7 @@ jobs:
       # `--access public` on EVERY publish, not just the first: scoped packages
       # default to restricted.
       - name: Publish
-        run: npx -y npm@11.18.0 publish --provenance --access public
+        run: npx -y npm@11.18.0 publish "$RUNNER_TEMP/g256-pack/"*.tgz --provenance --access public
 
   release:
     name: Create the GitHub release

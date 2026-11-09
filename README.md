@@ -324,6 +324,22 @@ the image check does not validate a certificate chain or grant publisher trust. 
 unpacked first. The old `directory` option remains accepted and ignored, with one
 `PRISM_ACP_SUPERVISOR_DIRECTORY_DEPRECATED` warning directing hosts to `executable`.
 
+Release CI can publisher-sign both Windows images with [Azure Artifact Signing](https://github.com/Azure/artifact-signing-action).
+The Windows job first reproduces the committed unsigned images in two clean roots, then signs copies using GitHub
+OIDC in the protected `release` environment. It checks the reviewed image digests, a valid Windows Authenticode
+signature and timestamp, then records the signed files' SHA-256 values. The npm job checks that receipt and the
+actual tarball before publishing. Runtime image verification and the host-supplied executable option are unchanged.
+
+The repository variable `REQUIRE_SUPERVISOR_SIGNING=true` requires signing and refuses publication if any of these
+`release` environment variables are missing or invalid: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_SUBSCRIPTION_ID`.
+The workflow uses the existing `renaissance-analytics` account, `genie-public` profile and
+`https://eus.codesigning.azure.net` endpoint; it requires signer subject name `Renaissance Analytics`. Authentication uses a federated
+identity with subject `repo:Particle-Academy/prism-acp-ts:environment:release`; no stored signing secret or key is used.
+Until the owner enables that repository gate, an unset or exactly `false` value publishes the same reviewed unsigned
+images as 0.41.0. Other gate values refuse publication. The npm job remains outside the `release` environment.
+The signing workflow's real Azure execution and publisher trust must be measured after account configuration;
+offline tests and disposable test signatures do not establish that acceptance.
+
 `permissionPrompts.timeoutSeconds` sets the approval deadline (integer 1–86400, default 86400). The hook denies before
 the native hook timeout. The permission hook is an application approval mechanism; it is not OS isolation.
 
