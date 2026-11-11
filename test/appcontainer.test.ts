@@ -11,6 +11,9 @@ import { authenticodeImage } from '../src/authenticode.js';
 
 const exec = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
+// Fixture compilation is setup work, outside every runtime assertion's clock.
+const FIXTURE_BUILD_TIMEOUT_MS = 120_000;
+const FIXTURE_SETUP_TIMEOUT_MS = 3 * FIXTURE_BUILD_TIMEOUT_MS + 60_000;
 const roots: string[] = [];
 let root: string, foreign: string, executable: string;
 
@@ -33,19 +36,19 @@ describe.runIf(process.platform === 'win32' && process.env.PRISM_ACP_APPCONTAINE
     }
     executable = join(root, 'program', 'fixture-host.exe');
     const csc = join(process.env.SystemRoot!, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
-    await exec(csc, ['-nologo', '-optimize+', '-target:exe', `-out:${executable}`, join(here, 'fixtures', 'appcontainer-host.cs')], { windowsHide: true, timeout: 20_000 });
+    await exec(csc, ['-nologo', '-optimize+', '-target:exe', `-out:${executable}`, join(here, 'fixtures', 'appcontainer-host.cs')], { windowsHide: true, timeout: FIXTURE_BUILD_TIMEOUT_MS });
     await prepareProcessTree();
     const stalled = join(root, 'program', 'stalled-supervisor'); mkdirSync(stalled);
     const source = join(stalled, 'owned-stall.cs');
     writeFileSync(source, 'static class OwnedStall { static void Main() { System.Threading.Thread.Sleep(10000); } }');
     const stalledExe = join(stalled, 'prism-acp-supervisor.exe');
-    await exec(csc, ['-nologo', '-platform:x64', '-target:exe', `-out:${stalledExe}`, source], { windowsHide: true, timeout: 20_000 });
+    await exec(csc, ['-nologo', '-platform:x64', '-target:exe', `-out:${stalledExe}`, source], { windowsHide: true, timeout: FIXTURE_BUILD_TIMEOUT_MS });
     const exiting = join(root, 'program', 'exiting-supervisor'); mkdirSync(exiting);
     const exitSource = join(exiting, 'owned-exit.cs'), exitExe = join(exiting, 'prism-acp-supervisor.exe');
     writeFileSync(exitSource, 'static class OwnedExit { static int Main() { return 123; } }');
-    await exec(csc, ['-nologo', '-platform:x64', '-target:exe', `-out:${exitExe}`, exitSource], { windowsHide: true, timeout: 20_000 });
+    await exec(csc, ['-nologo', '-platform:x64', '-target:exe', `-out:${exitExe}`, exitSource], { windowsHide: true, timeout: FIXTURE_BUILD_TIMEOUT_MS });
     writeFileSync(join(root, 'program', 'owned-invalid.exe'), 'owned invalid executable; must never run');
-  }, 60_000);
+  }, FIXTURE_SETUP_TIMEOUT_MS);
   afterAll(() => {
     const temporary = realpathSync(tmpdir());
     for (const path of roots) {
