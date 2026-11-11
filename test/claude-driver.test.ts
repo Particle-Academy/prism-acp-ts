@@ -49,9 +49,9 @@ describe('claudeArgs — the flags, which cannot be checked by spawning', () => 
     );
   });
 
-  it('joins tool lists with commas', () => {
-    const args = claudeArgs({ ...base, allowedTools: ['Read', 'Grep'] }).join(' ');
-    expect(args).toContain('--allowed-tools Read,Grep');
+  it('passes tool rules as individual flag values', () => {
+    const args = claudeArgs({ ...base, allowedTools: ['Read', 'Grep'] });
+    expect(args.slice(args.indexOf('--allowed-tools'))).toEqual(['--allowed-tools', 'Read', 'Grep']);
   });
 
   it('omits an EMPTY tool list rather than passing an empty value', () => {

@@ -9,7 +9,7 @@ import { signingConfiguration, signingRequired } from '../tools/supervisor-nativ
 import { finalizePayload, installPayload, preparePayload, verifyImage, verifyPayload } from '../tools/supervisor-native/release-payload.mjs';
 import { packedFiles, verifyPackedPayload } from '../tools/supervisor-native/verify-pack.mjs';
 
-const nativeRoot = path.resolve('native'), version = '0.41.1';
+const nativeRoot = path.resolve('native'), version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version as string;
 const env = { GITHUB_SHA: '1'.repeat(40), GITHUB_REF_TYPE: 'tag', GITHUB_REF_NAME: 'v' + version,
   GITHUB_REPOSITORY: 'Particle-Academy/prism-acp-ts', REQUIRE_SUPERVISOR_SIGNING: 'false' };
 const configured = { ...env, REQUIRE_SUPERVISOR_SIGNING: 'true', AZURE_TENANT_ID: '11111111-1111-1111-1111-111111111111',

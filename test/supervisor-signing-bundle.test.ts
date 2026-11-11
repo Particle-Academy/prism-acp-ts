@@ -9,7 +9,8 @@ import { verifySigningBundle } from '../tools/supervisor-native/verify-signing-b
 import { prepareSignedPayload } from '../tools/supervisor-native/release-payload.mjs';
 
 const owned: string[] = [], sha = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
-const identity = { GITHUB_SHA: '1'.repeat(40), GITHUB_REF_TYPE: 'tag', GITHUB_REF_NAME: 'v0.41.1', GITHUB_REPOSITORY: 'Particle-Academy/prism-acp-ts', REQUIRE_SUPERVISOR_SIGNING: 'true' };
+const version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version as string;
+const identity = { GITHUB_SHA: '1'.repeat(40), GITHUB_REF_TYPE: 'tag', GITHUB_REF_NAME: 'v' + version, GITHUB_REPOSITORY: 'Particle-Academy/prism-acp-ts', REQUIRE_SUPERVISOR_SIGNING: 'true' };
 const configured = { ...identity, AZURE_TENANT_ID: '11111111-1111-1111-1111-111111111111', AZURE_CLIENT_ID: '22222222-2222-2222-2222-222222222222', AZURE_SUBSCRIPTION_ID: '33333333-3333-3333-3333-333333333333', ARTIFACT_SIGNING_ENDPOINT: 'https://eus.codesigning.azure.net', ARTIFACT_SIGNING_ACCOUNT: 'renaissance-analytics', ARTIFACT_SIGNING_PROFILE: 'genie-public' };
 afterEach(() => { for (const root of owned.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 function staged() {
@@ -28,7 +29,7 @@ describe('immutable verifier authorization before publisher identity use', () =>
   });
   it('prepares signed copies from a verified unsigned receipt without changing staged inputs', () => {
     const { root, bundle, record } = staged(), file = path.join(bundle, 'unsigned/release-supervisors.json'), before = fs.readFileSync(file);
-    expect(prepareSignedPayload({ nativeRoot: path.join(bundle, 'native'), unsignedRoot: path.join(bundle, 'unsigned'), outputRoot: path.join(root, 'signed'), env: configured, version: '0.41.1', expectedReceipt: record.unsignedSha256 })).toEqual({ required: true });
+    expect(prepareSignedPayload({ nativeRoot: path.join(bundle, 'native'), unsignedRoot: path.join(bundle, 'unsigned'), outputRoot: path.join(root, 'signed'), env: configured, version, expectedReceipt: record.unsignedSha256 })).toEqual({ required: true });
     expect(fs.readFileSync(file)).toEqual(before); expect(verifySigningBundle(bundle).files).toBe(12);
   });
   it('refuses changed verifier code before any downloaded module executes', () => {
@@ -53,14 +54,14 @@ describe('immutable verifier authorization before publisher identity use', () =>
     const { root, bundle } = staged(), receiptFile = path.join(bundle, 'unsigned/release-supervisors.json'), receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
     const row = receipt.rows[0], imageFile = path.join(bundle, 'unsigned', row.file), bytes = fs.readFileSync(imageFile); bytes[bytes.length - 1] ^= 1; fs.writeFileSync(imageFile, bytes); row.sha256 = sha(bytes); fs.writeFileSync(receiptFile, JSON.stringify(receipt));
     const outputRoot = path.join(root, 'signed');
-    expect(() => prepareSignedPayload({ nativeRoot: path.join(bundle, 'native'), unsignedRoot: path.join(bundle, 'unsigned'), outputRoot, env: configured, version: '0.41.1', expectedReceipt: sha(fs.readFileSync(receiptFile)) })).toThrow('digest');
+    expect(() => prepareSignedPayload({ nativeRoot: path.join(bundle, 'native'), unsignedRoot: path.join(bundle, 'unsigned'), outputRoot, env: configured, version, expectedReceipt: sha(fs.readFileSync(receiptFile)) })).toThrow('digest');
     expect(fs.existsSync(outputRoot)).toBe(false);
   });
   it('refuses a producer-rehashed receipt from a different commit even for correct unsigned images', () => {
     const { root, bundle } = staged(), receiptFile = path.join(bundle, 'unsigned/release-supervisors.json'), receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
     receipt.commit = '2'.repeat(40); fs.writeFileSync(receiptFile, JSON.stringify(receipt));
     const outputRoot = path.join(root, 'signed');
-    expect(() => prepareSignedPayload({ nativeRoot: path.join(bundle, 'native'), unsignedRoot: path.join(bundle, 'unsigned'), outputRoot, env: configured, version: '0.41.1', expectedReceipt: sha(fs.readFileSync(receiptFile)) })).toThrow();
+    expect(() => prepareSignedPayload({ nativeRoot: path.join(bundle, 'native'), unsignedRoot: path.join(bundle, 'unsigned'), outputRoot, env: configured, version, expectedReceipt: sha(fs.readFileSync(receiptFile)) })).toThrow();
     expect(fs.existsSync(outputRoot)).toBe(false);
   });
 });

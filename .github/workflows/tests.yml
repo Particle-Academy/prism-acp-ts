@@ -380,6 +380,41 @@ jobs:
           PRISM_ACP_CLAUDE_RESTRICTED: '1'
           PRISM_ACP_CLAUDE_BINARY: ${{ github.workspace }}/.claude-restricted-cli/node_modules/@anthropic-ai/claude-code-${{ matrix.platform }}/${{ matrix.binary }}
 
+  claude-tool-rules:
+    name: Claude tool rules, ${{ matrix.platform }}, ${{ matrix.cli }}
+    runs-on: ${{ matrix.os }}
+    needs: third-party
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        cli: ['2.1.203', '2.1.295', '2.1.311']
+        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            binary: claude
+          - os: windows-latest
+            platform: win32-x64
+            binary: claude.exe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # Test executable only. No runtime dependency, install scripts, real login or provider traffic.
+      - run: npm install --prefix .claude-tool-rules-cli --ignore-scripts --no-package-lock @anthropic-ai/claude-code-${{ matrix.platform }}@${{ matrix.cli }}
+      - name: Native allow and deny with one comma-and-space rule per argv value
+        run: npx vitest run test/claude-tool-rules-native.test.ts
+        env:
+          PRISM_ACP_CLAUDE_TOOL_RULES: '1'
+          PRISM_ACP_CLAUDE_BINARY: ${{ github.workspace }}/.claude-tool-rules-cli/node_modules/@anthropic-ai/claude-code-${{ matrix.platform }}/${{ matrix.binary }}
+
   third-party:
     name: Third-party dependency allowlist
     runs-on: ubuntu-latest

@@ -112,8 +112,9 @@ export interface ClaudeDriverOptions {
     /** Approval deadline in seconds (1–86400); default 86400. Expiry denies the call. */
     readonly timeoutSeconds?: number;
   };
-  /** CLI --allowed-tools permission auto-allow rules; does not restrict the available tool catalog. */
+  /** CLI auto-allow rules, each passed as an individual value; does not restrict the available tool catalog. */
   readonly allowedTools?: readonly string[];
+  /** CLI deny rules, each passed as an individual value. Empty, option-shaped or control-bearing rules are refused. */
   readonly disallowedTools?: readonly string[];
   /**
    * App MCP only on measured Claude2.1.311 fresh sessions: remove native execution/file/web tools and inherited
@@ -208,12 +209,11 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
     if (settingSources !== undefined) args.push('--setting-sources', settingSources.join(','));
     if (options.strictMcpConfig === true) args.push('--strict-mcp-config');
   }
-  if (options.allowedTools !== undefined && options.allowedTools.length > 0) {
-    args.push('--allowed-tools', options.allowedTools.join(','));
-  }
-  if (options.disallowedTools !== undefined && options.disallowedTools.length > 0) {
-    args.push('--disallowed-tools', options.disallowedTools.join(','));
-  }
+  const allowedTools = claudeToolRules(options.allowedTools, 'allowedTools');
+  const disallowedTools = claudeToolRules(options.disallowedTools, 'disallowedTools');
+  // Both flags are variadic (<tools...>). Keep caller-supplied rule boundaries rather than adding delimiters.
+  if (allowedTools.length > 0) args.push('--allowed-tools', ...allowedTools);
+  if (disallowedTools.length > 0) args.push('--disallowed-tools', ...disallowedTools);
   if (((options.mcpServers?.length ?? 0) > 0 || restricted) && mcpConfigPath === undefined) {
     throw new Error('claudeArgs requires an MCP config file path when mcpServers is non-empty');
   }
@@ -223,6 +223,30 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
   if (settingsPath !== undefined) args.push('--settings', settingsPath);
 
   return args;
+}
+
+export class ClaudeToolRuleError extends Error {
+  readonly code = 'invalid_claude_tool_rule' as const;
+  constructor(readonly field: 'allowedTools' | 'disallowedTools', readonly index: number | null) {
+    super(`${field}${index === null ? '' : `[${index}]`} must contain non-empty permission rules without option prefixes, control characters or malformed Unicode`);
+    this.name = 'ClaudeToolRuleError';
+  }
+}
+
+function claudeToolRules(value: unknown, field: 'allowedTools' | 'disallowedTools'): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new ClaudeToolRuleError(field, null);
+  const rules: string[] = [];
+  for (let index = 0; index < value.length; index++) {
+    const rule: unknown = value[index];
+    if (typeof rule !== 'string' || rule.trim().length === 0 || /^\s*-/u.test(rule)
+      || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(rule)
+      || /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/.test(rule)) {
+      throw new ClaudeToolRuleError(field, index);
+    }
+    rules.push(rule);
+  }
+  return rules;
 }
 
 function claudeSettingSources(value: ClaudeDriverOptions['settingSources']): ClaudeDriverOptions['settingSources'] {
@@ -548,11 +572,13 @@ export class ClaudeDriver {
     assertStrictMcpConfig(options.strictMcpConfig);
     const appendSystemPromptFile = claudeAppendFile(options.appendSystemPromptFile);
     const pluginDirs = claudePluginDirs(options.pluginDirs, restricted);
+    const allowedTools = Object.freeze(claudeToolRules(options.allowedTools, 'allowedTools'));
+    const disallowedTools = Object.freeze(claudeToolRules(options.disallowedTools, 'disallowedTools'));
     if (options.permissionPrompts?.nodePath !== undefined && !isAbsolute(options.permissionPrompts.nodePath)) {
       throw new Error('permissionPrompts.nodePath must be an absolute executable path');
     }
     this.#mcpServers = readMcpServers(options.mcpServers);
-    this.#options = { ...options, appendSystemPromptFile, pluginDirs, ...(settingSources === undefined ? {} : { settingSources }), ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
+    this.#options = { ...options, allowedTools, disallowedTools, appendSystemPromptFile, pluginDirs, ...(settingSources === undefined ? {} : { settingSources }), ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
     if (options.processTree?.windowsStdio === 'local-pipes' && ((!restricted && this.#mcpServers.length > 0) || options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0)) {
       throw new ProcessTreeError('LOCAL transport does not support generated Claude MCP configuration or permission hooks');
     }
