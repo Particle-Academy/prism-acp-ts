@@ -20,6 +20,19 @@ API key to supply and no adapter program to install.
 
 ## Status
 
+**Claude Code minimum: 2.1.203.** Individual features below retain their higher version requirements and exact
+measured restrictions. Permission-rule argv is measured on native 2.1.203, 2.1.295, 2.1.311 and 2.1.322;
+CI checks the first three on Windows and Linux. Other versions are not implied to have been measured.
+
+`allowedTools` and `disallowedTools` use the [documented CLI form](https://code.claude.com/docs/en/cli-reference):
+each array entry is one argv value after a single flag. For example, `['Bash(echo hello, world)', 'Read']` stays
+two values, including the comma and space inside the Bash rule. These are Claude's permission rules; `allowedTools`
+auto-allows matching calls and does not restrict the available tool catalog. Empty arrays omit the flag. Malformed,
+empty, option-shaped, control-bearing or malformed-Unicode entries throw exported `ClaudeToolRuleError` before launch;
+its `field` and `index` identify the invalid entry without including rule content in the error. Driver construction
+snapshots both arrays. The prior comma-joined form also denied the probe on all four measured CLIs: this change is
+hardening toward the documented form, with no reproduced fail-open on those versions.
+
 Early, but a client can talk to it. `initialize`, `session/new`,
 `session/load`, `session/prompt` and `session/cancel` work over a pipe. Claude
 and Codex have both been proven end to end against authenticated binaries:

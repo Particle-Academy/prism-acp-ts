@@ -11,7 +11,8 @@ const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex'
 function envFor(){const env={NODE_OPTIONS:'',NODE_PATH:''};for(const[key,value]of Object.entries(process.env))if(/^(SYSTEMROOT|WINDIR|TEMP|TMP|PATH|PATHEXT|COMSPEC)$/i.test(key))env[key]=value;return env;}
 const wf=fs.readFileSync(path.join(cwd,'.github/workflows/publish.yml'),'utf8').replaceAll('\r\n','\n');
 const body=wf.match(/      - name: Verify immutable bootstrap[^\n]*\n[\s\S]*?        run: \|\n([\s\S]*?)(?=      - name: Azure login)/)?.[1];assert(body);const script=body.split('\n').map(line=>line.startsWith('          ')?line.slice(10):line).join('\n');assert(script.includes('Get-FileHash')&&script.includes('prepare-signed'));const pin=wf.match(/G256_VERIFIER_BOOTSTRAP_SHA256: '([a-f0-9]{64})'/)?.[1];assert(pin);
-const identity={GITHUB_SHA:'1'.repeat(40),GITHUB_REF_TYPE:'tag',GITHUB_REF_NAME:'v0.41.1',GITHUB_REPOSITORY:'Particle-Academy/prism-acp-ts',REQUIRE_SUPERVISOR_SIGNING:'true'};
+const version=JSON.parse(fs.readFileSync(path.join(cwd,'package.json'),'utf8')).version;
+const identity={GITHUB_SHA:'1'.repeat(40),GITHUB_REF_TYPE:'tag',GITHUB_REF_NAME:'v'+version,GITHUB_REPOSITORY:'Particle-Academy/prism-acp-ts',REQUIRE_SUPERVISOR_SIGNING:'true'};
 const rawPins=Object.fromEntries(['x64','arm64'].map(arch=>{const value=wf.match(new RegExp('G256_UNSIGNED_'+arch.toUpperCase()+"_SHA256: '([a-f0-9]{64})'"))?.[1];assert(value);return[arch,value];}));
 const original=path.join(dir,'reviewed-producer-bundle'),receipt=stageSigningBundle(original,identity),rows=[],sha=b=>createHash('sha256').update(b).digest('hex');
 for(const kind of ['reviewed','changed-verifier','producer-rehashed-manifest','producer-rehashed-bootstrap','producer-rehashed-image','producer-rehashed-arm-image']){

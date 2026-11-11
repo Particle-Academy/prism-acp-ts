@@ -94,6 +94,7 @@ export {
   CLAUDE_DRIVER_CAPABILITIES,
   ClaudeDriver,
   ClaudeCancelStateError,
+  ClaudeToolRuleError,
   claudeArgs,
   promptLine,
   updatesFromFrames,
