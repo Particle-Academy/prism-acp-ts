@@ -157,7 +157,7 @@ describe.skipIf(process.platform === 'win32')('ClaudeDriver turn cancel, against
         // The 2.1.318 direct-driver measurement also covers dropping queued notices.
         request: { subtype: 'interrupt', cancel_queued: true },
       });
-      expect(turnEnds[0]).toEqual({ stopReason: 'cancelled', isError: false, raw: 'aborted_streaming' });
+      expect(turnEnds[0]).toEqual({ stopReason: 'cancelled', isError: false, raw: 'aborted_streaming', turnId: expect.stringMatching(/^[a-f0-9-]{36}$/) });
       expect(driver.running).toBe(true);
       expect(exits).toEqual([]);
       // The CLI's answer to our own request is consumed, not filed as an unmapped frame.
@@ -193,7 +193,7 @@ describe.skipIf(process.platform === 'win32')('ClaudeDriver turn cancel, against
     try {
       driver.prompt('ABORT-UNASKED');
       await until('the turn to end', () => turnEnds.length === 1);
-      expect(turnEnds[0]).toEqual({ stopReason: null, isError: true, raw: null });
+      expect(turnEnds[0]).toEqual({ stopReason: null, isError: true, raw: null, turnId: expect.stringMatching(/^[a-f0-9-]{36}$/) });
     } finally {
       driver.kill();
     }

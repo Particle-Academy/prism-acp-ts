@@ -1,6 +1,6 @@
 {
   "name": "@particle-academy/prism-acp",
-  "version": "0.41.2",
+  "version": "0.42.0",
   "description": "Speak the Agent Client Protocol to a coding-agent CLI the user has already authenticated. No API key, no third-party adapter.",
   "license": "MIT",
   "repository": {
@@ -29,6 +29,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:live": "PRISM_ACP_LIVE=1 vitest run test/live-env.test.ts test/live-codex.test.ts test/live-cancel.test.ts",
+    "probe:claude-fold": "node scripts/probe-claude-fold.mjs",
     "probe:claude-interrupt": "node scripts/probe-claude-interrupt.mjs",
     "probe:claude-models": "node scripts/probe-claude-models.mjs",
     "probe:codex-models": "node scripts/probe-codex-models.mjs"

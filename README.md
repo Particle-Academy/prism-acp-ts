@@ -1279,6 +1279,24 @@ interrupt one. A driver that can implements `cancel()`, and declares
     This means unknown; it does not establish that a process survived. The
     immediate `onProtocolError` notification still precedes cleanup. Observe
     `onStopVerdict` for the eventual result rather than relying on an early error.
+  - **Folded prompts settle (G-266).** Claude Code can fold a prompt written
+    while a turn runs into that turn. The folded prompt then gets no result of
+    its own. Measured on Claude Code 2.1.325 with `npm run probe:claude-fold`
+    (after `npm run build`): the folded prompt is queued and then started
+    inside the running turn, and that turn's result lists both prompts in
+    `user_message_uuids`.
+    - `ClaudeDriver.prompt()` returns the prompt's turn id. Every
+      ClaudeDriver outcome carries it as `turnId`.
+    - A folded prompt ends with the joined turn's outcome plus
+      `foldedInto: <turnId of the turn it joined>`.
+    - The driver decides this only from the result's list, never from a
+      timeout. Ids that are not your prompts settle nothing. A list that omits
+      its own prompt is reported through `onProtocolError` and folds nothing.
+    - Measured on the same version: a cancel during a fold gets a receipt that
+      names neither prompt, and the interrupted result lists both. Both prompts
+      end `cancelled` and the CLI stays up. If that result leaves a started
+      prompt unaccounted for, the driver fails closed, as for any cancel
+      accounting mismatch.
 
 Once a client has cancelled, the prompt is answered `cancelled` even if the turn
 finished or failed in the race with the interrupt, as ACP requires. If the
