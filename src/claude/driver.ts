@@ -355,6 +355,17 @@ export interface TurnOutcome {
   readonly failure?: TurnFailure;
   /** Native operation refusal, separate from provider turn failures. */
   readonly commandFailure?: { readonly code: 'command_unsupported'; readonly reason: import('../codex/commands.js').CommandRefusal };
+  /**
+   * The prompt this outcome settles: the id ClaudeDriver.prompt() returned for it. Set on every ClaudeDriver outcome.
+   */
+  readonly turnId?: string;
+  /**
+   * Set when the CLI FOLDED this prompt into another turn that was already running, instead of running it as a turn
+   * of its own: the turnId of the turn it joined (G-266). The joined turn's result names every prompt it covered
+   * (`user_message_uuids`), and this outcome is settled from that list and nothing else, never from a timeout. The
+   * other fields repeat the joined turn's outcome, because this prompt's content was handled by that turn.
+   */
+  readonly foldedInto?: string;
 }
 
 /**
@@ -372,6 +383,18 @@ const STOP_REASONS: Readonly<Record<string, StopReason>> = {
   cancelled: 'cancelled',
   canceled: 'cancelled',
 };
+
+/**
+ * The prompts a `result` frame says its turn covered, beyond its own (G-266): `user_message_uuids`, measured on Claude
+ * Code 2.1.325, lists the turn's own prompt and every prompt folded into it. Absent means nothing was folded (older
+ * CLIs). Null means the list is present but cannot be trusted: not unique strings, or missing the result's own prompt.
+ */
+export function coveredPromptsOf(frame: unknown, own: string): readonly string[] | null {
+  if (!isObject(frame) || !('user_message_uuids' in frame) || frame.user_message_uuids === undefined || frame.user_message_uuids === null) return [];
+  const list = frame.user_message_uuids;
+  if (!Array.isArray(list) || !list.every(id => typeof id === 'string') || new Set(list).size !== list.length || !list.includes(own)) return null;
+  return list as string[];
+}
 
 /**
  * Read a turn's outcome from a `result` frame, or null if it is not one.
@@ -763,8 +786,11 @@ export class ClaudeDriver {
     else child.on('close', onClose);
   }
 
-  /** Send a user turn: text, or content blocks. A block it cannot send refuses the whole turn, naming it. */
-  prompt(content: PromptContent): void {
+  /**
+   * Send a user turn: text, or content blocks. A block it cannot send refuses the whole turn, naming it. Returns the
+   * turn's id, which its outcome carries as `turnId` (and a prompt folded into it names as `foldedInto`).
+   */
+  prompt(content: PromptContent): string {
     // Encoded first, so a refused prompt throws PromptRefused whether or not the CLI is running.
     const id = randomUUID();
     const line = encodeLine({ ...promptMessage(content), uuid: id });
@@ -787,6 +813,7 @@ export class ClaudeDriver {
       try { this.#writePrompt(line); }
       catch (cause) { this.#turns.delete(id); this.#writtenTurns.delete(id); this.#turnsInFlight -= 1; throw cause; }
     }
+    return id;
   }
 
   #writePrompt(line: string): void {
@@ -861,7 +888,7 @@ export class ClaudeDriver {
   #settleTurn(id: string, outcome: TurnOutcome): void {
     const turn = this.#turns.get(id);
     if (turn === undefined || turn.outcome !== null) return;
-    turn.outcome = outcome;
+    turn.outcome = { ...outcome, turnId: id };
     this.#writtenTurns.delete(id);
     this.#turnsInFlight -= 1;
     // Callback consumers have no UUID field: preserve the order they submitted prompts.
@@ -912,7 +939,11 @@ export class ClaudeDriver {
     const remaining = [...interrupt.targets].filter(id => this.#writtenTurns.has(id) && !cancelled.has(id) && !queued.has(id));
     const unaccountedLifecycle = remaining.some(id => { const turn = this.#turns.get(id)!; return turn.lifecycleCancelled && !turn.started; });
     const queuedBeforeCancel = [...queued].some(id => interrupt.targets.has(id));
-    if (all.some(id => !this.#writtenTurns.has(id)) || [...cancelled].some(id => queued.has(id)) || queuedBeforeCancel || remaining.length > 1 || unaccountedLifecycle || this.#turnsInFlight !== [...this.#turns.values()].filter(turn => turn.outcome === null).length) { this.#cancelMismatch(); return; }
+    // More than one unnamed prompt is accepted only when every one of them has STARTED: the active turn plus prompts
+    // folded into it (G-266; measured on 2.1.325, the receipt names neither). The interrupted turn's result must then
+    // list them all, or the result handler fails closed.
+    const unaccounted = remaining.length > 1 && remaining.some(id => !this.#turns.get(id)!.started);
+    if (all.some(id => !this.#writtenTurns.has(id)) || [...cancelled].some(id => queued.has(id)) || queuedBeforeCancel || unaccounted || unaccountedLifecycle || this.#turnsInFlight !== [...this.#turns.values()].filter(turn => turn.outcome === null).length) { this.#cancelMismatch(); return; }
     interrupt.received = true;
     clearTimeout(interrupt.timer);
     for (const id of cancelled) {
@@ -1165,7 +1196,23 @@ export class ClaudeDriver {
         // Taken for every turn, so a reason never leaks into the next one; attached only to a turn that failed.
         const failure = this.#failures.take();
         const settled = interrupted ?? outcome;
-        this.#settleTurn(id, settled.isError && failure !== undefined ? { ...settled, failure } : settled);
+        const final = settled.isError && failure !== undefined ? { ...settled, failure } : settled;
+        const covered = coveredPromptsOf(frame.value, id);
+        const wasInterruptTarget = this.#interrupt?.targets.has(id) === true;
+        this.#settleTurn(id, final);
+        // G-266, measured on Claude Code 2.1.325 (scripts/probe-claude-fold.mjs): a prompt written while a turn runs
+        // can be FOLDED into that turn. It then gets no result of its own; the joined turn's result lists it in
+        // user_message_uuids. Only our own unsettled prompts are settled from the list; a foreign id consumes nothing.
+        for (const other of covered ?? []) {
+          if (other !== id && this.#writtenTurns.has(other)) this.#settleTurn(other, { ...final, foldedInto: id });
+        }
+        // After an accepted interrupt, the interrupted turn's result must account for every target the receipt did
+        // not. One left over would wait forever, so the state is uncertain: fail closed, as cancel already does.
+        if (wasInterruptTarget && this.#interrupt?.received === true && [...this.#interrupt.targets].some(target => this.#writtenTurns.has(target))) {
+          this.#cancelMismatch();
+        }
+        // Reported only after every settle above: a throwing listener must not strand a turn.
+        if (covered === null) this.#events.onProtocolError?.('result user_message_uuids is malformed or omits its own prompt; folded prompts not settled', { recoverable: true });
       }
     }
 

@@ -10,6 +10,8 @@ import { ClaudeCancelStateError } from '../src/index.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/claude-queued-cancel.mjs', import.meta.url));
 const sessions: Awaited<ReturnType<typeof session>>[] = [];
+// Every ClaudeDriver outcome names its prompt (G-266); these tests assert order and content, so the ids are checked, then set aside.
+const withoutTurnIds = (outcomes: TurnOutcome[]) => outcomes.map(({ turnId, ...rest }) => { expect(turnId).toMatch(/^[a-f0-9-]{36}$/); return rest; });
 const until = async (ready: () => boolean) => {
   const deadline = Date.now() + 8000;
   while (!ready()) { if (Date.now() > deadline) throw new Error('Controlled CLI did not reach the required condition'); await new Promise(resolve => setTimeout(resolve, 10)); }
@@ -102,7 +104,7 @@ describe('ClaudeDriver UUID cancellation at the real prompt/cancel process entry
     await s.driver.cancel(); await until(() => s.outcomes.length >= 2);
     expect(s.state().interrupts).toHaveLength(1);
     expect(s.state().interrupts[0]?.request).toEqual({ subtype: 'interrupt', cancel_queued: true });
-    expect(s.outcomes).toEqual([
+    expect(withoutTurnIds(s.outcomes)).toEqual([
       { stopReason: 'cancelled', isError: false, raw: 'aborted_streaming' },
       { stopReason: 'cancelled', isError: false, raw: 'dropped by cancel' },
     ]);
@@ -136,7 +138,7 @@ describe('ClaudeDriver UUID cancellation at the real prompt/cancel process entry
   it('lets a queued prompt that became active finish through its own native result, including coalesced frames', async () => {
     const s = await two('active');
     await s.driver.cancel(); await until(() => s.outcomes.length >= 2);
-    expect(s.outcomes).toEqual([
+    expect(withoutTurnIds(s.outcomes)).toEqual([
       { stopReason: 'end_turn', isError: false, raw: 'end_turn' },
       { stopReason: 'cancelled', isError: false, raw: 'aborted_streaming' },
     ]);
@@ -252,7 +254,7 @@ describe('ClaudeDriver UUID cancellation at the real prompt/cancel process entry
     const s = await session('exit');
     s.driver.prompt('FIRST'); await until(() => s.text.includes('READY-FIRST'));
     s.driver.prompt('SECOND'); await until(() => s.exited());
-    expect(s.outcomes).toEqual([
+    expect(withoutTurnIds(s.outcomes)).toEqual([
       { stopReason: null, isError: true, raw: 'Claude exited before prompt completion' },
       { stopReason: null, isError: true, raw: 'Claude exited before prompt completion' },
     ]);
