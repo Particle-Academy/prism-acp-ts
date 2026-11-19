@@ -35,6 +35,7 @@ import { type AcpUpdate, ClaudeToAcp } from './to-acp.js';
 import type { DriverCapabilities } from '../acp/agent.js';
 import { observeStopVerdict, stopVerdictSnapshot } from '../stop-verdict.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
+import { LivenessGate, pingTimeoutMs, type PingOptions } from '../liveness.js';
 
 /**
  * Claude driver's behavior claim, published by initialize for clients.
@@ -598,6 +599,9 @@ export class ClaudeDriver {
   #approvalStopped = false;
   #heldPrompts: string[] = [];
   #heldEndInput = false;
+  /** G-314: the one ping in flight, and the one probe request on the wire. */
+  readonly #liveness = new LivenessGate();
+  #lastFrameAt: number | undefined = undefined;
 
   /** Names of credentials withheld from the child, available after start(). */
   withheldCredentials: readonly string[] = [];
@@ -649,6 +653,47 @@ export class ClaudeDriver {
 
   get running(): boolean {
     return this.#child !== null && this.#child.exitCode === null;
+  }
+
+  /**
+   * When the CLI last wrote a frame to stdout, in epoch ms; undefined before the first (G-314). Only complete frames
+   * that parse count, and only frames FROM the CLI: a ping's own request is a write and never moves it. The CLI's
+   * answer to a ping IS a frame, so a ping that is answered advances it.
+   */
+  get lastFrameAt(): number | undefined {
+    return this.#lastFrameAt;
+  }
+
+  /**
+   * Ask the CLI whether it is still answering, without touching the session (G-314). The shared semantics are in
+   * liveness.ts: resolves true when the CLI answered, false on timeout, exit, a write failure or a stopped driver; never
+   * rejects; one ping in flight, sharing the first caller's timeout; `timeoutMs` clamped to 100..60000 (default 5000).
+   *
+   * The request is the control protocol's `mcp_status`, the one the Agent SDK's own `Query.mcpServerStatus()` sends
+   * (`{ type: 'control_request', request_id, request: { subtype: 'mcp_status' } }`). It is read-only: it reports MCP
+   * server state, writes no user message, starts no turn, and is answered by the CLI's control loop while a turn runs,
+   * as `interrupt` is. Claude Code 2.1.327 itself lists `mcp_status` among the control requests that do not count as
+   * session activity. The answer is correlated by `request_id` alone and its content is discarded, so it cannot change
+   * {@link mcpServers}. An error answer counts as an answer: the CLI read and processed the request. The other control
+   * requests this driver sends are not candidates: `initialize` sets a session up, `set_model` changes it, `interrupt`
+   * ends a turn.
+   */
+  ping(options: PingOptions = {}): Promise<boolean> {
+    const stdin = this.#io?.stdin;
+    if (!this.running || this.#stopPromise !== null || this.#approvalStopped || this.#cancelFailure || this.#approvalFailure !== null
+      || stdin === null || stdin === undefined || stdin.destroyed || stdin.writableEnded) return Promise.resolve(false);
+    return this.#liveness.ping(pingTimeoutMs(options.timeoutMs), () => {
+      this.#controlSequence += 1;
+      const id = `prism-acp-ping-${this.#controlSequence}`;
+      return new Promise<void>((resolve, reject) => {
+        this.#controlWaiters.set(id, { resolve: () => resolve(), reject });
+        stdin.write(encodeLine({ type: 'control_request', request_id: id, request: { subtype: 'mcp_status' } }), (cause) => {
+          if (cause === null || cause === undefined) return;
+          this.#controlWaiters.delete(id);
+          reject(cause);
+        });
+      });
+    });
   }
 
   start(): void {
@@ -808,7 +853,7 @@ export class ClaudeDriver {
       this.#removeApprovals();
       // Flush first: a frame can be complete without its trailing newline, and
       // the LAST frame of a turn is the `result` that carries the outcome.
-      this.#emit(this.#framer.end());
+      this.#emit(this.#noteFrames(this.#framer.end()));
       this.#clearInterrupt();
       for (const [id, turn] of this.#turns) if (turn.outcome === null) this.#settleTurn(id, { stopReason: null, isError: true, raw: 'Claude exited before prompt completion' });
       this.#flushOutcomes();
@@ -1131,7 +1176,13 @@ export class ClaudeDriver {
   }
 
   #onStdout(chunk: Buffer): void {
-    this.#emit(this.#framer.push(chunk));
+    this.#emit(this.#noteFrames(this.#framer.push(chunk)));
+  }
+
+  /** Record when the CLI last wrote a frame that parsed (G-314), before any is handled, so a listener already sees it. */
+  #noteFrames(frames: ReturnType<NdjsonFramer['push']>): ReturnType<NdjsonFramer['push']> {
+    if (frames.some((frame) => frame.ok)) this.#lastFrameAt = Date.now();
+    return frames;
   }
 
   #emit(frames: ReturnType<NdjsonFramer['push']>): void {

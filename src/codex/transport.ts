@@ -16,6 +16,11 @@ export interface CodexTransport {
   /** End app-server and its whole process tree, and say whether anything is left. */
   stop?(options?: StopOptions): Promise<StopVerdict>;
   readonly processTree?: ProcessTree | null;
+  /**
+   * Whether the process is running: spawned and not exited (G-314). Optional; without it CodexDriver reads a transport
+   * as running from start() until it reports onExit.
+   */
+  readonly running?: boolean;
 }
 
 export interface CodexTransportOptions {
@@ -112,6 +117,11 @@ export class StdioCodexTransport implements CodexTransport {
 
   get processTree(): ProcessTree | null {
     return this.#provider?.tree ?? null;
+  }
+
+  /** ClaudeDriver's `running`, over the same object: the supervised child, spawned and without an exit code. */
+  get running(): boolean {
+    return this.#child !== null && this.#child.exitCode === null;
   }
 
   #onStderr(chunk: string): void {

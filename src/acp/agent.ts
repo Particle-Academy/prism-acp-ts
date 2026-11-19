@@ -30,6 +30,7 @@ import type { SessionModelState } from '../models.js';
 import { observeStopVerdict } from '../stop-verdict.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
 import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
+import type { PingOptions } from '../liveness.js';
 import { PromptRefused, promptBlockKind, promptBlocks, type PromptBlockKind, type PromptContent } from '../prompt.js';
 import { CommandUnsupported } from '../codex/commands.js';
 import { SteerInputError, SteerUnsupported, safeNativeId, validSteerId, type SteerAcceptance, type SteerOptions, type SteerState, type SteerUpdate, type SteeringState } from '../steer.js';
@@ -92,6 +93,15 @@ export interface AgentDriver {
    * because Claude's reported resets are accurate.
    */
   readRateLimits?(): Promise<void>;
+  /**
+   * Liveness (G-314): whether the agent process still answers a harmless read-only request. Resolves true or false and
+   * never rejects; side-effect free and safe mid-turn. Both shipped drivers implement it; see liveness.ts.
+   */
+  ping?(options?: PingOptions): Promise<boolean>;
+  /** Epoch ms of the agent's last stdout frame; undefined before the first. Both shipped drivers implement it. */
+  readonly lastFrameAt?: number | undefined;
+  /** Whether the agent process has been spawned and has not exited. Both shipped drivers implement it. */
+  readonly running?: boolean;
   readonly cliSessionId: string | null;
   readonly withheldCredentials: readonly string[];
 }

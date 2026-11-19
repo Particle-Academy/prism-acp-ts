@@ -1375,6 +1375,35 @@ A driver an embedder writes without `cancel()` gets that same stop.
 A cancel with no turn in flight does nothing. Closing the connection still stops
 every agent.
 
+## Liveness: is the agent stalled or just busy?
+
+A turn that has gone quiet may be thinking, running a long tool, or stuck. Both drivers give a host what it needs to
+tell those apart and offer Stop/Restart only when the agent really stopped answering:
+
+```ts
+const alive = await driver.ping({ timeoutMs: 5_000 }); // true: the agent answered; false: it did not
+driver.lastFrameAt;                                     // epoch ms of the agent's last stdout frame; undefined before the first
+driver.running;                                         // the agent process has been spawned and has not exited
+```
+
+- **`ping()` never rejects.** It resolves `true` when the agent answered a harmless read-only request -- an error
+  answer counts, because the agent read and processed it -- and `false` when it did not answer within the timeout, when
+  the request could not be written, when the process exited first, or when the driver is not started or is stopping.
+- **It touches nothing.** Claude is sent the control protocol's `mcp_status` request, the one the Agent SDK's own
+  `mcpServerStatus()` sends; Codex is sent `model/list`, the request `modelState()` already uses. Neither writes a user
+  message, starts, steers, interrupts or joins a turn, or changes session state, and it is safe mid-turn: a turn's
+  outcome, updates and usage are the same with or without a ping. The answer is matched by its request id only.
+- **It is bounded.** `timeoutMs` is clamped to 100..60000 ms (default 5000). Concurrent calls share one ping, and its
+  first caller's timeout. A ping that timed out leaves its one request outstanding, and the next ping waits on that same
+  request rather than sending another, so a stalled agent is never sent a growing queue of probes.
+- **`lastFrameAt` counts only frames from the agent** that parse. Writing a ping never moves it; the agent's ANSWER to a
+  ping is a frame, so an answered ping does.
+- **`running`** is the same on both drivers: true from `start()` until the process exits, across every turn. `stop()`
+  and `kill()` do not clear it themselves; the exit does.
+
+A host can combine them: if `lastFrameAt` is old and a ping comes back `false`, the agent is not answering, and Stop or
+Restart is the honest offer.
+
 ## Ending a session ends every process it started
 
 Each CLI runs under a small supervisor that owns its whole process tree -- the CLI, its MCP servers, the shells and tool
