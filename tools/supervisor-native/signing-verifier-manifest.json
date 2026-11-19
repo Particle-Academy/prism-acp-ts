@@ -14,7 +14,7 @@
     {
       "file": "package.json",
       "mode": "lf",
-      "sha256": "c64f0d5962957d699039b353b921a847a8f6f299ec3eb4f643b679c42a8f847d"
+      "sha256": "bc05124708b4eeb3fc6519a6bf2f2691d3b91ba31b5126e8293bfac3e8c3e4f3"
     },
     {
       "file": "tools/supervisor-native/publisher-signature.ps1",
