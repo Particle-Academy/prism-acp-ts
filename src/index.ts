@@ -77,7 +77,7 @@ export type {
   TextResource,
 } from './prompt.js';
 
-export { stripAnsiControlSequences } from './text.js';
+export { boundProviderText, markVisible, MAX_PROVIDER_TEXT_CHARS, PROVIDER_TEXT_TRUNCATED, stripAnsiControlSequences } from './text.js';
 export type { SanitizedProviderText } from './text.js';
 
 export { ClaudeToAcp } from './claude/to-acp.js';
@@ -127,7 +127,7 @@ export type { Served, ServeOptions } from './acp/stdio.js';
 export { cliSessionIdOf, turnOutcomeOf } from './claude/driver.js';
 export type { StopReason, TurnOutcome } from './claude/driver.js';
 export { ClaudeTurnFailures, codexFailureOf } from './turn-failure.js';
-export type { TurnFailure, TurnFailureKind } from './turn-failure.js';
+export type { CodexFailureOptions, TurnFailure, TurnFailureKind } from './turn-failure.js';
 
 export { CODEX_DRIVER_CAPABILITIES, CodexDriver } from './codex/driver.js';
 export { SteerInputError, SteerUnsupported } from './steer.js';
