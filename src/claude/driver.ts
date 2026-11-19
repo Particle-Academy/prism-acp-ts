@@ -366,6 +366,18 @@ export interface TurnOutcome {
    * other fields repeat the joined turn's outcome, because this prompt's content was handled by that turn.
    */
   readonly foldedInto?: string;
+  /**
+   * Set on the end of a turn the CLI started ON ITS OWN, with no prompt of ours behind it (G-313): for example when a
+   * background task the agent started (`gh run watch`) finishes after the previous turn settled. Such an outcome names
+   * no prompt, so `turnId` is absent; it carries the stop reason, failure and usage like any other. A host must not
+   * answer a pending prompt of its own with it. Only a LIVE turn ends this way -- see ClaudeDriver's result handling.
+   */
+  readonly unsolicited?: true;
+  /**
+   * The driver-generated id of the self-started turn this outcome ends, set with `unsolicited`. A prompt of ours the
+   * CLI folded into that turn names it as `foldedInto`. It is never a prompt id.
+   */
+  readonly unsolicitedTurnId?: string;
 }
 
 /**
@@ -388,11 +400,14 @@ const STOP_REASONS: Readonly<Record<string, StopReason>> = {
  * The prompts a `result` frame says its turn covered, beyond its own (G-266): `user_message_uuids`, measured on Claude
  * Code 2.1.325, lists the turn's own prompt and every prompt folded into it. Absent means nothing was folded (older
  * CLIs). Null means the list is present but cannot be trusted: not unique strings, or missing the result's own prompt.
+ *
+ * `own` is omitted only for a turn the CLI started itself (G-313): its own message is the CLI's, not a prompt of ours,
+ * and whether the list carries it has not been measured, so only the list's shape is checked.
  */
-export function coveredPromptsOf(frame: unknown, own: string): readonly string[] | null {
+export function coveredPromptsOf(frame: unknown, own?: string): readonly string[] | null {
   if (!isObject(frame) || !('user_message_uuids' in frame) || frame.user_message_uuids === undefined || frame.user_message_uuids === null) return [];
   const list = frame.user_message_uuids;
-  if (!Array.isArray(list) || !list.every(id => typeof id === 'string') || new Set(list).size !== list.length || !list.includes(own)) return null;
+  if (!Array.isArray(list) || !list.every(id => typeof id === 'string') || new Set(list).size !== list.length || (own !== undefined && !list.includes(own))) return null;
   return list as string[];
 }
 
@@ -447,6 +462,18 @@ function interruptedOutcomeOf(frame: unknown): TurnOutcome | null {
   const reason = frame.terminal_reason;
   if (typeof reason !== 'string' || !ABORTED_TERMINAL_REASONS.has(reason)) return null;
   return { stopReason: 'cancelled', isError: false, raw: reason };
+}
+
+/**
+ * Whether a frame is evidence of a model turn running NOW (G-313). A `stream_event` is a partial-message delta, which
+ * the CLI produces only while it streams (`--include-partial-messages`) and never re-sends for history. A complete
+ * `assistant` message also counts, unless the CLI marks it as a replay (`isReplay`) or as synthetic. A `result` is
+ * never evidence of liveness on its own: it is what a replay would carry.
+ */
+function isLiveActivity(frame: unknown): boolean {
+  if (!isObject(frame)) return false;
+  if (frame.isReplay === true || frame.isSynthetic === true) return false;
+  return frame.type === 'stream_event' || frame.type === 'assistant';
 }
 
 export function cliSessionIdOf(frame: unknown): string | null {
@@ -542,6 +569,12 @@ export class ClaudeDriver {
   /** In submission order, including settled queued prompts awaiting an earlier result. */
   readonly #turns = new Map<string, { outcome: TurnOutcome | null; started: boolean; lifecycleCancelled: boolean }>();
   readonly #writtenTurns = new Set<string>();
+  /**
+   * The CLI is running a turn of its OWN (G-313): live output arrived after the last accepted result while no prompt
+   * of ours was in flight. Only then may a result that names no prompt of ours end a turn; otherwise such a result --
+   * a replay on resume, a stray -- is dropped, as before. Cleared by every accepted result.
+   */
+  #unsolicitedLive = false;
   #interrupt: { id: string; targets: Set<string>; received: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
   #controlSequence = 0;
   /** This driver's own control requests awaiting the CLI's control_response, by request_id. */
@@ -1181,16 +1214,29 @@ export class ClaudeDriver {
         }
         continue;
       }
+      // G-313: output with no prompt of ours in flight is a turn the CLI started itself (a background task finished).
+      if (this.#writtenTurns.size === 0 && isLiveActivity(frame.value)) this.#unsolicitedLive = true;
       const outcome = turnOutcomeOf(frame.value);
       let id: string | undefined;
+      let unsolicited = false;
       if (outcome !== null) {
         const nativeId = isObject(frame.value) ? frame.value.user_message_uuid : undefined;
-        // Older CLI serial results omitted the UUID. Explicit foreign/replayed IDs never consume another turn.
-        id = typeof nativeId === 'string' ? nativeId : this.#writtenTurns.values().next().value;
-        if (id === undefined || !this.#writtenTurns.has(id)) continue;
+        // A result naming a written prompt of ours is that prompt's, whatever else is true. Older CLI serial results
+        // omitted the UUID and settle the first written prompt -- unless a self-started turn is live, whose result
+        // this is. Explicit foreign/replayed IDs never consume another turn.
+        if (typeof nativeId === 'string') id = this.#writtenTurns.has(nativeId) ? nativeId : undefined;
+        else if (!this.#unsolicitedLive) id = this.#writtenTurns.values().next().value;
+        if (id === undefined || !this.#writtenTurns.has(id)) {
+          // No live self-started turn: a replay on resume or a stray result, dropped as before. Never a turn end.
+          if (!this.#unsolicitedLive) continue;
+          id = undefined;
+          unsolicited = true;
+        }
+        this.#unsolicitedLive = false;
       }
       acceptedFrames.push(frame);
       this.#failures.observe(frame.value);
+      if (outcome !== null && unsolicited) this.#endUnsolicited(frame.value, outcome);
       if (outcome !== null && id !== undefined) {
         const interrupted = this.#interrupt?.targets.has(id) ? interruptedOutcomeOf(frame.value) : null;
         // Taken for every turn, so a reason never leaks into the next one; attached only to a turn that failed.
@@ -1227,6 +1273,32 @@ export class ClaudeDriver {
     // usage_update that the same `result` frame generates. Firing first would
     // resolve session/prompt before its own usage arrived.
     this.#flushOutcomes();
+  }
+
+  /**
+   * End a turn the CLI started itself (G-313). Its outcome names no prompt (`unsolicited`, no `turnId`) and is
+   * delivered ahead of any prompt it settles, as a joined turn is in a fold. A prompt of ours written while it ran and
+   * folded into it is named in its `user_message_uuids`, and settles with `foldedInto` this turn's generated id, under
+   * the G-266 rules: only our own unsettled prompts settle, and an untrustworthy list folds nothing.
+   */
+  #endUnsolicited(frame: unknown, outcome: TurnOutcome): void {
+    const nativeId = isObject(frame) && typeof frame.user_message_uuid === 'string' ? frame.user_message_uuid : undefined;
+    const covered = coveredPromptsOf(frame, nativeId);
+    const folded = (covered ?? []).filter(other => this.#writtenTurns.has(other));
+    const interrupt = this.#interrupt;
+    const wasInterruptTarget = interrupt !== null && folded.some(other => interrupt.targets.has(other));
+    // Our interrupt aborts whatever turn runs, this one included: that abort is a cancel, not a failure.
+    const interrupted = interrupt !== null ? interruptedOutcomeOf(frame) : null;
+    const failure = this.#failures.take();
+    const settled = interrupted ?? outcome;
+    const final = settled.isError && failure !== undefined ? { ...settled, failure } : settled;
+    const turn = randomUUID();
+    this.#pendingOutcomes.push({ ...final, unsolicited: true, unsolicitedTurnId: turn });
+    for (const other of folded) this.#settleTurn(other, { ...final, foldedInto: turn });
+    if (wasInterruptTarget && this.#interrupt?.received === true && [...this.#interrupt.targets].some(target => this.#writtenTurns.has(target))) {
+      this.#cancelMismatch();
+    }
+    if (covered === null) this.#events.onProtocolError?.('result user_message_uuids is malformed or omits its own prompt; folded prompts not settled', { recoverable: true });
   }
 
   #onStderr(chunk: string): void {

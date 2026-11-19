@@ -539,6 +539,9 @@ export class AcpAgent {
           return reason === undefined || reason === '' ? base : { ...base, reason };
         },
         onTurnEnd: (outcome) => {
+          // A turn the CLI started itself (G-313) answers no session/prompt: its output and usage already went out as
+          // session/update, and settling the client's pending prompt with it would end that prompt early.
+          if (outcome.unsolicited === true) return;
           const turn = session.turn;
           session.turn = null;
           // ACP: once the client has cancelled, the prompt is answered `cancelled` -- including when the turn

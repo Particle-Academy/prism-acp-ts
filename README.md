@@ -1347,6 +1347,26 @@ interrupt one. A driver that can implements `cancel()`, and declares
       end `cancelled` and the CLI stays up. If that result leaves a started
       prompt unaccounted for, the driver fails closed, as for any cancel
       accounting mismatch.
+  - **Unsolicited turn ends (G-313).** Claude Code sometimes starts a turn on
+    its own, for example when a background task the agent started (such as
+    `gh run watch`) finishes after the previous turn ended. That turn streams
+    output and then ends with a result that names none of your prompts.
+    - `onTurnEnd` fires for it with `unsolicited: true`, no `turnId`, and a
+      driver-generated `unsolicitedTurnId`. It carries the stop reason and
+      failure like any other outcome, and its usage arrives first as a
+      `usage_update`.
+    - A prompt you write while that turn runs can be folded into it. It then
+      ends with `foldedInto: <unsolicitedTurnId>`, under the same rules as
+      any fold. Later turn ends are not held behind it.
+    - Only a LIVE turn ends this way: model output (a streamed delta, or an
+      assistant message not marked as a replay) must arrive after the last
+      result while no prompt of yours is in flight. A result with no such
+      output before it, including one replayed on resume, is dropped as
+      before. A result that names one of your prompts is always that
+      prompt's.
+    - The ACP agent does not answer a pending `session/prompt` with an
+      unsolicited end. A direct embedder should not either: check
+      `outcome.unsolicited` before matching an outcome to a prompt.
 
 Once a client has cancelled, the prompt is answered `cancelled` even if the turn
 finished or failed in the race with the interrupt, as ACP requires. If the

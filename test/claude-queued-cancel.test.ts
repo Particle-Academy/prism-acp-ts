@@ -168,12 +168,17 @@ describe('ClaudeDriver UUID cancellation at the real prompt/cancel process entry
     expect(s.outcomes).toHaveLength(2);
   }, 20000);
 
-  it('does not let an unrelated result UUID finish the current prompt', async () => {
+  // G-313 narrowed what "foreign" means: a result naming no prompt of ours now ENDS a turn when the CLI is live in a
+  // turn it started itself (claude-self-started.test.ts). This one arrives while our prompt is in flight and with no
+  // self-started output before it, so it is still dropped: it neither finishes our prompt nor becomes an unsolicited end.
+  it('does not let an unrelated result UUID finish the current prompt, or end a turn of its own', async () => {
     const s = await session('foreign-result');
     s.driver.prompt('FIRST'); await until(() => s.text.includes('READY-FIRST'));
     expect(s.outcomes).toEqual([]);
     await s.driver.cancel(); await until(() => s.outcomes.length === 1);
     expect(s.outcomes[0]?.stopReason).toBe('cancelled');
+    expect(s.outcomes[0]).not.toHaveProperty('unsolicited');
+    expect(s.outcomes).toHaveLength(1);
   }, 20000);
 
   it('retains compatibility with an older CLI serial result that omits the UUID', async () => {

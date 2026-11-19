@@ -202,6 +202,22 @@ describe('session/prompt', () => {
     expect(reply?.result).toEqual({ stopReason: 'end_turn' });
   });
 
+  it('does not answer a pending prompt with the end of a turn the CLI started itself (G-313)', async () => {
+    const h = await opened();
+    const promise = h.peer.receive({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/prompt',
+      params: { sessionId: 'sess_1', prompt: [{ type: 'text', text: 'hello' }] },
+    });
+    h.drivers[0]?.finish({ stopReason: 'max_tokens', raw: 'max_tokens', unsolicited: true, unsolicitedTurnId: 'self-1' });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(h.sent.find((m) => m.id === 2)).toBeUndefined();
+    h.drivers[0]?.finish();
+    await promise;
+    expect(h.sent.find((m) => m.id === 2)?.result).toEqual({ stopReason: 'end_turn' });
+  });
+
   it('streams session/update notifications for the session', async () => {
     const h = await opened();
     h.drivers[0]?.emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'x' } });
