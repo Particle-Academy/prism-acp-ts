@@ -87,6 +87,8 @@ export type { MetadataOmission, InlineMetadataOmission, ToolDescriptionOmission 
 
 export { claudeMcpServers, codexListedReport, codexStartupReport } from './mcp-status.js';
 export type { McpServerReport, McpServerState } from './mcp-status.js';
+export { PING_TIMEOUT_DEFAULT_MS, PING_TIMEOUT_MAX_MS, PING_TIMEOUT_MIN_MS, pingTimeoutMs } from './liveness.js';
+export type { PingOptions } from './liveness.js';
 export { parseRateLimit, rateLimitNotice, readRateLimit } from './claude/rate-limit.js';
 export type { ClaudeRateLimit, ClaudeRateLimitWindow, RateLimitRead } from './claude/rate-limit.js';
 

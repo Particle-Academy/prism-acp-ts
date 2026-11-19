@@ -38,6 +38,7 @@ import {
   projectBudgetedToolMeta,
 } from '../meta.js';
 import { codexListedReport, codexStartupReport, type McpServerReport } from '../mcp-status.js';
+import { LivenessGate, pingTimeoutMs, type PingOptions } from '../liveness.js';
 import { codexFileEdits, FileEditRefused, type FileEdit } from '../edits.js';
 import { codexCommand, commandsMeasured, CommandUnsupported, type CodexCommand } from './commands.js';
 import type {
@@ -277,6 +278,11 @@ export class CodexDriver implements AgentDriver {
   #steerMethodMissing = false;
   readonly #missingCommands = new Set<CodexCommand>();
   readonly #steers: SteerLedger;
+  /** G-314: the one ping in flight, and the one probe request on the wire. */
+  readonly #liveness = new LivenessGate();
+  #lastFrameAt: number | undefined = undefined;
+  /** The transport reported its process closed (onExit). Read by {@link running} only for a transport without `running`. */
+  #transportExited = false;
 
   withheldCredentials: readonly string[] = [];
   cliSessionId: string | null = null;
@@ -327,6 +333,52 @@ export class CodexDriver implements AgentDriver {
   /** Resolves once initialize and thread start/resume have completed. */
   get ready(): Promise<void> {
     return this.#ready;
+  }
+
+  /**
+   * Whether the app-server process is running (G-314), with ClaudeDriver's `running` semantics exactly: false before
+   * start(); true from the moment start() has spawned the process, across every turn's start and end, whether or not
+   * the handshake or a turn has finished; false once the process has exited. stop() and kill() do not make it false on
+   * their own -- the process exiting does, as in ClaudeDriver. It is the same expression over the same object: the
+   * supervised child's `exitCode === null`, read from the stdio transport. A custom transport without `running` is
+   * read as running from start() until it reports onExit.
+   */
+  get running(): boolean {
+    const transport = this.#transport;
+    if (transport === null) return false;
+    return transport.running ?? !this.#transportExited;
+  }
+
+  /**
+   * When app-server last wrote a frame, in epoch ms; undefined before the first (G-314). Counts every frame the
+   * transport delivers -- responses, notifications and server requests -- and nothing this driver writes: a ping's own
+   * request never moves it. The answer to a ping IS a frame, so a ping that is answered advances it.
+   */
+  get lastFrameAt(): number | undefined {
+    return this.#lastFrameAt;
+  }
+
+  /**
+   * Ask app-server whether it is still answering, without touching the thread (G-314). The shared semantics are in
+   * liveness.ts: resolves true when it answered, false on timeout, exit, a write failure or a stopped driver; never
+   * rejects; one ping in flight, sharing the first caller's timeout; `timeoutMs` clamped to 100..60000 (default 5000).
+   *
+   * The request is `model/list` (`{ cursor: null, includeHidden: false }`), the read-only RPC modelState() already
+   * sends: it lists the account's models and changes nothing. It names no thread or turn, so it cannot start, steer or
+   * interrupt one, and its response carries no method, so it never touches the turn inactivity deadline. Correlated by
+   * JSON-RPC id in JsonRpcPeer; a response with any other id resolves nothing. A JSON-RPC ERROR answer counts as an
+   * answer: app-server read and processed the request.
+   */
+  ping(options: PingOptions = {}): Promise<boolean> {
+    const peer = this.#peer;
+    if (!this.#started || this.#closed || this.#stopPromise !== null || peer === null || peer.failed || !this.running) {
+      return Promise.resolve(false);
+    }
+    return this.#liveness.ping(pingTimeoutMs(options.timeoutMs), () =>
+      peer.request('model/list', { cursor: null, includeHidden: false }).catch((cause: unknown) => {
+        if (cause instanceof RpcError) return undefined;
+        throw cause;
+      }));
   }
 
   start(): void {
@@ -699,10 +751,10 @@ export class CodexDriver implements AgentDriver {
     Object.assign(env, this.#mcpEnv);
 
     const handlers: CodexTransportHandlers = {
-      onFrame: (frame) => this.#receive(frame),
+      onFrame: (frame) => { this.#lastFrameAt = Date.now(); this.#receive(frame); },
       onStderr: (line) => this.#events.onStderr?.(line),
       onProblem: (problem, detail) => { this.#steers.gap(); this.#events.onProtocolError?.(problem, detail); },
-      onExit: (code, signal) => this.#onExit(code, signal),
+      onExit: (code, signal) => { this.#transportExited = true; this.#onExit(code, signal); },
     };
     const binaryArgs = this.#options.nativeTools === 'none'
       ? [...(this.#options.binaryArgs ?? []), ...RESTRICTED_STARTUP_ARGS]
