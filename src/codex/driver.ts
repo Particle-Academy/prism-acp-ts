@@ -234,6 +234,8 @@ export class CodexDriver implements AgentDriver {
   readonly #items = new Map<string, Record<string, unknown>>();
   readonly #activeItemIds = new Set<string>();
   readonly #messageDeltas = new Set<string>();
+  /** The API key this app-server was logged in with, if any: redacted from forwarded provider failure text (G-311). */
+  #loginKey: string | null = null;
   readonly #reasoningDeltas = new Set<string>();
   readonly #commandOutputs = new Map<string, { text: string; truncated: boolean }>();
   readonly #commandOutputTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -688,6 +690,7 @@ export class CodexDriver implements AgentDriver {
   async #connect(): Promise<void> {
     const parentEnv = this.#options.parentEnv ?? process.env;
     const keyed = apiKeyHome('codex', this.#options.credentials, parentEnv, this.#options.processTree);
+    this.#loginKey = keyed?.apiKey ?? null;
     const { env, withheld } = childEnv(parentEnv, {
       allow: ['CODEX_HOME', 'CODEX_CONFIG_DIR', 'XDG_CONFIG_HOME', ...(this.#options.allowEnv ?? [])],
       ...(keyed === null ? {} : { set: apiKeyEnvironment('codex', keyed) }),
@@ -1201,7 +1204,8 @@ export class CodexDriver implements AgentDriver {
           this.#finishTurn({ stopReason: 'cancelled', isError: false, raw: status }, id);
         } else {
           // The reason rides on the outcome (tynn #791): a usage limit read as an ordinary failure was never resumed.
-          const failure = codexFailureOf(turn.error);
+          // Its provider message and details are untrusted text: bounded, marked, and never holding the login key.
+          const failure = codexFailureOf(turn.error, this.#loginKey === null ? {} : { redact: [this.#loginKey] });
           this.#finishTurn({ stopReason: null, isError: true, raw: status, ...(failure === undefined ? {} : { failure }) }, id);
         }
         return;

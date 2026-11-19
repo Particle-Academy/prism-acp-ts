@@ -998,11 +998,61 @@ fixture home and is never printed to the probe log; the fixture directory is rem
 
 ### Commit streamed messages at the turn boundary
 
-Chunks can omit `messageId`; when no id is supplied, use the turn boundary to
-commit the accumulated message. Codex assistant chunks carry their item id;
-clients can group them by `messageId`. Clearing the in-flight message without committing loses the
-reply (including the whole reply in a single-message turn); not clearing it
-appends the next turn to the previous one.
+Every live `agent_message_chunk` from either driver carries `messageId` at the
+update's root, beside `content`: the same field in the same place, so one
+client handles both drivers identically. Group chunks by `messageId`, and treat
+a new id as a new assistant message even inside one turn.
+
+- **Codex**: the app-server item id.
+- **Claude**: the Anthropic message id from the stream's `message_start`
+  (`msg_...`). A reply that stops for a tool call or a subagent and then
+  continues arrives as a NEW assistant message with a new id, so the two are not
+  merged. When the stream gives no usable id (missing, or not a short opaque
+  token), one is generated at that `message_start`, prefixed `prism_msg_`, and
+  every chunk of that message carries it. A synthetic CLI message uses its own
+  id the same way; a built-in command's output (`particle.academy/local_command`)
+  gets a generated id of its own.
+
+Commit the in-flight message when the id changes, and at the turn boundary for
+the last one. Older clients and other ACP agents can still omit `messageId`;
+then use the turn boundary alone. Clearing the in-flight message without
+committing loses the reply (including the whole reply in a single-message
+turn); not clearing it appends the next turn to the previous one.
+`agent_thought_chunk` from a live stream does not carry `messageId` in either
+driver.
+
+### Why a turn failed
+
+A turn that fails answers `session/prompt` with a JSON-RPC error whose `data`
+holds `particle.academy/turn_failure` (`META_TURN_FAILURE`):
+
+```ts
+{
+  reason: string;          // the provider's own code, e.g. 'cyberPolicy', 'rate_limit'
+  kind: 'rate_limit' | 'overloaded' | 'auth' | 'billing' | 'other';
+  resetsAtMs?: number;     // only when the provider said when the limit resets
+  providerMessage?: string;                          // Codex only
+  providerDetails?: Record<string, string | number>; // Codex only
+}
+```
+
+`providerMessage` is Codex's own `TurnError.message`, for example why a
+`cyberPolicy` stop happened. `providerDetails` holds only these fields when
+Codex sent them: `additionalDetails`, `httpStatusCode`, `turnKind`,
+`misalignmentErrorType` and `misalignmentExplanation`. Only strings and safe
+integers are kept; anything else is dropped. A misalignment block's `steer` and
+`reviewTarget` are never forwarded, and neither is the raw frame.
+
+**Both fields are untrusted provider text.** Each string is limited to
+`MAX_PROVIDER_TEXT_CHARS` (2048) UTF-16 code units, with `PROVIDER_TEXT_TRUNCATED`
+(`…[truncated]`) appended when cut. Hidden and control characters are shown as
+`<U+XXXX>` instead of passed through (`markVisible`): C0 controls other than tab
+and line feed, DEL, C1 controls, bidi and zero-width format characters,
+variation selectors and lone surrogates. In API-key mode, the key the
+app-server was logged in with is replaced with `[redacted]` before the text is
+marked and cut, in case the provider echoes it. Act on `reason` and `kind`, which
+never come from the message. Show the message to a person as quoted provider
+text, never as an instruction. A field is absent when the provider sent nothing.
 
 ### Tool call updates
 

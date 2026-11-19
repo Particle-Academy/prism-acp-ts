@@ -49,6 +49,7 @@ import {
   META_USAGE,
   withMeta,
 } from '../meta.js';
+import { randomUUID } from 'node:crypto';
 import { claudeMcpServers } from '../mcp-status.js';
 import { stripAnsiControlSequences } from '../text.js';
 import { rateLimitNotice, readRateLimit } from './rate-limit.js';
@@ -154,7 +155,7 @@ export class ClaudeToAcp {
             this.#noteCall(input.parent_tool_use_id, input.event.usage);
           }
         }
-        return this.#streamEvent(input.event);
+        return this.#streamEvent(input.event, threadOf(input.parent_tool_use_id));
       case 'user':
         return this.#userFrame(input);
       case 'system':
@@ -195,9 +196,28 @@ export class ClaudeToAcp {
 
   #syntheticText(message: Record<string, unknown>): AcpUpdate[] {
     const blocks = Array.isArray(message.content) ? message.content : [];
+    // One synthetic message, one id: its own when usable, else one generated for it alone.
+    const messageId = upstreamMessageId(message.id) ?? generatedMessageId();
     return blocks
       .filter((block): block is Record<string, unknown> => isObject(block) && block.type === 'text' && typeof block.text === 'string')
-      .map((block) => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: block.text as string } }));
+      .map((block) => ({ sessionUpdate: 'agent_message_chunk', messageId, content: { type: 'text', text: block.text as string } }));
+  }
+
+  /**
+   * The assistant message each thread is streaming now, by `parent_tool_use_id` (`''` for the main thread), set at its
+   * `message_start` and cleared at its `message_stop` (G-312). Keyed per thread so a subagent's message can never lend
+   * its id to the main thread's text, or the reverse.
+   */
+  readonly #streaming = new Map<string, string>();
+
+  /** The id of the message `thread` is streaming; one is generated (and kept until its stop) if no start named one. */
+  #messageIdOf(thread: string): string {
+    let id = this.#streaming.get(thread);
+    if (id === undefined) {
+      id = generatedMessageId();
+      this.#streaming.set(thread, id);
+    }
+    return id;
   }
 
   /** Subagent calls already announced: the CLI can repeat a frame, and a call is announced once. */
@@ -234,23 +254,30 @@ export class ClaudeToAcp {
     return updates;
   }
 
-  #streamEvent(event: unknown): AcpUpdate[] {
+  #streamEvent(event: unknown, thread: string): AcpUpdate[] {
     if (!isObject(event)) return this.#unknown(event);
 
     switch (event.type) {
       case 'content_block_start':
         return this.#blockStart(event);
       case 'content_block_delta':
-        return this.#blockDelta(event);
+        return this.#blockDelta(event, thread);
       case 'content_block_stop':
         return this.#blockStop(event);
       case 'message_start':
-      case 'message_delta':
+        // A new assistant message: every text chunk until its stop carries its id. The Anthropic message id when the
+        // stream gives a usable one, else one generated HERE, at the boundary, so it is still one id per message.
+        this.#streaming.set(thread, upstreamMessageId(isObject(event.message) ? event.message.id : undefined) ?? generatedMessageId());
+        return [];
       case 'message_stop':
-        // Envelope boundaries with no ACP counterpart and nothing a client
-        // needs: the content they wrap is already mapped. Listed explicitly so
-        // they are not silently absorbed by the default branch, which would
-        // make the unmapped list noisy enough to stop being read.
+        this.#streaming.delete(thread);
+        return [];
+      case 'message_delta':
+        // An envelope update with no ACP counterpart: its usage is read in
+        // frame(). Listed explicitly so it is not silently absorbed by the
+        // default branch, which would make the unmapped list noisy enough to
+        // stop being read. The start and stop above emit nothing either; they
+        // only open and close the message id.
         return [];
       default:
         return this.#unknown(event);
@@ -292,7 +319,7 @@ export class ClaudeToAcp {
     return this.#unknown(event);
   }
 
-  #blockDelta(event: Record<string, unknown>): AcpUpdate[] {
+  #blockDelta(event: Record<string, unknown>, thread: string): AcpUpdate[] {
     const index = asIndex(event.index);
     const delta = isObject(event.delta) ? event.delta : {};
     const state = this.#blocks.get(index);
@@ -302,6 +329,9 @@ export class ClaudeToAcp {
         return [
           {
             sessionUpdate: 'agent_message_chunk',
+            // Same name and place as the Codex driver's (the update's root, beside `content`), so a client groups
+            // both drivers' chunks the same way.
+            messageId: this.#messageIdOf(thread),
             content: { type: 'text', text: asString(delta.text) ?? '' },
           },
         ];
@@ -390,7 +420,8 @@ export class ClaudeToAcp {
       if (stdout !== null) {
         const said = stdout[1]!.trim();
         return said === '' ? [] : [withMeta(
-          { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: said } },
+          // A command's output is its own message, not part of the reply around it.
+          { sessionUpdate: 'agent_message_chunk', messageId: generatedMessageId(), content: { type: 'text', text: said } },
           { [META_LOCAL_COMMAND]: true },
         )];
       }
@@ -901,6 +932,25 @@ function toolKind(name: string): string | undefined {
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/** The thread a stream frame belongs to: its `parent_tool_use_id`, or `''` for the main thread. */
+function threadOf(parent: unknown): string {
+  return typeof parent === 'string' ? parent : '';
+}
+
+/**
+ * An upstream message id we will repeat to a client: the Anthropic id (`msg_...`) as the stream names it, when it is a
+ * short opaque token. Anything else -- missing, empty, long, or carrying characters outside the token set -- is not
+ * used, and the caller generates an id instead (G-312).
+ */
+function upstreamMessageId(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,200}$/.test(value) ? value : undefined;
+}
+
+/** A generated id, for a message the stream gave no usable id: unique, and distinguishable from a provider's. */
+function generatedMessageId(): string {
+  return `prism_msg_${randomUUID()}`;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

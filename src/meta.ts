@@ -312,6 +312,10 @@ export const META_PARENT_TOOL_CALL = metaKey('parent_tool_call_id');
  * Why a turn failed, on the error a failed `session/prompt` answers with (JSON-RPC `error.data`): `{ reason, kind,
  * resetsAtMs? }` (see `TurnFailure` in src/turn-failure.ts). `kind` is `rate_limit`, `overloaded`, `auth`, `billing` or
  * `other`; `reason` is the provider's own value, verbatim; `resetsAtMs` appears only when the provider said when.
+ *
+ * A Codex failure may also carry `providerMessage` (the provider's own message) and `providerDetails` (allowlisted
+ * scalar detail fields). Both are UNTRUSTED provider text: bounded, with hidden and control characters marked
+ * `<U+XXXX>`, and never the source of `reason` or `kind` (G-311).
  */
 export const META_TURN_FAILURE = metaKey('turn_failure');
 

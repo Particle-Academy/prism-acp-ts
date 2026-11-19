@@ -129,7 +129,8 @@ describe('the wiring: framed output reaching the mapper, both outcomes reaching 
     const { updates, problems } = updatesFromFrames(framesFor(`${frame}\n`), new ClaudeToAcp());
     expect(problems).toEqual([]);
     expect(updates).toEqual([
-      { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hello' } },
+      // No message_start preceded it, so its message id is generated (G-312).
+      { sessionUpdate: 'agent_message_chunk', messageId: expect.stringMatching(/^prism_msg_/), content: { type: 'text', text: 'hello' } },
     ]);
   });
 
