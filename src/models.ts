@@ -5,6 +5,7 @@ import { assertModel } from './meta.js';
 import { NdjsonFramer, encodeLine } from './ndjson.js';
 import { launchProvider, type ProcessTreeOptions } from './process-tree.js';
 import { stripAnsiControlSequences } from './text.js';
+import { claudeConfigDir, type ClaudeConfigDir } from './claude/accounts.js';
 
 /**
  * THE MODELS A PROVIDER ACTUALLY OFFERS (tynn, Genie's model picker, 2026-10-21). Genie's picker was a hardcoded
@@ -126,6 +127,8 @@ export interface ListModelsOptions {
   readonly includeHidden?: boolean;
   /** Subscription (the default) or an API key with its home: what the account the list is for is. See credentials.ts. */
   readonly credentials?: ProviderCredentials;
+  /** Claude only: which account's configuration directory to ask, as ClaudeDriverOptions.configDir. */
+  readonly configDir?: ClaudeConfigDir;
 }
 
 /**
@@ -135,12 +138,17 @@ export interface ListModelsOptions {
  */
 export async function listModels(provider: 'claude' | 'codex', options: ListModelsOptions = {}): Promise<SessionModelState> {
   const parentEnv = options.parentEnv ?? process.env;
+  if (options.configDir !== undefined && provider !== 'claude') throw new ModelListError('configDir is a Claude option');
+  if (options.configDir !== undefined && options.credentials?.mode === 'apiKey') throw new ModelListError('configDir cannot be combined with API-key credentials');
+  const chosenDir = options.configDir === undefined ? undefined : claudeConfigDir(options.configDir);
   const keyed = apiKeyHome(provider, options.credentials, parentEnv, options.processTree);
   const { env } = childEnv(parentEnv, {
     allow: provider === 'claude'
-      ? ['CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', ...(options.allowEnv ?? [])]
+      ? [...(chosenDir === undefined ? ['CLAUDE_CONFIG_DIR'] : []), 'XDG_CONFIG_HOME',
+        ...(options.allowEnv ?? []).filter((name) => chosenDir === undefined || name.toUpperCase() !== 'CLAUDE_CONFIG_DIR')]
       : ['CODEX_HOME', 'CODEX_CONFIG_DIR', 'XDG_CONFIG_HOME', ...(options.allowEnv ?? [])],
-    ...(keyed === null ? {} : { set: apiKeyEnvironment(provider, keyed) }),
+    ...(keyed !== null ? { set: apiKeyEnvironment(provider, keyed) }
+      : typeof chosenDir === 'string' ? { set: { CLAUDE_CONFIG_DIR: chosenDir } } : {}),
   });
   const args = provider === 'claude'
     ? ['--print', '--output-format', 'stream-json', '--input-format', 'stream-json', '--verbose']

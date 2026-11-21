@@ -270,6 +270,118 @@ their ChatGPT login, so a `home` that is their subscription home is refused.
 - For `session/load`'s session check with Claude, pass the same directory as
   `probeSessionStore(id, { configDir: home })`.
 
+## Choosing a Claude account
+
+A person can have more than one Claude account on a machine, such as work and
+personal. Claude Code keeps one sign-in per configuration directory, so in this
+package **an account is a directory**. The host picks which directory the next
+launch uses. The library stores nothing. The host stores a label, the directory
+path, and the email or organization that the CLI itself reported. Neither of
+them stores a token or a key.
+
+```ts
+import { ClaudeDriver, claudeAccounts } from '@particle-academy/prism-acp';
+
+const work = { configDir: 'C:/Users/me/.claude-accounts/work', method: 'subscription' as const };
+
+// 1. Not signed in yet? Show the person this command in a terminal they can see.
+//    They finish Anthropic's own sign-in in the browser. The library never starts it.
+const login = claudeAccounts.loginCommand(work.configDir);
+// login.command + login.args: claude auth login --claudeai
+// login.env: the environment to start that terminal with, with CLAUDE_CONFIG_DIR set and credentials removed
+// login.display.posix / login.display.powershell: the same thing as one line, for a person to copy
+
+// 2. Before a launch, ask the CLI what is signed in there.
+const check = await claudeAccounts.check({ ...work, email: rememberedEmail }, { cwd });
+if (check.state === 'mismatch') showWhichAccountAndBillingIsLive(check.account, check.differences);
+if (check.state === 'signedOut') offerSignIn(login);
+
+// 3. Launch in that account.
+new ClaudeDriver({ cwd, configDir: work.configDir });
+```
+
+- `describe(configDir)` runs `claude auth status --json` with the same stripped
+  environment that a launch gets. It returns `signedIn`, the `method`
+  (`subscription`, `console`, `apiKey`, `none` or `other`, with the CLI's raw
+  `cliAuthMethod`), a `billing` hint, and the `email`, organization and plan
+  when the CLI prints them. It reads only named fields, so a field the CLI adds
+  later never reaches you through it. It also returns `configDirectoryMatches`,
+  which compares the directory the CLI says it used with the one you asked for.
+- `configDir: null` means the CLI's default account: `CLAUDE_CONFIG_DIR` is
+  removed from the child, including an inherited one. Do not pass the default's
+  path (`~/.claude`) instead. When the variable is set, Claude Code looks for its
+  global config inside that directory rather than at `~/.claude.json`. On macOS
+  it also keys its Keychain entry to the directory. Leaving `configDir` out
+  keeps the old behaviour, where an inherited `CLAUDE_CONFIG_DIR` passes through.
+- `listModels('claude', { configDir })` uses the same choice. For `session/load`
+  under an account, pass the same directory to `probeSessionStore(id, { configDir })`.
+- `configDir` cannot be combined with API-key `credentials`, because those bring
+  their own `home`.
+- **No automatic switching.** If an account hits its limit, nothing here moves
+  to another account. Switching without the person would need a stored key, and
+  this package does not store one.
+- **The library never opens a file under the directory.** The test suite
+  watches every `fs` call during `describe`, `check`, `loginCommand` and a
+  driver launch, and fails if any of them touches a path inside the directory.
+- **No `claude setup-token` / `CLAUDE_CODE_OAUTH_TOKEN` support.** The variable
+  is withheld from the child like every other credential.
+
+### What can move billing without anyone choosing it
+
+These are Anthropic's rules
+([authentication](https://code.claude.com/docs/en/authentication)). This
+package closes the first one and makes the others visible as a `mismatch`.
+
+- **An environment credential outranks the login.** The documented order is:
+  cloud provider, then `ANTHROPIC_AUTH_TOKEN`, then `ANTHROPIC_API_KEY`, then
+  `apiKeyHelper`, then `CLAUDE_CODE_OAUTH_TOKEN`, then Anthropic profiles, and
+  last the `/login` subscription. "In non-interactive mode (`-p`), the key is
+  always used when present." The child never receives any of these from the
+  parent, including `ANTHROPIC_PROFILE` and the Workload Identity Federation
+  variables. A key that a settings file sets (`env`, `apiKeyHelper`) is not in
+  the parent environment, so it cannot be withheld. `describe` reports it as
+  `method: 'apiKey'`. Measured: with `ANTHROPIC_API_KEY` set, status hides a
+  working subscription login completely. It does not test the key either, so a
+  bogus key still reads `loggedIn: true`.
+- **An expired login falls back.** After a subscription login expires,
+  "requests can use that credential instead, billed to its organization".
+  `loginExpiresAt` lets the host warn before that happens.
+- **A Console login without an API key is stored outside the directory.**
+  "Separate directories don't keep two Claude Console sign-ins without an API key
+  apart, because Claude Code stores that kind of sign-in outside the
+  configuration directory." Signing in that way also "signs you out of any
+  claude.ai login stored on the machine". `loginCommand(dir, { method: 'console' })`
+  returns both facts in `caveats`.
+- **An active Anthropic profile file** (in `%APPDATA%\Anthropic` or
+  `~/.config/anthropic`) is outside the child environment. When its mode is
+  federation, it outranks a claude.ai login. The library cannot strip it. It
+  shows up as a mismatch.
+
+### The terms, and what they leave open
+
+- Allowed: "an end user ... signing in to the unmodified Claude Code binary with
+  their own Claude subscription"
+  ([legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)).
+  Several accounts, one directory each, is documented in
+  [authentication](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts).
+- Forbidden: developers "may not collect, store, or intermediate Claude.ai
+  credentials or session tokens — sign-in to a Claude account must complete
+  through Anthropic's own flow"
+  ([legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)).
+  That is why the login is a command for the person, and why there is no token
+  path.
+- Limits: "Advertised usage limits for Pro, Max, and Ultra plans assume
+  ordinary, individual usage of Claude Code and the Agent SDK" (same page). The
+  [Consumer Terms](https://www.anthropic.com/legal/consumer-terms) §3 forbid
+  access "through automated or non-human means" except "via an Anthropic API Key
+  or where we otherwise explicitly permit it".
+- **Unclear:** whether several accounts may run sessions at the same moment. No
+  Anthropic source addresses it. Also unclear: whether agent runs that an app
+  starts for its user count as "ordinary, individual usage". The sign-in
+  carve-out covers a person signing in. It does not say how much autonomous
+  work that sign-in may then carry. Read these pages again before you rely on
+  this; Anthropic has changed them before.
+
 ## Framing is pinned, not inferred
 
 This package exists in three languages, and framing is where three
