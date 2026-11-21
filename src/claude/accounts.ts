@@ -73,6 +73,12 @@ export interface ClaudeAccountStatus {
   readonly subscriptionType?: string;
   /** The NAME of where an API key came from (`ANTHROPIC_API_KEY`, ...). Never a value. */
   readonly apiKeySource?: string;
+  /**
+   * The directory this status was ASKED for: the resolved path, or `null` when CLAUDE_CONFIG_DIR was left unset (the
+   * CLI's default). `compare()` matches a selection against this, so a status for one account is never read as
+   * another's.
+   */
+  readonly requestedConfigDir: ClaudeConfigDir;
   /** The directory the CLI says it used. */
   readonly configDirectory?: string;
   /** False when the CLI reports a different directory from the one asked for: the selection did not take effect. */
@@ -204,6 +210,7 @@ export function claudeAccountStatusOf(value: unknown, configDir: ClaudeConfigDir
     signedIn,
     method,
     cliAuthMethod,
+    requestedConfigDir: configDir === null ? null : resolve(configDir),
     billing: !signedIn ? 'none' : method === 'subscription' ? 'subscription' : method === 'console' || method === 'apiKey' ? 'apiUsage' : 'unknown',
     ...optional('email', field(raw.email)),
     ...optional('organizationId', field(raw.orgId)),
@@ -333,7 +340,13 @@ export interface ClaudeAccountSelection {
   readonly email?: string;
 }
 
-export type ClaudeAccountDifference = 'method' | 'email' | 'configDirectory';
+/**
+ * - `directory`: the status was taken for a different directory from the selected one (another path, or the default
+ *   when a path was selected, or the reverse). The status describes another account.
+ * - `configDirectory`: the CLI reported using a different directory from the one it was given.
+ * - `method`, `email`: the account in that directory is not the one the person picked.
+ */
+export type ClaudeAccountDifference = 'directory' | 'method' | 'email' | 'configDirectory';
 
 /**
  * Whether the live account is the selected one.
@@ -357,6 +370,7 @@ export type ClaudeAccountCheck =
 /** Compare a status with a selection. Pure: no process, no filesystem. */
 export function claudeAccountCheck(selection: ClaudeAccountSelection, account: ClaudeAccountStatus): ClaudeAccountCheck {
   const differences: ClaudeAccountDifference[] = [];
+  if (!sameSelectedDirectory(selection.configDir, account)) differences.push('directory');
   if (!account.configDirectoryMatches) differences.push('configDirectory');
   if (!account.signedIn && differences.length === 0) return { state: 'signedOut', account };
   if (account.signedIn && account.method !== selection.method) differences.push('method');
@@ -367,6 +381,31 @@ export function claudeAccountCheck(selection: ClaudeAccountSelection, account: C
     && !differences.includes('method')) differences.push('email');
   if (differences.length > 0) return { state: 'mismatch', account, expected: selection, differences: Object.freeze(differences) };
   return { state: 'ready', account };
+}
+
+/**
+ * Whether the status describes the selected directory.
+ *
+ * `null` (the default) matches only a status taken with CLAUDE_CONFIG_DIR unset -- never one taken with the variable
+ * set to the default's path, because Claude Code treats those two differently (see the top of this file). A path
+ * matches a status taken for the same path: both resolved, so trailing separators and mixed separators do not count,
+ * and case-insensitive where the filesystem usually is (Windows, macOS), as `samePath` does for the CLI's report.
+ *
+ * A status that does not say which directory it was taken for (built by hand, or stored by an older version of this
+ * package) falls back to the directory the CLI reported, for a path; for the default there is nothing to compare
+ * without assuming where the default lives, so it is a mismatch. An invalid selection is a mismatch, not a throw.
+ */
+function sameSelectedDirectory(selected: ClaudeConfigDir, account: ClaudeAccountStatus): boolean {
+  let want: string | null;
+  try { want = claudeConfigDir(selected); } catch { return false; }
+  const asked = (account as { readonly requestedConfigDir?: unknown }).requestedConfigDir;
+  if (asked === undefined) {
+    return want !== null && typeof account.configDirectory === 'string' && samePath(want, account.configDirectory);
+  }
+  // A stored status is host data: anything but a path or null cannot name the selected directory.
+  if (asked !== null && typeof asked !== 'string') return false;
+  if (want === null || asked === null) return want === asked;
+  return samePath(want, asked);
 }
 
 /** describe + compare, for a host about to launch. */
