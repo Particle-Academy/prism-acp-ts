@@ -31,9 +31,11 @@
  *   login was still found on Windows; on macOS the Keychain entry is keyed to the directory when the variable is set.
  *   So the person's default account is `configDir: null` here, never its path.
  */
+import { lstatSync, mkdirSync, realpathSync, rmdirSync, statSync, symlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { OUTRANKING_CREDENTIALS, childEnv } from '../env.js';
+import { restrictToCurrentUser } from '../private-directory.js';
 import { launchProvider, type ProcessTreeOptions } from '../process-tree.js';
 import { boundProviderText, stripAnsiControlSequences } from '../text.js';
 
@@ -108,7 +110,7 @@ export interface ClaudeAccountOptions {
 }
 
 export class ClaudeAccountError extends Error {
-  override readonly name = 'ClaudeAccountError';
+  override readonly name: string = 'ClaudeAccountError';
 }
 
 /** The largest status this reads. The real one is well under 1 KiB. */
@@ -413,6 +415,193 @@ export async function checkClaudeAccount(selection: ClaudeAccountSelection, opti
   return claudeAccountCheck(selection, await describeClaudeAccount(selection.configDir, options));
 }
 
+/*
+ * SHARED SESSIONS (G-318, Wish 2026-11-21): a thread always continues under whichever account is active; the account
+ * sets only limits and billing.
+ *
+ * Measured by tynn (Linux, claude-code 2.1.330, strace): `--resume` needs ONLY the `projects` folder of the directory
+ * -- `projects/<slug>/<id>.jsonl`, `projects/<slug>/<id>/` and `projects/<slug>/memory/` (so auto memory is shared
+ * too). Everything else is per directory and must stay so: `.claude.json`, `.credentials.json`, `sessions/` (one file
+ * per running process, NOT shareable), plugins, caches, plans, rules, agents, commands. So sharing is exactly one link,
+ * `<configDir>/projects` -> the store, and nothing else is linked, read or written.
+ *
+ * Where the store is by default: Anthropic documents that with CLAUDE_CONFIG_DIR unset the CLI's directory is
+ * `~/.claude`, which "on Windows resolves to `%USERPROFILE%\.claude`", and that transcripts and auto memory live in its
+ * `projects/` (https://code.claude.com/docs/en/claude-directory). `os.homedir()` is that home on every platform
+ * (USERPROFILE on Windows, HOME elsewhere), so the default store is `join(homedir(), '.claude', 'projects')`: the
+ * person's default account's history, which every prepared directory then continues.
+ *
+ * A documented consequence for the host: the retention sweep deletes transcripts older than `cleanupPeriodDays`
+ * (default 30) under `projects/`, in whichever directory is active. With a shared store, the SHORTEST
+ * `cleanupPeriodDays` among the sharing directories' settings governs every account's history.
+ */
+
+/** What `prepare()` did, or found already done. */
+export interface ClaudeAccountPrepared {
+  /** The resolved configuration directory. */
+  readonly configDir: string;
+  readonly sharedSessions: boolean;
+  /** The resolved store `<configDir>/projects` links to; `null` when sessions are not shared. */
+  readonly store: string | null;
+  /** `created`: the link was made now. `existing`: it already pointed at the store. `null`: sessions are not shared. */
+  readonly linked: 'created' | 'existing' | null;
+}
+
+export interface ClaudeAccountPrepareOptions {
+  /** Link `<configDir>/projects` to the store, so a thread started under any account resumes under this one. */
+  readonly sharedSessions?: boolean;
+  /** Absolute path of an existing directory. Default: the CLI's own default `projects` (see above). */
+  readonly store?: string;
+}
+
+/**
+ * Why `prepare()` refused. When it throws, nothing was changed, except a configuration directory it had to create.
+ *
+ * - `realFolder`: `<configDir>/projects` is a real directory: this account already has its own history. It is never
+ *   merged, moved or deleted here; the person decides what happens to it.
+ * - `linkedElsewhere`: it is a link to somewhere other than the store, or a dangling one.
+ * - `occupied`: it exists and is neither a directory nor a link, or it could not be inspected.
+ * - `unexpectedLink`: sessions were NOT asked to be shared, but `<configDir>/projects` is a link: this account would
+ *   share history the host believes is separate.
+ * - `storeMissing`: the store is not an existing directory. It is never created here.
+ * - `storeInvalid`: the store is not an absolute path, or it is `<configDir>/projects` itself or inside it.
+ * - `configDirInvalid`: the configuration directory exists and is not a directory, its parent does not exist (only
+ *   the directory itself is ever created), it could not be made private, or it is the CLI's default directory -- the
+ *   default store's own home.
+ * - `linkFailed`: the operating system refused the link (on POSIX, permissions; a Windows junction needs no admin).
+ */
+export type ClaudeSharedSessionsRefusal =
+  | 'realFolder' | 'linkedElsewhere' | 'occupied' | 'unexpectedLink'
+  | 'storeMissing' | 'storeInvalid' | 'configDirInvalid' | 'linkFailed';
+
+export class ClaudeSharedSessionsError extends ClaudeAccountError {
+  override readonly name: string = 'ClaudeSharedSessionsError';
+  readonly code: ClaudeSharedSessionsRefusal;
+  constructor(code: ClaudeSharedSessionsRefusal, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+/** The CLI's documented default store: `projects` under `~/.claude` (see above). Pure: touches nothing. */
+export function defaultClaudeSessionStore(): string {
+  return join(homedir(), '.claude', 'projects');
+}
+
+/**
+ * Make a configuration directory ready for a launch: create it (private to this user) when it is missing and, with
+ * `sharedSessions`, make its `projects` a link to the store -- a directory junction on Windows (no admin, no Developer
+ * Mode), a directory symlink elsewhere. Idempotent. It never replaces, merges or deletes what is already there, never
+ * reads a file's contents, and never touches `.credentials.json`, `.claude.json`, `sessions/` or anything else in the
+ * directory. Errors name no path.
+ */
+export function prepareClaudeAccount(configDir: string, options: ClaudeAccountPrepareOptions = {}): ClaudeAccountPrepared {
+  if (typeof configDir !== 'string') {
+    throw new ClaudeSharedSessionsError('configDirInvalid', 'prepare needs an account directory path; the default account is never prepared');
+  }
+  const dir = claudeConfigDir(configDir) as string;
+  const sharedSessions = options.sharedSessions === true;
+  if (samePath(dir, dirname(defaultClaudeSessionStore()))) {
+    throw new ClaudeSharedSessionsError('configDirInvalid', 'configDir is the CLI default directory; the default account is configDir null and is never prepared');
+  }
+  const link = join(dir, 'projects');
+  let store: string | null = null;
+  if (sharedSessions) {
+    const asked = options.store ?? defaultClaudeSessionStore();
+    // eslint-disable-next-line no-control-regex
+    if (typeof asked !== 'string' || asked.trim() === '' || !isAbsolute(asked) || /[\u0000-\u001f\u007f]/.test(asked)) {
+      throw new ClaudeSharedSessionsError('storeInvalid', 'store must be an absolute path with no control characters');
+    }
+    store = resolve(asked);
+    if (samePath(store, link) || isInside(store, link)) {
+      throw new ClaudeSharedSessionsError('storeInvalid', 'store cannot be the account directory\'s own projects folder or inside it');
+    }
+    if (!isDirectory(store)) throw new ClaudeSharedSessionsError('storeMissing', 'store is not an existing directory');
+  }
+
+  ensurePrivateConfigDir(dir);
+
+  const found = linkState(link, store);
+  if (!sharedSessions) {
+    if (found === 'existing' || found === 'linkedElsewhere') {
+      throw new ClaudeSharedSessionsError('unexpectedLink', 'sessions were not asked to be shared, but this directory\'s projects folder is a link');
+    }
+    return Object.freeze({ configDir: dir, sharedSessions, store: null, linked: null });
+  }
+  const linkedTo = store as string;
+  if (found === 'existing') return Object.freeze({ configDir: dir, sharedSessions, store: linkedTo, linked: 'existing' as const });
+  if (found !== 'absent') throw refusal(found);
+  try {
+    symlinkSync(linkedTo, link, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (cause) {
+    // Something appeared between the look and the link: judge what is there now, and never replace it.
+    if ((cause as { code?: unknown }).code === 'EEXIST') {
+      const now = linkState(link, linkedTo);
+      if (now === 'existing') return Object.freeze({ configDir: dir, sharedSessions, store: linkedTo, linked: 'existing' as const });
+      if (now !== 'absent') throw refusal(now);
+    }
+    throw new ClaudeSharedSessionsError('linkFailed', 'the projects link could not be created');
+  }
+  return Object.freeze({ configDir: dir, sharedSessions, store: linkedTo, linked: 'created' as const });
+}
+
+type LinkState = 'absent' | 'existing' | 'linkedElsewhere' | 'realFolder' | 'occupied';
+
+/** What is at `<configDir>/projects`, from metadata alone (lstat, realpath): no file is opened. */
+function linkState(link: string, store: string | null): LinkState {
+  let info;
+  try { info = lstatSync(link); } catch (cause) {
+    if ((cause as { code?: unknown }).code === 'ENOENT') return 'absent';
+    return 'occupied';
+  }
+  // A Windows junction reads as a symbolic link to lstat, as a symlink does everywhere.
+  if (info.isSymbolicLink()) {
+    if (store === null) return 'linkedElsewhere';
+    try { return samePath(realpathSync(link), realpathSync(store)) ? 'existing' : 'linkedElsewhere'; } catch { return 'linkedElsewhere'; }
+  }
+  return info.isDirectory() ? 'realFolder' : 'occupied';
+}
+
+function refusal(state: 'linkedElsewhere' | 'realFolder' | 'occupied'): ClaudeSharedSessionsError {
+  switch (state) {
+    case 'realFolder': return new ClaudeSharedSessionsError('realFolder', 'this directory already has its own projects folder; it is never replaced, merged or deleted here');
+    case 'linkedElsewhere': return new ClaudeSharedSessionsError('linkedElsewhere', 'this directory\'s projects folder links somewhere other than the store');
+    case 'occupied': return new ClaudeSharedSessionsError('occupied', 'this directory\'s projects path is neither a folder nor a link');
+  }
+}
+
+/** Create the directory itself (never its parents), private to this user; an existing directory is accepted as it is. */
+function ensurePrivateConfigDir(dir: string): void {
+  if (isDirectory(dir)) return;
+  let exists = true;
+  try { lstatSync(dir); } catch { exists = false; }
+  if (exists) throw new ClaudeSharedSessionsError('configDirInvalid', 'configDir exists and is not a directory');
+  if (!isDirectory(dirname(dir))) throw new ClaudeSharedSessionsError('configDirInvalid', 'configDir\'s parent does not exist; only the directory itself is created');
+  try {
+    mkdirSync(dir, { mode: 0o700 });
+  } catch (cause) {
+    if ((cause as { code?: unknown }).code === 'EEXIST' && isDirectory(dir)) return;
+    throw new ClaudeSharedSessionsError('configDirInvalid', 'configDir could not be created');
+  }
+  try {
+    restrictToCurrentUser(dir);
+  } catch {
+    // Left in place, the next call would find it existing and accept it unrestricted. It is new and still empty.
+    try { rmdirSync(dir); } catch { /* the refusal below stands either way */ }
+    throw new ClaudeSharedSessionsError('configDirInvalid', 'configDir could not be made private to this user');
+  }
+}
+
+function isDirectory(path: string): boolean {
+  try { return statSync(path).isDirectory(); } catch { return false; }
+}
+
+function isInside(child: string, parent: string): boolean {
+  const fold = (p: string) => (process.platform === 'linux' ? p : p.toLowerCase());
+  const rel = relative(fold(parent), fold(child));
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
+
 /** The account-selection API in one place. */
 export const claudeAccounts = Object.freeze({
   describe: describeClaudeAccount,
@@ -420,4 +609,6 @@ export const claudeAccounts = Object.freeze({
   check: checkClaudeAccount,
   compare: claudeAccountCheck,
   env: claudeAccountEnv,
+  prepare: prepareClaudeAccount,
+  defaultSessionStore: defaultClaudeSessionStore,
 });
