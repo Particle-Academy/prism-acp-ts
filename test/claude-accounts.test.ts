@@ -214,9 +214,73 @@ describe('the parsed status keeps named fields only', () => {
 describe('a mismatch is a typed state, not a log line', () => {
   const account = (over: Partial<ClaudeAccountStatus>): ClaudeAccountStatus => ({
     signedIn: true, method: 'subscription', cliAuthMethod: 'claude.ai', billing: 'subscription', email: 'person@example.com',
-    configDirectoryMatches: true, loginExpiresAt: null, withheld: [], ...over,
+    requestedConfigDir: resolve('/accounts/work'), configDirectoryMatches: true, loginExpiresAt: null, withheld: [], ...over,
   });
   const selected = { configDir: '/accounts/work', method: 'subscription' as const, email: 'person@example.com' };
+  const sub = { method: 'subscription' as const };
+
+  it('a status for the default account, compared with a selection for another directory, is a directory mismatch', () => {
+    // The pairing the lab proof found returning `ready` (G-317 check 4): describe(null), compare({ configDir: other }).
+    const defaultStatus = claudeAccountStatusOf({ ...SUBSCRIPTION, configDirectory: join(homedir(), '.claude') }, null);
+    expect(defaultStatus.requestedConfigDir).toBeNull();
+    expect(claudeAccountCheck({ configDir: tmp(), ...sub }, defaultStatus)).toMatchObject({ state: 'mismatch', differences: ['directory'] });
+    // The default's own path is not the default: Claude Code treats CLAUDE_CONFIG_DIR=~/.claude differently from unset.
+    expect(claudeAccountCheck({ configDir: join(homedir(), '.claude'), ...sub }, defaultStatus))
+      .toMatchObject({ state: 'mismatch', differences: ['directory'] });
+    // ...and the reverse: a status for a path, compared with the default.
+    expect(claudeAccountCheck({ configDir: null, ...sub }, account({}))).toMatchObject({ state: 'mismatch', differences: ['directory'] });
+    // Another path, and a signed-out status for another path: a mismatch, never `signedOut` or `ready`.
+    expect(claudeAccountCheck({ ...selected, configDir: '/accounts/home' }, account({}))).toMatchObject({ state: 'mismatch', differences: ['directory'] });
+    expect(claudeAccountCheck({ ...selected, configDir: '/accounts/home' }, account({ signedIn: false, method: 'none', billing: 'none', email: undefined })))
+      .toMatchObject({ state: 'mismatch', differences: ['directory'] });
+  });
+
+  it('null with a status taken for the default is ready', () => {
+    const defaultStatus = claudeAccountStatusOf({ ...SUBSCRIPTION, configDirectory: join(homedir(), '.claude') }, null);
+    expect(claudeAccountCheck({ configDir: null, ...sub }, defaultStatus).state).toBe('ready');
+  });
+
+  it('the same directory with a trailing separator is ready', () => {
+    const dir = tmp();
+    const status = claudeAccountStatusOf({ ...SUBSCRIPTION, configDirectory: dir }, dir);
+    expect(claudeAccountCheck({ configDir: `${dir}${sep}`, ...sub }, status).state).toBe('ready');
+    expect(claudeAccountCheck({ configDir: dir, ...sub }, claudeAccountStatusOf({ ...SUBSCRIPTION, configDirectory: dir }, `${dir}${sep}`)).state).toBe('ready');
+  });
+
+  it.runIf(process.platform === 'win32')('on Windows, the same directory in other casing, with `/` or a trailing slash, is ready', () => {
+    const dir = tmp();
+    const status = claudeAccountStatusOf({ ...SUBSCRIPTION, configDirectory: dir }, dir);
+    expect(claudeAccountCheck({ configDir: dir.toUpperCase(), ...sub }, status).state).toBe('ready');
+    expect(claudeAccountCheck({ configDir: `${dir.toLowerCase().replace(/[\\]/g, '/')}/`, ...sub }, status).state).toBe('ready');
+    expect(claudeAccountCheck({ configDir: `${dir}\\`, ...sub }, status).state).toBe('ready');
+  });
+
+  it.runIf(process.platform === 'linux')('on Linux, a directory differing only in case is another directory', () => {
+    const status = account({ requestedConfigDir: '/accounts/work' });
+    expect(claudeAccountCheck({ ...selected, configDir: '/accounts/Work' }, status)).toMatchObject({ state: 'mismatch', differences: ['directory'] });
+  });
+
+  it('a status that does not say which directory it was asked for: a path falls back to what the CLI reported; the default cannot', () => {
+    const legacy = (over: Partial<ClaudeAccountStatus>) => {
+      const { requestedConfigDir: _, ...rest } = account(over);
+      return rest as unknown as ClaudeAccountStatus;
+    };
+    expect(claudeAccountCheck(selected, legacy({ configDirectory: resolve('/accounts/work') })).state).toBe('ready');
+    expect(claudeAccountCheck(selected, legacy({ configDirectory: resolve('/accounts/home') }))).toMatchObject({ state: 'mismatch', differences: ['directory'] });
+    expect(claudeAccountCheck(selected, legacy({}))).toMatchObject({ state: 'mismatch', differences: ['directory'] });
+    expect(claudeAccountCheck({ configDir: null, ...sub }, legacy({ configDirectory: join(homedir(), '.claude') })))
+      .toMatchObject({ state: 'mismatch', differences: ['directory'] });
+  });
+
+  it('an invalid selection directory is a mismatch, not a throw and never ready', () => {
+    expect(claudeAccountCheck({ ...selected, configDir: 'relative/work' }, account({}))).toMatchObject({ state: 'mismatch', differences: ['directory'] });
+    expect(claudeAccountCheck({ ...selected, configDir: '' }, account({}))).toMatchObject({ state: 'mismatch', differences: ['directory'] });
+  });
+
+  it('the CLI reporting another directory is still flagged on its own, alongside a directory mismatch', () => {
+    expect(claudeAccountCheck({ ...selected, configDir: '/accounts/home' }, account({ configDirectoryMatches: false })))
+      .toMatchObject({ state: 'mismatch', differences: ['directory', 'configDirectory'] });
+  });
 
   it('ready, signed out, and each kind of difference', () => {
     expect(claudeAccountCheck(selected, account({})).state).toBe('ready');

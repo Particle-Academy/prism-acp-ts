@@ -306,7 +306,16 @@ new ClaudeDriver({ cwd, configDir: work.configDir });
   `cliAuthMethod`), a `billing` hint, and the `email`, organization and plan
   when the CLI prints them. It reads only named fields, so a field the CLI adds
   later never reaches you through it. It also returns `configDirectoryMatches`,
-  which compares the directory the CLI says it used with the one you asked for.
+  which compares the directory the CLI says it used with the one you asked for,
+  and `requestedConfigDir`, the directory the status was taken for (`null` for
+  the default).
+- `compare(selection, status)` checks that the status belongs to the selected
+  directory before anything else. A status taken for another directory, or for
+  the default when a path is selected (or the reverse), is a `mismatch` with
+  `directory` in `differences`. Paths are resolved, so trailing and mixed
+  separators do not count, and compared case-insensitively on Windows and
+  macOS. `null` matches only a status taken with `CLAUDE_CONFIG_DIR` unset,
+  never one taken with it set to the default's path.
 - `configDir: null` means the CLI's default account: `CLAUDE_CONFIG_DIR` is
   removed from the child, including an inherited one. Do not pass the default's
   path (`~/.claude`) instead. When the variable is set, Claude Code looks for its
