@@ -39,6 +39,7 @@ import {
 } from '../meta.js';
 import { codexListedReport, codexStartupReport, type McpServerReport } from '../mcp-status.js';
 import { LivenessGate, pingTimeoutMs, type PingOptions } from '../liveness.js';
+import { assertNoRemoteControlArgs, assertNotRemoteControlFrame } from '../remote-control.js';
 import { codexFileEdits, FileEditRefused, type FileEdit } from '../edits.js';
 import { codexCommand, commandsMeasured, CommandUnsupported, type CodexCommand } from './commands.js';
 import type {
@@ -293,6 +294,8 @@ export class CodexDriver implements AgentDriver {
     transportFactory: CodexTransportFactory = DEFAULT_TRANSPORT_FACTORY,
   ) {
     if (options.model !== undefined) assertModel(options.model);
+    // Remote control is off by construction (G-319): no remote-control flag or subcommand reaches the launch.
+    assertNoRemoteControlArgs('codex', options.binaryArgs);
     if (options.nativeTools !== undefined && options.nativeTools !== 'default' && options.nativeTools !== 'none') {
       throw new Error("nativeTools must be 'default' or 'none'");
     }
@@ -311,7 +314,7 @@ export class CodexDriver implements AgentDriver {
     }
     // Keep constructor-validated settings stable across asynchronous startup.
     const config = readCodexConfig(options.config, options.nativeTools === 'none');
-    this.#options = { ...options, config };
+    this.#options = { ...options, ...(options.binaryArgs === undefined ? {} : { binaryArgs: Object.freeze([...options.binaryArgs]) }), config };
     const servers = readMcpServers(options.mcpServers);
     this.#suppliedMcpServers = new Set(servers.map((server) => server.name));
     this.#disabledMcpServers = readDisabledMcpServers(options.disabledMcpServers, servers);
@@ -759,7 +762,7 @@ export class CodexDriver implements AgentDriver {
     const binaryArgs = this.#options.nativeTools === 'none'
       ? [...(this.#options.binaryArgs ?? []), ...RESTRICTED_STARTUP_ARGS]
       : this.#options.binaryArgs;
-    const transport = this.#transportFactory(
+    const factoryTransport = this.#transportFactory(
       {
         cwd: this.#options.cwd,
         ...(this.#options.processTree === undefined ? {} : { processTree: this.#options.processTree }),
@@ -769,6 +772,9 @@ export class CodexDriver implements AgentDriver {
       },
       handlers,
     );
+    // Every frame this driver writes -- requests, notifications, server replies -- passes the remoteControl/* refusal
+    // first, whatever transport the embedder supplied. A refused frame throws before anything is written.
+    const transport = guardRemoteControl(factoryTransport);
     this.#transport = transport;
     this.#peer = new JsonRpcPeer({
       send: (message) => transport.send(message),
@@ -2185,4 +2191,20 @@ export async function loginWithApiKey(peer: JsonRpcPeer, apiKey: string): Promis
     throw new Error('Codex refused the API key login');
   }
   if (asObject(result)?.type !== 'apiKey') throw new Error('Codex did not confirm the API key login');
+}
+
+/** Wrap a transport so a remoteControl/* frame is refused before it reaches the transport's own send (G-319). */
+export function guardRemoteControl(transport: CodexTransport): CodexTransport {
+  return new Proxy(transport, {
+    get(target, property) {
+      if (property === 'send') {
+        return (frame: unknown) => {
+          assertNotRemoteControlFrame(frame);
+          target.send(frame);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
 }

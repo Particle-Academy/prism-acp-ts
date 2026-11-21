@@ -183,6 +183,83 @@ Nothing here mutates `process.env`. A workspace may hold an API key on purpose â
 other consumers beside this one legitimately bill per token â€” so the child's
 environment is constructed and the ambient one is left alone.
 
+## Remote control is forced off
+
+Every CLI this package launches runs with remote control off. No option turns
+it back on.
+
+**Claude Code.** Every launch passes `--settings` with
+`{"disableRemoteControl": true}`. That covers a session, a resumed session,
+`nativeTools: 'none'`, and the short launch `listModels('claude')` makes. When the
+driver already writes a private settings file (for approval hooks or
+`disabledMcpServers`), the key is merged into that file and written last, so the
+file keeps the driver's other keys. Otherwise the value is passed inline. There is
+exactly one `--settings` on the argv. A `binaryArgs` entry of `--settings`,
+`--remote-control`, `remote-control`, `--cloud`, `--remote` or `--teleport` is
+refused before anything starts, including padded and case-changed spellings.
+`claudeArgs()` used on its own adds the same inline value. If you pass it a
+settings file path, build that file's contents with `claudeLaunchSettings()`.
+
+The sources:
+
+- [Settings reference, `disableRemoteControl`](https://code.claude.com/docs/en/settings-reference#disableremotecontrol):
+  "Turn off Remote Control: Claude Code then refuses `claude remote-control`, the
+  `--remote-control` flag, auto-start, and the in-session toggle."
+- [Settings](https://code.claude.com/docs/en/settings): `--settings` is applied
+  "above your user, project, and local files and below managed settings", and
+  "Nothing in your own settings files or `--settings` overrides a managed key."
+  Nothing is written to the user's own files.
+- [Remote Control](https://code.claude.com/docs/en/remote-control): "To turn
+  Remote Control off entirely, use the `disableRemoteControl` setting."
+- The `-p` stream-json launch used here is not immune by itself. The 2.1.224
+  changelog fixed "a session resume silently reconnecting Remote Control after
+  the user turned it off (`--resume`, SDK hosts, and the VS Code extension)".
+
+**Optional, blunter switch.** `disableFeatureFlags: true` (on `ClaudeDriver` and
+`listModels`) also sets `CLAUDE_CODE_DISABLE_FEATURE_FLAGS=1` and its older name
+`DISABLE_GROWTHBOOK=1` in the child's environment. It is off by default because it
+turns off more than remote control. The
+[environment variables page](https://code.claude.com/docs/en/env-vars) says: "With
+this variable set, Remote Control and the other features that need feature-flag
+fetching are unavailable. Requires Claude Code v2.1.319 or later." The features
+it lists as needing feature-flag fetching include cross-machine session messaging,
+`claude import` and `/skill-doctor`. v2.1.124 through v2.1.318 read only
+`DISABLE_GROWTHBOOK`.
+
+**Codex.** Codex has no documented per-launch off switch, so here it is off by
+construction rather than by a setting. The launch is
+`codex app-server --listen stdio://`. It never carries `--remote-control`, never
+runs `remote-control` or the `app-server daemon` subcommands, and never opts into
+the experimental API. A `remoteControl/*` JSON-RPC request or notification is
+refused (`RemoteControlRefused`) before it is written, whatever transport the
+embedder supplies. A `binaryArgs` entry that names remote control, `daemon`,
+`cloud` or `--remote` is refused before launch.
+
+**What this does not cover.**
+
+- **Managed (admin) policy.** A managed `disableRemoteControl: false` outranks
+  `--settings`. That is documented precedence, and this key is not in the
+  "Exceptions to managed settings precedence" table.
+- **Claude cloud sessions, teleport and share links.** `--cloud` (and its
+  deprecated alias `--remote`), `--teleport`, `/teleport` and session sharing have
+  no documented local switch. The only control is the organization's
+  `allow_remote_sessions` policy
+  ([Claude Code on the web](https://code.claude.com/docs/en/claude-code-on-the-web)).
+  This package never passes those flags, but it cannot stop a prompt that types
+  `/teleport` or an agent's shell tool that runs `claude --cloud`.
+- **Codex for admins.** The only documented hard switch is
+  `allow_remote_control = false` at the top level of the system
+  `requirements.toml` (`%ProgramData%\OpenAI\Codex\requirements.toml` on Windows,
+  `/etc/codex/requirements.toml` elsewhere). The
+  [config reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+  says: "Set to `false` to disable device remote control for managed users." The
+  [managed configuration guide](https://learn.chatgpt.com/docs/enterprise/managed-configuration#disable-device-remote-control)
+  adds: "This requirement doesn't disable SSH remote connections." It is
+  machine-wide admin policy, so this package documents it and never writes it.
+  Whether `-c allow_remote_control=false` works per launch is not documented.
+  The `remoteControl/*` RPCs are not documented either. They were observed in the
+  0.163.0 schema with `--experimental`.
+
 ## Claude settings and MCP configuration
 
 Choose the file-based settings sources and MCP configuration independently:

@@ -51,7 +51,7 @@ describe('claudeArgs — the flags, which cannot be checked by spawning', () => 
 
   it('passes tool rules as individual flag values', () => {
     const args = claudeArgs({ ...base, allowedTools: ['Read', 'Grep'] });
-    expect(args.slice(args.indexOf('--allowed-tools'))).toEqual(['--allowed-tools', 'Read', 'Grep']);
+    expect(args.slice(args.indexOf('--allowed-tools'))).toEqual(['--allowed-tools', 'Read', 'Grep', '--settings', '{"disableRemoteControl":true}']);
   });
 
   it('omits an EMPTY tool list rather than passing an empty value', () => {

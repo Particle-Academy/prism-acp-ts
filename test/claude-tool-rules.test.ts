@@ -13,7 +13,7 @@ describe('Claude permission rule argv boundaries', () => {
     const flag = field === 'allowedTools' ? '--allowed-tools' : '--disallowed-tools';
     const args = claudeArgs({ cwd: '/w', [field]: rules, model: 'sonnet' });
     expect(args.filter(value => value === flag)).toHaveLength(1);
-    expect(args.slice(args.indexOf(flag) + 1)).toEqual(rules);
+    expect(args.slice(args.indexOf(flag) + 1)).toEqual([...rules, '--settings', '{"disableRemoteControl":true}']);
   });
 
   it('keeps both lists separate and retains caller-owned arrays', () => {
@@ -21,7 +21,7 @@ describe('Claude permission rule argv boundaries', () => {
     const denied = Object.freeze(['Bash(git log --format="%h, %s")', 'Write']);
     const args = claudeArgs({ cwd: '/w', allowedTools: allowed, disallowedTools: denied });
     expect(args.slice(args.indexOf('--allowed-tools'))).toEqual([
-      '--allowed-tools', ...allowed, '--disallowed-tools', ...denied,
+      '--allowed-tools', ...allowed, '--disallowed-tools', ...denied, '--settings', '{"disableRemoteControl":true}',
     ]);
     expect(allowed).toEqual(rules);
     expect(denied).toEqual(['Bash(git log --format="%h, %s")', 'Write']);
@@ -38,7 +38,7 @@ describe('Claude permission rule argv boundaries', () => {
     });
     const observed = JSON.parse(output) as string[];
     expect(observed.slice(observed.indexOf('--allowed-tools'))).toEqual([
-      '--allowed-tools', ...allowed, '--disallowed-tools', ...denied,
+      '--allowed-tools', ...allowed, '--disallowed-tools', ...denied, '--settings', '{"disableRemoteControl":true}',
     ]);
   });
 
@@ -74,7 +74,7 @@ describe('Claude permission rule argv boundaries', () => {
         timer = setTimeout(() => reject(new Error('Owned argv child did not exit')), 10_000);
       })]);
       const args = JSON.parse(readFileSync(file, 'utf8')) as string[];
-      expect(args.slice(args.indexOf('--allowed-tools'))).toEqual(['--allowed-tools', ...rules, '--disallowed-tools', 'Write']);
+      expect(args.slice(args.indexOf('--allowed-tools'))).toEqual(['--allowed-tools', ...rules, '--disallowed-tools', 'Write', '--settings', '{"disableRemoteControl":true}']);
     } finally {
       clearTimeout(timer);
       await driver.stop({ graceMs: 0 });

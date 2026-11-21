@@ -166,5 +166,6 @@ export type { CodexRateLimit, CodexRateLimitRead, CodexRateLimitWindow } from '.
 export { ProcessTreeError, launchProvider, prepareProcessTree, supervisorPath } from './process-tree.js';
 export type { WindowsSupervisorArchitecture } from './windows-supervisor.js';
 export { ModelListError, listModels } from './models.js';
+export { CLAUDE_FORCED_SETTINGS, RemoteControlRefused, assertNoRemoteControlArgs, assertNotRemoteControlFrame, claudeFeatureFlagEnv, claudeLaunchSettings } from './remote-control.js';
 export type { AvailableModel, ListModelsOptions, SessionModelState } from './models.js';
 export type { Containment, LaunchOptions, ProcessTreeOptions, ProcessTree, ProviderIo, ProviderProcess, StopOptions, StopVerdict } from './process-tree.js';

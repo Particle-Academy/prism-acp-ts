@@ -188,7 +188,11 @@ for (const provider of ['claude', 'codex'] as const) {
             ...(method === 'session/load' ? { sessionId: 'thread-resumed' } : {}) });
           expect(reply.error).toBeUndefined();
           expect(c.problems).toEqual([]);
-          expect(vi.mocked(spawn).mock.calls[0][1]).not.toContain('--settings');
+          // No settings FILE: the only --settings is the inline remote-control switch (G-319), with no deny in it.
+          const argv = vi.mocked(spawn).mock.calls[0][1] as string[];
+          if (provider === 'claude') expect(argv.filter((arg) => arg === '--settings')).toHaveLength(1);
+          if (provider === 'claude') expect(argv[argv.indexOf('--settings') + 1]).toBe('{"disableRemoteControl":true}');
+          else expect(argv).not.toContain('--settings');
           if (provider === 'codex') {
             expect(c.children[0].sent.some((frame) => frame.method === 'config/read')).toBe(false);
           }

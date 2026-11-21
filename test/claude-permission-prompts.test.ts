@@ -55,10 +55,11 @@ function runHook(env: Record<string, string>, input: unknown): Promise<{ code: n
 const decision = (stdout: string) => (JSON.parse(stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason?: string } }).hookSpecificOutput;
 
 describe('the arguments and the settings', () => {
-    it('claudeArgs carries --settings when a settings file is given; none otherwise', () => {
+    it('claudeArgs carries the settings file when one is given; the inline remote-control switch otherwise', () => {
         const args = claudeArgs({ cwd: '/w' }, undefined, '/tmp/x/settings.json');
         expect(args[args.indexOf('--settings') + 1]).toBe('/tmp/x/settings.json');
-        expect(claudeArgs({ cwd: '/w' })).not.toContain('--settings');
+        // Without a file, the only --settings is the inline remote-control switch (G-319).
+        expect(claudeArgs({ cwd: '/w' }).slice(-2)).toEqual(['--settings', '{"disableRemoteControl":true}']);
     });
 
     it('one PreToolUse command hook for the named tools, failing closed, with a long wait for a person', () => {

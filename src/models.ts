@@ -6,6 +6,7 @@ import { NdjsonFramer, encodeLine } from './ndjson.js';
 import { launchProvider, type ProcessTreeOptions } from './process-tree.js';
 import { stripAnsiControlSequences } from './text.js';
 import { claudeConfigDir, type ClaudeConfigDir } from './claude/accounts.js';
+import { assertNoRemoteControlArgs, assertNotRemoteControlFrame, claudeFeatureFlagEnv, claudeForcedSettingsJson } from './remote-control.js';
 
 /**
  * THE MODELS A PROVIDER ACTUALLY OFFERS (tynn, Genie's model picker, 2026-10-21). Genie's picker was a hardcoded
@@ -129,6 +130,8 @@ export interface ListModelsOptions {
   readonly credentials?: ProviderCredentials;
   /** Claude only: which account's configuration directory to ask, as ClaudeDriverOptions.configDir. */
   readonly configDir?: ClaudeConfigDir;
+  /** Claude only: as ClaudeDriverOptions.disableFeatureFlags. Off by default. */
+  readonly disableFeatureFlags?: boolean;
 }
 
 /**
@@ -140,6 +143,11 @@ export async function listModels(provider: 'claude' | 'codex', options: ListMode
   const parentEnv = options.parentEnv ?? process.env;
   if (options.configDir !== undefined && provider !== 'claude') throw new ModelListError('configDir is a Claude option');
   if (options.configDir !== undefined && options.credentials?.mode === 'apiKey') throw new ModelListError('configDir cannot be combined with API-key credentials');
+  if (options.disableFeatureFlags !== undefined && provider !== 'claude') throw new ModelListError('disableFeatureFlags is a Claude option');
+  // Remote control is forced off here too (G-319): host argv cannot carry a remote-control flag or a second --settings.
+  const binaryArgs = options.binaryArgs === undefined ? [] : [...options.binaryArgs];
+  assertNoRemoteControlArgs(provider, binaryArgs);
+  const featureFlagEnv = provider === 'claude' ? claudeFeatureFlagEnv(options.disableFeatureFlags) : {};
   const chosenDir = options.configDir === undefined ? undefined : claudeConfigDir(options.configDir);
   const keyed = apiKeyHome(provider, options.credentials, parentEnv, options.processTree);
   const { env } = childEnv(parentEnv, {
@@ -150,10 +158,11 @@ export async function listModels(provider: 'claude' | 'codex', options: ListMode
     ...(keyed !== null ? { set: apiKeyEnvironment(provider, keyed) }
       : typeof chosenDir === 'string' ? { set: { CLAUDE_CONFIG_DIR: chosenDir } } : {}),
   });
+  Object.assign(env, featureFlagEnv);
   const args = provider === 'claude'
-    ? ['--print', '--output-format', 'stream-json', '--input-format', 'stream-json', '--verbose']
+    ? ['--print', '--output-format', 'stream-json', '--input-format', 'stream-json', '--verbose', '--settings', claudeForcedSettingsJson()]
     : ['app-server', '--listen', 'stdio://'];
-  const child = launchProvider(options.binary ?? provider, [...(options.binaryArgs ?? []), ...args], { ...options.processTree, cwd: options.cwd ?? process.cwd(), env });
+  const child = launchProvider(options.binary ?? provider, [...binaryArgs, ...args], { ...options.processTree, cwd: options.cwd ?? process.cwd(), env });
   const io = child.io ?? child.child;
   const framer = new NdjsonFramer();
   const waiters = new Map<string, { resolve: (frame: Record<string, unknown>) => void; reject: (cause: Error) => void }>();
@@ -186,6 +195,14 @@ export async function listModels(provider: 'claude' | 'codex', options: ListMode
       resolve: (value) => { clearTimeout(timer); resolve(value); },
       reject: (cause) => { clearTimeout(timer); reject(cause); },
     });
+    try {
+      if (provider === 'codex') assertNotRemoteControlFrame(frame);
+    } catch (cause) {
+      waiters.delete(id);
+      clearTimeout(timer);
+      reject(cause);
+      return;
+    }
     io.stdin?.write(encodeLine(frame));
   });
 
