@@ -82,6 +82,7 @@ export type { SanitizedProviderText } from './text.js';
 
 export {
   ClaudeAccountError,
+  ClaudeSharedSessionsError,
   checkClaudeAccount,
   claudeAccountCheck,
   claudeAccountEnv,
@@ -89,13 +90,17 @@ export {
   claudeAccounts,
   claudeConfigDir,
   claudeLoginCommand,
+  defaultClaudeSessionStore,
   describeClaudeAccount,
+  prepareClaudeAccount,
 } from './claude/accounts.js';
 export type {
   ClaudeAccountCheck,
   ClaudeAccountDifference,
   ClaudeAccountMethod,
   ClaudeAccountOptions,
+  ClaudeAccountPrepared,
+  ClaudeAccountPrepareOptions,
   ClaudeAccountSelection,
   ClaudeAccountStatus,
   ClaudeBilling,
@@ -103,6 +108,7 @@ export type {
   ClaudeLoginCommand,
   ClaudeLoginMethod,
   ClaudeLoginOptions,
+  ClaudeSharedSessionsRefusal,
 } from './claude/accounts.js';
 export { ClaudeToAcp } from './claude/to-acp.js';
 export type { AcpUpdate, ToolStatus } from './claude/to-acp.js';

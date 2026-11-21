@@ -335,6 +335,43 @@ new ClaudeDriver({ cwd, configDir: work.configDir });
 - **No `claude setup-token` / `CLAUDE_CODE_OAUTH_TOKEN` support.** The variable
   is withheld from the child like every other credential.
 
+### Sharing threads across accounts
+
+A thread can continue under whichever account is active. The account then sets
+only the limits and the billing, not the history.
+
+```ts
+claudeAccounts.prepare(work.configDir, { sharedSessions: true });
+// { configDir, sharedSessions: true, store: '<home>/.claude/projects', linked: 'created' | 'existing' }
+```
+
+- `prepare(configDir, { sharedSessions, store })` creates the directory if it
+  is missing, private to the current user. Its parent must already exist. With
+  `sharedSessions: true`, it makes `<configDir>/projects` a link to `store`. On
+  Windows the link is a directory junction, which needs no admin rights. On
+  other platforms it is a directory symlink. Calling it again returns
+  `linked: 'existing'`.
+- `store` defaults to the default account's `projects` folder,
+  `~/.claude/projects` (`%USERPROFILE%\.claude\projects` on Windows). That is
+  where Claude Code keeps transcripts and auto memory when `CLAUDE_CONFIG_DIR`
+  is unset ([the .claude directory](https://code.claude.com/docs/en/claude-directory)).
+  The store must already exist. `prepare` never creates it.
+- Only `projects` is linked. `--resume` needs nothing else, so everything else
+  stays per account: the login, `.claude.json`, `sessions/`, plugins and
+  settings. Auto memory lives under `projects/`, so it is shared too.
+- **It refuses, and changes nothing, rather than replace anything.** It throws
+  `ClaudeSharedSessionsError` with a `code`. `realFolder` means the account
+  already has its own history. `linkedElsewhere` means `projects` already links
+  somewhere else. `unexpectedLink` means `projects` is a link but
+  `sharedSessions` was not asked for. Moving an existing history is a decision
+  for the person.
+- It never reads a file's contents, and never touches anything in the directory
+  except `projects`. The test suite watches every `fs` call to prove it.
+- Claude Code deletes transcripts older than `cleanupPeriodDays` (30 days by
+  default) under `projects/`, whichever account is active. With a shared
+  store, the shortest `cleanupPeriodDays` among the sharing accounts applies to
+  all of them.
+
 ### What can move billing without anyone choosing it
 
 These are Anthropic's rules
