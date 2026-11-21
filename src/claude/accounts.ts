@@ -576,11 +576,13 @@ function ensurePrivateConfigDir(dir: string): void {
   let exists = true;
   try { lstatSync(dir); } catch { exists = false; }
   if (exists) throw new ClaudeSharedSessionsError('configDirInvalid', 'configDir exists and is not a directory');
-  if (!isDirectory(dirname(dir))) throw new ClaudeSharedSessionsError('configDirInvalid', 'configDir\'s parent does not exist; only the directory itself is created');
   try {
+    // Never recursive: only the directory itself is created, so a missing parent is an ENOENT refusal.
     mkdirSync(dir, { mode: 0o700 });
   } catch (cause) {
-    if ((cause as { code?: unknown }).code === 'EEXIST' && isDirectory(dir)) return;
+    const code = (cause as { code?: unknown }).code;
+    if (code === 'EEXIST' && isDirectory(dir)) return;
+    if (code === 'ENOENT') throw new ClaudeSharedSessionsError('configDirInvalid', 'configDir\'s parent does not exist; only the directory itself is created');
     throw new ClaudeSharedSessionsError('configDirInvalid', 'configDir could not be created');
   }
   try {

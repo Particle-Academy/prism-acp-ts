@@ -230,7 +230,7 @@ describe('claudeAccounts.prepare -- shared sessions (G-318)', () => {
   it('REFUSES a missing parent, a file as the directory, and the CLI default directory (without touching it)', () => {
     const w = world();
     expect(() => claudeAccounts.prepare(join(w.root, 'no-parent', 'A'), { sharedSessions: true, store: w.store }))
-      .toThrow(expect.objectContaining({ code: 'configDirInvalid' }));
+      .toThrow(expect.objectContaining({ code: 'configDirInvalid', message: expect.stringContaining('parent does not exist') }));
     expect(existsSync(join(w.root, 'no-parent'))).toBe(false);
     writeFileSync(join(w.root, 'file'), '');
     expect(() => claudeAccounts.prepare(join(w.root, 'file'), { sharedSessions: true, store: w.store }))
