@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { childEnv } from '../env.js';
 import { apiKeyEnvironment, apiKeyHome, type ProviderCredentials } from '../credentials.js';
+import { claudeConfigDir, type ClaudeConfigDir } from './accounts.js';
 import { restrictToCurrentUser } from '../private-directory.js';
 import { SecretRedactor } from '../redact.js';
 import { claudeMcpConfig, readDisabledMcpServers, readMcpServers, type McpServer } from '../mcp.js';
@@ -128,6 +129,13 @@ export interface ClaudeDriverOptions {
    * tenant configuration; never built from what an ACP client sends.
    */
   readonly credentials?: ProviderCredentials;
+  /**
+   * Which Claude account this launch uses: the configuration directory for CLAUDE_CONFIG_DIR, an absolute path, or
+   * `null` for the CLI's default directory (an inherited CLAUDE_CONFIG_DIR is then removed). Omitted keeps the old
+   * behaviour: an inherited CLAUDE_CONFIG_DIR passes through. Host configuration, never from an ACP client; see
+   * claude/accounts.ts. Not combinable with API-key `credentials`, which bring their own home.
+   */
+  readonly configDir?: ClaudeConfigDir;
 }
 
 export interface ClaudeDriverEvents {
@@ -637,6 +645,10 @@ export class ClaudeDriver {
     if (options.permissionPrompts?.nodePath !== undefined && !isAbsolute(options.permissionPrompts.nodePath)) {
       throw new Error('permissionPrompts.nodePath must be an absolute executable path');
     }
+    if (options.configDir !== undefined) {
+      claudeConfigDir(options.configDir);
+      if (options.credentials?.mode === 'apiKey') throw new Error('configDir cannot be combined with API-key credentials, which bring their own home');
+    }
     this.#mcpServers = readMcpServers(options.mcpServers);
     this.#options = { ...options, allowedTools, disallowedTools, appendSystemPromptFile, pluginDirs, ...(settingSources === undefined ? {} : { settingSources }), ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
     if (options.processTree?.windowsStdio === 'local-pipes' && ((!restricted && this.#mcpServers.length > 0) || options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0)) {
@@ -713,16 +725,19 @@ export class ClaudeDriver {
     // Checked before anything starts: a key with no usable home is refused here, naming the field, never the key.
     const keyed = apiKeyHome('claude', this.#options.credentials, parentEnv, this.#options.processTree);
     this.#stderrRedactor = keyed === null ? null : new SecretRedactor(keyed.apiKey);
+    // An explicit account choice (configDir) replaces whatever CLAUDE_CONFIG_DIR the parent carried; null removes it.
+    const chosenDir = this.#options.configDir === undefined ? undefined : claudeConfigDir(this.#options.configDir);
     const { env, withheld } = childEnv(parentEnv, {
       allow: [
         // The CLI finds the user's own login through these, so they are allowed
         // explicitly rather than inherited wholesale.
-        'CLAUDE_CONFIG_DIR',
+        ...(chosenDir === undefined ? ['CLAUDE_CONFIG_DIR'] : []),
         'XDG_CONFIG_HOME',
-        ...(this.#options.allowEnv ?? []),
+        ...(this.#options.allowEnv ?? []).filter((name) => chosenDir === undefined || name.toUpperCase() !== 'CLAUDE_CONFIG_DIR'),
       ],
       // API-key mode: the app's key and the app's home, set explicitly. Inherited credentials stay withheld either way.
-      ...(keyed === null ? {} : { set: apiKeyEnvironment('claude', keyed) }),
+      ...(keyed !== null ? { set: apiKeyEnvironment('claude', keyed) }
+        : typeof chosenDir === 'string' ? { set: { CLAUDE_CONFIG_DIR: chosenDir } } : {}),
     });
     this.withheldCredentials = withheld;
 

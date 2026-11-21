@@ -57,6 +57,13 @@ export const OUTRANKING_CREDENTIALS: readonly string[] = [
   'ANTHROPIC_API_URL',
   'CLAUDE_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
+  // Anthropic profiles and Workload Identity Federation: a named profile or the federation pair outranks a claude.ai
+  // login and bills to its organization (https://code.claude.com/docs/en/authentication#anthropic-profiles-and-federation-credentials).
+  'ANTHROPIC_PROFILE',
+  'ANTHROPIC_FEDERATION_RULE_ID',
+  'ANTHROPIC_ORGANIZATION_ID',
+  'ANTHROPIC_IDENTITY_TOKEN',
+  'ANTHROPIC_IDENTITY_TOKEN_FILE',
   'OPENAI_API_KEY',
   'OPENAI_BASE_URL',
 ];

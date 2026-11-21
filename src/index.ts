@@ -80,6 +80,30 @@ export type {
 export { boundProviderText, markVisible, MAX_PROVIDER_TEXT_CHARS, PROVIDER_TEXT_TRUNCATED, stripAnsiControlSequences } from './text.js';
 export type { SanitizedProviderText } from './text.js';
 
+export {
+  ClaudeAccountError,
+  checkClaudeAccount,
+  claudeAccountCheck,
+  claudeAccountEnv,
+  claudeAccountStatusOf,
+  claudeAccounts,
+  claudeConfigDir,
+  claudeLoginCommand,
+  describeClaudeAccount,
+} from './claude/accounts.js';
+export type {
+  ClaudeAccountCheck,
+  ClaudeAccountDifference,
+  ClaudeAccountMethod,
+  ClaudeAccountOptions,
+  ClaudeAccountSelection,
+  ClaudeAccountStatus,
+  ClaudeBilling,
+  ClaudeConfigDir,
+  ClaudeLoginCommand,
+  ClaudeLoginMethod,
+  ClaudeLoginOptions,
+} from './claude/accounts.js';
 export { ClaudeToAcp } from './claude/to-acp.js';
 export type { AcpUpdate, ToolStatus } from './claude/to-acp.js';
 export type { FileEdit, FileEditKind } from './edits.js';
