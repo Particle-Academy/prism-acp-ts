@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import { NdjsonFramer, encodeLine } from '../ndjson.js';
+import { assertNoRemoteControlArgs, assertNotRemoteControlFrame } from '../remote-control.js';
 import { launchProvider, type ProcessTree, type ProcessTreeOptions, type ProviderIo, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
 
 export interface CodexTransportHandlers {
@@ -56,6 +57,7 @@ export class StdioCodexTransport implements CodexTransport {
       throw new Error('Codex app-server stdio transport requires Node.js 22 or newer');
     }
 
+    assertNoRemoteControlArgs('codex', this.#options.binaryArgs);
     // Under a supervisor that owns the whole process tree, and never through a shell (see process-tree.ts).
     const provider = launchProvider(this.#options.binary ?? 'codex', [...(this.#options.binaryArgs ?? []), 'app-server', '--listen', 'stdio://'], {
       ...this.#options.processTree,
@@ -95,6 +97,7 @@ export class StdioCodexTransport implements CodexTransport {
   }
 
   send(frame: unknown): void {
+    assertNotRemoteControlFrame(frame);
     const stdin = this.#io?.stdin;
     if (stdin === null || stdin === undefined || stdin.destroyed || this.#closed) {
       throw new Error('Codex app-server stdin is not open');

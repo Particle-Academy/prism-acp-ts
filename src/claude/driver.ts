@@ -37,6 +37,7 @@ import type { DriverCapabilities } from '../acp/agent.js';
 import { observeStopVerdict, stopVerdictSnapshot } from '../stop-verdict.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
 import { LivenessGate, pingTimeoutMs, type PingOptions } from '../liveness.js';
+import { assertNoRemoteControlArgs, claudeFeatureFlagEnv, claudeForcedSettingsJson, claudeLaunchSettings } from '../remote-control.js';
 
 /**
  * Claude driver's behavior claim, published by initialize for clients.
@@ -136,6 +137,14 @@ export interface ClaudeDriverOptions {
    * claude/accounts.ts. Not combinable with API-key `credentials`, which bring their own home.
    */
   readonly configDir?: ClaudeConfigDir;
+  /**
+   * Also set `CLAUDE_CODE_DISABLE_FEATURE_FLAGS=1` (and its pre-2.1.319 name `DISABLE_GROWTHBOOK=1`) in the child's
+   * environment: a second, blunter remote-control off switch on top of the `disableRemoteControl` setting every launch
+   * already carries (see remote-control.ts). Off by default because it disables more than remote control: every
+   * feature that needs feature-flag fetching, which the CLI documents as including cross-machine session messaging,
+   * `claude import` and `/skill-doctor`. `CLAUDE_CODE_DISABLE_FEATURE_FLAGS` needs Claude Code 2.1.319 or later.
+   */
+  readonly disableFeatureFlags?: boolean;
 }
 
 export interface ClaudeDriverEvents {
@@ -192,6 +201,10 @@ export interface ClaudeDriverEvents {
  */
 // ClaudeDriver supplies a private, temporary config file. Custom spawners using
 // this helper must supply their own file path for non-empty mcpServers.
+//
+// Remote control is forced off on every argv this returns (G-319): with no settings file, `--settings` carries
+// `{"disableRemoteControl":true}` inline; a settings file passed here MUST already carry it -- build its contents
+// with claudeLaunchSettings(), as ClaudeDriver does. There is exactly one `--settings`, so nothing can follow ours.
 export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string, settingsPath?: string): string[] {
   const restricted = nativeToolsDisabled(options);
   const settingSources = claudeSettingSources(options.settingSources);
@@ -229,7 +242,7 @@ export function claudeArgs(options: ClaudeDriverOptions, mcpConfigPath?: string,
   // Plain paths on every platform. No shell runs the CLI any more (process-tree.ts quotes the argv itself), so the
   // quotes this once added for cmd.exe would now reach the CLI as part of the path.
   if (mcpConfigPath !== undefined) args.push('--mcp-config', mcpConfigPath);
-  if (settingsPath !== undefined) args.push('--settings', settingsPath);
+  args.push('--settings', settingsPath ?? claudeForcedSettingsJson());
 
   return args;
 }
@@ -642,6 +655,8 @@ export class ClaudeDriver {
     const pluginDirs = claudePluginDirs(options.pluginDirs, restricted);
     const allowedTools = Object.freeze(claudeToolRules(options.allowedTools, 'allowedTools'));
     const disallowedTools = Object.freeze(claudeToolRules(options.disallowedTools, 'disallowedTools'));
+    assertNoRemoteControlArgs('claude', options.binaryArgs);
+    claudeFeatureFlagEnv(options.disableFeatureFlags);
     if (options.permissionPrompts?.nodePath !== undefined && !isAbsolute(options.permissionPrompts.nodePath)) {
       throw new Error('permissionPrompts.nodePath must be an absolute executable path');
     }
@@ -650,7 +665,7 @@ export class ClaudeDriver {
       if (options.credentials?.mode === 'apiKey') throw new Error('configDir cannot be combined with API-key credentials, which bring their own home');
     }
     this.#mcpServers = readMcpServers(options.mcpServers);
-    this.#options = { ...options, allowedTools, disallowedTools, appendSystemPromptFile, pluginDirs, ...(settingSources === undefined ? {} : { settingSources }), ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
+    this.#options = { ...options, ...(options.binaryArgs === undefined ? {} : { binaryArgs: Object.freeze([...options.binaryArgs]) }), allowedTools, disallowedTools, appendSystemPromptFile, pluginDirs, ...(settingSources === undefined ? {} : { settingSources }), ...(options.permissionPrompts === undefined ? {} : { permissionPrompts: { ...options.permissionPrompts, tools: [...options.permissionPrompts.tools] } }), mcpServers: this.#mcpServers, disabledMcpServers: readDisabledMcpServers(options.disabledMcpServers, this.#mcpServers) };
     if (options.processTree?.windowsStdio === 'local-pipes' && ((!restricted && this.#mcpServers.length > 0) || options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0)) {
       throw new ProcessTreeError('LOCAL transport does not support generated Claude MCP configuration or permission hooks');
     }
@@ -739,6 +754,7 @@ export class ClaudeDriver {
       ...(keyed !== null ? { set: apiKeyEnvironment('claude', keyed) }
         : typeof chosenDir === 'string' ? { set: { CLAUDE_CONFIG_DIR: chosenDir } } : {}),
     });
+    Object.assign(env, claudeFeatureFlagEnv(this.#options.disableFeatureFlags));
     this.withheldCredentials = withheld;
 
     let child: ChildProcess;
@@ -759,13 +775,14 @@ export class ClaudeDriver {
           writeFileSync(hookPath, approvalHookScript(this.#options.permissionPrompts.timeoutSeconds), { mode: 0o600, flag: 'wx' });
           this.#approvalFiles.push(hookPath);
         }
-        const settings = {
+        // disableRemoteControl is merged in LAST (claudeLaunchSettings), so this file can never omit or override it.
+        const settings = claudeLaunchSettings({
           ...(this.#options.permissionPrompts !== undefined ? approvalSettings(this.#options.permissionPrompts.nodePath ?? process.execPath, hookPath, this.#options.permissionPrompts.tools, {
             electron: this.#options.permissionPrompts.nodePath === undefined && process.versions.electron !== undefined,
             timeoutSeconds: this.#options.permissionPrompts.timeoutSeconds,
           }) : {}),
           ...(this.#options.disabledMcpServers!.length > 0 ? { deniedMcpServers: this.#options.disabledMcpServers!.map((name) => ({ serverName: name })) } : {}),
-        };
+        });
         writeFileSync(settingsPath, JSON.stringify(settings), { mode: 0o600, flag: 'wx' });
         this.#approvalFiles.push(settingsPath);
       }

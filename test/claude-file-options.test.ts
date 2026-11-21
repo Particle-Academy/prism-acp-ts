@@ -18,7 +18,7 @@ describe('Claude append file and plugin paths', () => {
   it('preserves native default argv when both options are omitted', () => {
     expect(claudeArgs(options())).toEqual([
       '--print', '--output-format', 'stream-json', '--input-format', 'stream-json',
-      '--verbose', '--include-partial-messages',
+      '--verbose', '--include-partial-messages', '--settings', '{"disableRemoteControl":true}',
     ]);
     expect(claudeArgs(options({ pluginDirs: [] }))).toEqual(claudeArgs(options()));
   });

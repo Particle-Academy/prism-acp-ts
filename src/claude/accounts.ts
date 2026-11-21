@@ -37,6 +37,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { OUTRANKING_CREDENTIALS, childEnv } from '../env.js';
 import { restrictToCurrentUser } from '../private-directory.js';
 import { launchProvider, type ProcessTreeOptions } from '../process-tree.js';
+import { assertNoRemoteControlArgs } from '../remote-control.js';
 import { boundProviderText, stripAnsiControlSequences } from '../text.js';
 
 /**
@@ -149,6 +150,8 @@ export function claudeAccountEnv(
  * environment a launch gets. No file is read; no credential passes through here, because the status carries none.
  */
 export async function describeClaudeAccount(configDir: ClaudeConfigDir, options: ClaudeAccountOptions = {}): Promise<ClaudeAccountStatus> {
+  // `auth status` is not a session, so it carries no --settings; host argv still cannot start remote control (G-319).
+  assertNoRemoteControlArgs('claude', options.binaryArgs);
   const dir = claudeConfigDir(configDir);
   const { env, withheld } = claudeAccountEnv(dir, options.parentEnv ?? process.env, options.allowEnv);
   const child = launchProvider(options.binary ?? 'claude', [...(options.binaryArgs ?? []), 'auth', 'status', '--json'], {

@@ -35,7 +35,7 @@ describe('Claude app MCP only policy', () => {
   it('keeps the default driver argument vector unchanged', () => {
     expect(claudeArgs({ cwd: '.' })).toEqual([
       '--print', '--output-format', 'stream-json', '--input-format', 'stream-json',
-      '--verbose', '--include-partial-messages',
+      '--verbose', '--include-partial-messages', '--settings', '{"disableRemoteControl":true}',
     ]);
   });
 });
