@@ -398,8 +398,12 @@ export function claudeAccountCheck(selection: ClaudeAccountSelection, account: C
 function sameSelectedDirectory(selected: ClaudeConfigDir, account: ClaudeAccountStatus): boolean {
   let want: string | null;
   try { want = claudeConfigDir(selected); } catch { return false; }
-  const asked = (account as { readonly requestedConfigDir?: ClaudeConfigDir }).requestedConfigDir;
-  if (asked === undefined) return want !== null && account.configDirectory !== undefined && samePath(want, account.configDirectory);
+  const asked = (account as { readonly requestedConfigDir?: unknown }).requestedConfigDir;
+  if (asked === undefined) {
+    return want !== null && typeof account.configDirectory === 'string' && samePath(want, account.configDirectory);
+  }
+  // A stored status is host data: anything but a path or null cannot name the selected directory.
+  if (asked !== null && typeof asked !== 'string') return false;
   if (want === null || asked === null) return want === asked;
   return samePath(want, asked);
 }

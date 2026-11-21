@@ -272,6 +272,14 @@ describe('a mismatch is a typed state, not a log line', () => {
       .toMatchObject({ state: 'mismatch', differences: ['directory'] });
   });
 
+  it('a stored status whose requestedConfigDir is not a path or null is a mismatch, not a throw', () => {
+    for (const bad of [42, {}, ['/accounts/work']]) {
+      const status = account({ requestedConfigDir: bad as unknown as string });
+      expect(claudeAccountCheck(selected, status)).toMatchObject({ state: 'mismatch', differences: ['directory'] });
+      expect(claudeAccountCheck({ configDir: null, ...sub }, status)).toMatchObject({ state: 'mismatch', differences: ['directory'] });
+    }
+  });
+
   it('an invalid selection directory is a mismatch, not a throw and never ready', () => {
     expect(claudeAccountCheck({ ...selected, configDir: 'relative/work' }, account({}))).toMatchObject({ state: 'mismatch', differences: ['directory'] });
     expect(claudeAccountCheck({ ...selected, configDir: '' }, account({}))).toMatchObject({ state: 'mismatch', differences: ['directory'] });
