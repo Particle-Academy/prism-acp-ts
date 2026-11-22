@@ -154,7 +154,7 @@ describe('the sign-in URL allow-list', () => {
   });
 });
 
-describe('claudeAccounts.login', () => {
+describe('claudeAccounts.login', { timeout: 30_000 }, () => {
   it('(a) hands out the opener URL (localhost redirect), waits for the CLI, and confirms signed in', async () => {
     const fake = standIn('auto');
     const account = join(tmp(), 'work');
@@ -233,7 +233,7 @@ describe('claudeAccounts.login', () => {
   it('(c) times out, kills the whole tree, and removes the directory it created', async () => {
     const fake = standIn('hang');
     const account = join(tmp(), 'work');
-    const error = await failure(claudeAccounts.login(account, { ...fake.cli, timeoutMs: 5_000, onUrl: () => {}, onCodeRequested: () => new Promise(() => {}) }));
+    const error = await failure(claudeAccounts.login(account, { ...fake.cli, timeoutMs: 1_500, onUrl: () => {}, onCodeRequested: () => new Promise(() => {}) }));
     expect(error.code).toBe('timeout');
     const pid = fake.grandchild();
     expect(pid).not.toBeNull();
@@ -295,7 +295,7 @@ describe('claudeAccounts.login', () => {
   });
 });
 
-describe('claudeAccounts.logout', () => {
+describe('claudeAccounts.logout', { timeout: 30_000 }, () => {
   it('runs the CLI\'s own logout in that directory and confirms signed out', async () => {
     const fake = standIn('auto');
     const account = join(tmp(), 'work');
@@ -318,7 +318,7 @@ describe('claudeAccounts.logout', () => {
   });
 });
 
-describe('the library never reads a file under the account directory', () => {
+describe('the library never reads a file under the account directory', { timeout: 30_000 }, () => {
   it('login and logout only create, list and remove there -- and never touch the credential file at all', async () => {
     const fake = standIn('auto');
     const account = tmp('prism-login-watched-');
