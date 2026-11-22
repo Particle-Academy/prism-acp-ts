@@ -110,6 +110,8 @@ export type {
   ClaudeLoginOptions,
   ClaudeSharedSessionsRefusal,
 } from './claude/accounts.js';
+export { CLAUDE_SIGN_IN_HOSTS, ClaudeLoginError, claudeSignInUrl, signInClaudeAccount, signOutClaudeAccount } from './claude/login.js';
+export type { ClaudeLoginFailure, ClaudeSignInOptions, ClaudeSignOutOptions } from './claude/login.js';
 export { ClaudeToAcp } from './claude/to-acp.js';
 export type { AcpUpdate, ToolStatus } from './claude/to-acp.js';
 export type { FileEdit, FileEditKind } from './edits.js';

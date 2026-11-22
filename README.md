@@ -361,17 +361,14 @@ import { ClaudeDriver, claudeAccounts } from '@particle-academy/prism-acp';
 
 const work = { configDir: 'C:/Users/me/.claude-accounts/work', method: 'subscription' as const };
 
-// 1. Not signed in yet? Show the person this command in a terminal they can see.
-//    They finish Anthropic's own sign-in in the browser. The library never starts it.
-const login = claudeAccounts.loginCommand(work.configDir);
-// login.command + login.args: claude auth login --claudeai
-// login.env: the environment to start that terminal with, with CLAUDE_CONFIG_DIR set and credentials removed
-// login.display.posix / login.display.powershell: the same thing as one line, for a person to copy
+// 1. Not signed in yet? Run the CLI's own sign-in, hidden, and open its URL in the browser.
+//    See "Signing in from an app (no terminal)" below.
+await claudeAccounts.login(work.configDir, { onUrl: openInBrowser });
 
 // 2. Before a launch, ask the CLI what is signed in there.
 const check = await claudeAccounts.check({ ...work, email: rememberedEmail }, { cwd });
 if (check.state === 'mismatch') showWhichAccountAndBillingIsLive(check.account, check.differences);
-if (check.state === 'signedOut') offerSignIn(login);
+if (check.state === 'signedOut') offerSignIn();
 
 // 3. Launch in that account.
 new ClaudeDriver({ cwd, configDir: work.configDir });
@@ -409,8 +406,83 @@ new ClaudeDriver({ cwd, configDir: work.configDir });
 - **The library never opens a file under the directory.** The test suite
   watches every `fs` call during `describe`, `check`, `loginCommand` and a
   driver launch, and fails if any of them touches a path inside the directory.
+  `login` and `logout` may create the directory, list its entry names and
+  remove what a failed sign-in added. A second test watches them and fails on
+  any other call there, and on any call that touches the credential file.
 - **No `claude setup-token` / `CLAUDE_CODE_OAUTH_TOKEN` support.** The variable
   is withheld from the child like every other credential.
+
+### Signing in from an app (no terminal)
+
+`claudeAccounts.login()` signs an added account in without showing the person
+a terminal. It runs the CLI's own `claude auth login` with that account's
+`CLAUDE_CONFIG_DIR`, hidden, under the same process-tree supervisor and the
+same stripped environment as a launch. The host gets one thing back: the
+sign-in URL. The host opens it in the person's browser. The person finishes
+Anthropic's own sign-in there, and the CLI saves the result in its own
+directory. Nothing in this package reads, copies, stores or logs a credential.
+
+```ts
+import { ClaudeLoginError, claudeAccounts } from '@particle-academy/prism-acp';
+
+const controller = new AbortController(); // the "Cancel" button
+try {
+  const status = await claudeAccounts.login('C:/Users/me/.claude-accounts/work', {
+    method: 'subscription',              // or 'console' (API usage billing)
+    onUrl: (url) => openInBrowser(url),  // only a checked https:// Anthropic/Claude URL arrives here
+    onCodeRequested: (done) => askPersonToPasteCode(done), // rarely needed; see below
+    signal: controller.signal,
+    timeoutMs: 600_000,                  // the default: 10 minutes
+  });
+  if (status.signedIn) rememberAccount(status.email);
+} catch (error) {
+  if (error instanceof ClaudeLoginError) showWhyItStopped(error.code);
+}
+
+// Sign-out: the CLI's own `claude auth logout` in that directory, also hidden.
+const after = await claudeAccounts.logout('C:/Users/me/.claude-accounts/work');
+// after.signedIn === false
+```
+
+- **The URL normally finishes by itself.** The CLI starts a listener on
+  `127.0.0.1` and hands its browser opener a URL that redirects there. This
+  package sets `BROWSER` to a small helper in a private temporary folder. The
+  helper passes that URL back to `onUrl` and opens nothing. So the browser
+  returns the sign-in to the CLI, and no code is needed.
+- **A pasted code is the fallback.** If the helper never receives the URL (a
+  settings file can name another browser), the CLI's printed URL is used. That
+  URL ends on a page that shows a code. The same happens if the CLI says the
+  browser could not return the sign-in. In both cases `onCodeRequested` is
+  called. The code it returns goes straight to the CLI's stdin. It is not stored,
+  logged or put in an error message. Its `signal` fires when the sign-in ends
+  some other way, so the host can close its paste box. Without
+  `onCodeRequested`, such a flow stops with `codeRequired`.
+- **Only Anthropic and Claude URLs.** `onUrl` receives only an `https://` URL
+  whose host is exactly one of `CLAUDE_SIGN_IN_HOSTS` (`claude.ai`,
+  `claude.com`, `platform.claude.com`, `console.anthropic.com`). It must have
+  no user info and no port. Anything else stops the sign-in with `refusedUrl`
+  and is never handed out. `claudeSignInUrl(url)` is the same check.
+- **Cancel, timeout and failure leave nothing running.** The whole process tree
+  is killed, the CLI and anything it started included. A directory the call
+  created is removed. In a directory that already existed, only the top-level
+  entries the call added are removed. Nothing that was there before is touched.
+- **For added accounts only.** `configDir: null` and the default directory
+  (`~/.claude`) are refused with `refusedDirectory`. These calls never sign the
+  person's own default account in or out. `logout` of a directory that does not
+  exist is `missingDirectory`.
+- **Errors** are `ClaudeLoginError` with a `code`: `aborted`, `timeout`,
+  `refusedUrl`, `noUrl`, `codeRequired`, `invalidCode`, `failed`,
+  `refusedDirectory`, `missingDirectory`. The CLI's own text is not passed on.
+- `loginCommand()` is **deprecated**. It still works, unchanged, for hosts that
+  show the person a terminal.
+
+Measured with claude-code 2.1.330 on Windows, with no TTY and no sign-in
+completed: the CLI prints the manual URL and `Paste code here if prompted > `,
+and still runs the whole flow. It hands `BROWSER` (or, on Windows by default,
+`rundll32 url,OpenURL`) a separate URL with
+`redirect_uri=http://localhost:<port>/callback`. It reads a pasted code from
+stdin without a TTY. `claude auth logout` exits 0 with
+`Successfully logged out from your Anthropic account.`
 
 ### Sharing threads across accounts
 
@@ -491,8 +563,10 @@ package closes the first one and makes the others visible as a `mismatch`.
   credentials or session tokens — sign-in to a Claude account must complete
   through Anthropic's own flow"
   ([legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)).
-  That is why the login is a command for the person, and why there is no token
-  path.
+  That is why sign-in is always the CLI's own flow, finished by the person in
+  Anthropic's page in their browser, and why there is no token path. `login()`
+  only starts that flow and passes its URL on; it never sees what the CLI
+  receives.
 - Limits: "Advertised usage limits for Pro, Max, and Ultra plans assume
   ordinary, individual usage of Claude Code and the Agent SDK" (same page). The
   [Consumer Terms](https://www.anthropic.com/legal/consumer-terms) §3 forbid

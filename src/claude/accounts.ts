@@ -10,8 +10,8 @@
  *
  * So an "account" here is a directory path. The host stores a label, the path, and the email or organisation the CLI
  * itself reported. This module stores nothing, and it never opens a file under the directory: what is signed in there
- * is asked of the CLI (`claude auth status --json`), and signing in is the CLI's own flow, run by the person in a
- * terminal they can see (`claude auth login`). Anthropic's terms forbid the alternative outright
+ * is asked of the CLI (`claude auth status --json`), and signing in is the CLI's own flow (`claude auth login`), run
+ * hidden by `login()` in login.ts while the person completes it in their browser. Anthropic's terms forbid the alternative outright
  * (https://code.claude.com/docs/en/legal-and-compliance): developers "may not collect, store, or intermediate
  * Claude.ai credentials or session tokens -- sign-in to a Claude account must complete through Anthropic's own flow."
  *
@@ -39,6 +39,8 @@ import { restrictToCurrentUser } from '../private-directory.js';
 import { launchProvider, type ProcessTreeOptions } from '../process-tree.js';
 import { assertNoRemoteControlArgs } from '../remote-control.js';
 import { boundProviderText, stripAnsiControlSequences } from '../text.js';
+import { ClaudeAccountError } from './account-error.js';
+import { signInClaudeAccount, signOutClaudeAccount } from './login.js';
 
 /**
  * Which configuration directory: an absolute path the host chose for one account, or `null` for the CLI's own default
@@ -110,9 +112,7 @@ export interface ClaudeAccountOptions {
   readonly timeoutMs?: number;
 }
 
-export class ClaudeAccountError extends Error {
-  override readonly name: string = 'ClaudeAccountError';
-}
+export { ClaudeAccountError };
 
 /** The largest status this reads. The real one is well under 1 KiB. */
 const MAX_STATUS_BYTES = 64 * 1024;
@@ -280,6 +280,9 @@ export interface ClaudeLoginCommand {
 }
 
 /**
+ * @deprecated Use `claudeAccounts.login()`, which runs the same CLI flow hidden and hands the host only the sign-in URL,
+ * so the person never sees a terminal. Kept, unchanged, so existing hosts do not break.
+ *
  * The command the HOST shows the person, in a terminal they can see, to sign in to that directory. The person
  * completes Anthropic's own flow in the browser; nothing here starts it, sees its result, or keeps anything it writes.
  */
@@ -610,6 +613,11 @@ function isInside(child: string, parent: string): boolean {
 /** The account-selection API in one place. */
 export const claudeAccounts = Object.freeze({
   describe: describeClaudeAccount,
+  /** Sign an added account in with no terminal: the CLI's own flow, hidden; the host opens the URL. */
+  login: signInClaudeAccount,
+  /** Sign an added account out with no terminal: the CLI's own `auth logout`, hidden. */
+  logout: signOutClaudeAccount,
+  /** @deprecated Use `login()`. Kept so existing hosts do not break. */
   loginCommand: claudeLoginCommand,
   check: checkClaudeAccount,
   compare: claudeAccountCheck,
