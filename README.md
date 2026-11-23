@@ -738,7 +738,8 @@ answer within 10 s, `models` is left out, never invented. The request shapes are
 
 ## Resuming a session: use the CLI's id, not ACP's
 
-`session/load` works, and `initialize` reports `loadSession: true`. The trap is
+`session/load` works with the Claude and Codex drivers, and `initialize` reports
+`loadSession: true` for them. The trap is
 which id to pass.
 
 **ACP's `sessionId` is not resumable.** `session/new` returns an id this server
@@ -1863,12 +1864,42 @@ directories. No drive-root or machine-wide file grant is added by the package.
 When the embedder identifies the selected driver, `initialize` declares its
 measured behavior in `_meta` under
 `particle.academy/driver_capabilities`. The object carries
-`permissionRequests`, `transcriptReplay`, `mcpCapabilities`, `promptBlocks` and
-`cancel` (whether `session/cancel` keeps the session; label Stop from it). If the key is absent, capabilities
+`permissionRequests`, `transcriptReplay`, `mcpCapabilities`, `promptBlocks`,
+`cancel` (whether `session/cancel` keeps the session; label Stop from it) and
+`loadSession`. If the key is absent, capabilities
 were not declared; absence does not mean `false`. Claude's exported default has
 `permissionRequests: false`; a host that enables its optional permission hook
 declares the configured capability through `serve` as described above. Read the
 runtime declaration rather than caching capabilities against a provider name.
+
+### Writing a driver outside this package
+
+`AcpAgent` fronts any `AgentDriver`. Two parts of the contract are exported so a
+driver does not copy them:
+
+- **Resume.** Declare `loadSession: false` in the `driverCapabilities` you pass
+  to `AcpAgent` or `serve` when your sessions cannot be resumed. `initialize`
+  then advertises `agentCapabilities.loadSession: false`, and `session/load` is
+  refused with a method-not-found error before your factory is called. Absent
+  means `true`; the Claude and Codex declarations say `true`.
+- **Permission decisions.** `permissionDecision(request, outcome)` returns
+  `{ allow, reason }`. It allows only when the client selected an option the
+  request offered, matched exactly, whose kind is `allow_once`. Anything else is
+  a denial: an option that was not offered, a look-alike id, an id offered twice,
+  a cancel, a malformed answer. `askPermission(events.onRequestPermission,
+  request)` asks and decides in one step, and also denies when the client throws
+  or there is no client to ask. `ALLOW_ONCE_OR_DENY` is the frozen option list
+  the Claude driver offers.
+
+```ts
+import { ALLOW_ONCE_OR_DENY, askPermission } from '@particle-academy/prism-acp';
+
+const decision = await askPermission(events.onRequestPermission, {
+  toolCall: { toolCallId, title, rawInput },
+  options: ALLOW_ONCE_OR_DENY,
+});
+if (!decision.allow) return refuse(decision.reason);
+```
 
 ## Development
 

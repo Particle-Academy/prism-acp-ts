@@ -151,6 +151,8 @@ export type {
   PermissionRequest,
   SessionProbe as AcpSessionProbe,
 } from './acp/agent.js';
+export { ALLOW_ONCE_OR_DENY, askPermission, permissionDecision } from './permissions.js';
+export type { PermissionDecision } from './permissions.js';
 
 export { probeSessionStore } from './claude/session-store.js';
 export type { SessionExistence, SessionProbe, SessionStoreOptions } from './claude/session-store.js';

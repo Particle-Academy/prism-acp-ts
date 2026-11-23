@@ -17,12 +17,13 @@
  * ## Capabilities are claims, so they are reported honestly
  *
  * `initialize` declares what this agent can do, and a client plans around the
- * answer. `loadSession` is reported true only because `session/load` is
- * implemented on top of the CLI's own `--resume`; anything not implemented is
- * reported absent rather than optimistically.
+ * answer. `loadSession` is the driver's claim ({@link DriverCapabilities.loadSession}): the shipped drivers resume
+ * through the CLI's own `--resume` / `thread/resume` and say true; a driver that keeps no sessions says false, and
+ * `session/load` is then refused before any driver is built. Anything not implemented is reported absent rather than
+ * optimistically.
  */
 import { readFileSync } from 'node:fs';
-import { JsonRpcPeer, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR, RpcError } from '../jsonrpc.js';
+import { JsonRpcPeer, RPC_INVALID_PARAMS, RPC_INTERNAL_ERROR, RPC_METHOD_NOT_FOUND, RpcError } from '../jsonrpc.js';
 import type { AcpUpdate } from '../claude/to-acp.js';
 import type { StopReason, TurnOutcome } from '../claude/driver.js';
 import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, META_MODEL_INFO, META_PERMISSION_REASON, META_TURN_FAILURE, withMeta } from '../meta.js';
@@ -202,6 +203,12 @@ export interface DriverCapabilities {
    * stop the turn (false). A client labels Stop from this. Absent means the embedder did not say.
    */
   readonly cancel?: boolean;
+  /**
+   * Whether `session/load` can resume a session. False: `initialize` advertises `loadSession: false`, and
+   * `session/load` is refused (method not found) before the driver factory is called. Absent means true, which is
+   * what this package advertised before the field existed; a driver that cannot resume must say so.
+   */
+  readonly loadSession?: boolean;
 }
 
 interface Session {
@@ -324,7 +331,9 @@ export class AcpAgent {
         // believes it continued one, so the flag being set proves nothing on
         // its own. A capability reported optimistically is worse than one
         // reported absent, because a client plans around the answer.
-        loadSession: true,
+        //
+        // A driver that cannot resume says so, and the flag follows its claim (see #sessionLoad's refusal).
+        loadSession: this.#resumable(),
         promptCapabilities: {
           // From the driver's own declaration. Reported false rather than
           // omitted, because the client needs to know we will refuse it.
@@ -407,7 +416,17 @@ export class AcpAgent {
     return {};
   }
 
+  /** Whether the driver can resume. Absent means true: see {@link DriverCapabilities.loadSession}. */
+  #resumable(): boolean {
+    return this.#options.driverCapabilities?.loadSession !== false;
+  }
+
   #sessionLoad(params: unknown): Record<string, unknown> {
+    // FIRST, before reading anything: a driver that declared it cannot resume is never asked to, so no factory runs
+    // and no half-open session exists. The same answer initialize gave, at the point a client ignores it.
+    if (!this.#resumable()) {
+      throw new RpcError(RPC_METHOD_NOT_FOUND, 'this agent cannot resume a session: it advertises loadSession false');
+    }
     const object = asObject(params);
     const cwd = requireAbsoluteCwd(params);
     const mcpServers = this.#mcpServers(params);
