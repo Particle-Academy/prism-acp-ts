@@ -132,13 +132,24 @@ describe('Codex rate-limit windows that are absent', () => {
   });
 
   it.each([
-    ['an empty snapshot', { rateLimits: {} }],
-    ['an empty payload', {}],
     ['explicit nulls', { rateLimits: { primary: null, secondary: null } }],
+    ['an explicit null primary alone', { rateLimits: { primary: null } }],
+    ['an explicit null secondary alone', { rateLimits: { secondary: null } }],
   ])('reports %s as unavailable, never as a usage figure', (_name, payload) => {
     const read = readCodexRateLimit(payload);
     expect(read).toMatchObject({ ok: true, limit: { primary: null, secondary: null } });
     if (read.ok) expect(codexRateLimitNotice(read.limit)).toBe(unavailable);
+  });
+
+  it.each([
+    ['an empty snapshot', { rateLimits: {} }],
+    ['an empty payload', {}],
+    ['a snapshot with only credits', { rateLimits: { credits: { hasCredits: true, unlimited: false, balance: '1' } } }],
+    ['a payload with only the usage flag', { ordinaryUsageAllowed: true }],
+  ])('refuses %s, which carries no window information', (_name, payload) => {
+    expect(readCodexRateLimit(payload)).toEqual({
+      ok: false, reason: 'codex_rate_limit: rateLimits.primary expected an object or null, got undefined',
+    });
   });
 
   it.each(['primary', 'secondary'])('still refuses the whole payload when a present %s is malformed', (key) => {
@@ -165,10 +176,21 @@ describe('Codex rate-limit windows that are absent', () => {
     }
   });
 
-  it('keeps reporting primary when both windows exist', () => {
-    const read = readCodexRateLimit({ rateLimits: { primary: short, secondary: weekly } });
+  it.each([
+    ['secondary when it is the more spent', short, weekly, '37% used in 10080 minutes'],
+    ['primary when it is the more spent', weekly, short, '37% used in 10080 minutes'],
+    ['primary on a tie', { ...short, usedPercent: 37 }, weekly, '37% used in 300 minutes'],
+  ])('reports %s', (_name, primary, secondary, expected) => {
+    const read = readCodexRateLimit({ rateLimits: { primary, secondary } });
     expect(read.ok).toBe(true);
-    if (read.ok) expect(codexRateLimitNotice(read.limit)).toContain('12% used in 300 minutes');
+    if (read.ok) expect(codexRateLimitNotice(read.limit)).toContain(expected);
+  });
+
+  it('carries the more spent window into the driver notice', async () => {
+    const { updates } = await started([{ rateLimits: { primary: short, secondary: weekly } }]);
+
+    expect(readings(updates)).toMatchObject([{ primary: shortRead, secondary: weeklyRead }]);
+    expect(notices(updates)).toEqual([expect.stringContaining('37% used in 10080 minutes')]);
   });
 
   it('carries a reading with an omitted primary through the driver read', async () => {
@@ -187,9 +209,26 @@ describe('Codex rate-limit windows that are absent', () => {
     expect(notices(updates).at(-1)).toContain('12% used in 300 minutes');
   });
 
-  it('announces a frame with neither window as unavailable through the driver', async () => {
+  it('does not replace a good reading when a frame carries no window information', async () => {
     const { transport, updates } = await started([spent]);
+    const before = notices(updates);
     transport.frame({ jsonrpc: '2.0', method: 'account/rateLimits/updated', params: { rateLimits: {} } });
+
+    expect(readings(updates)).toHaveLength(1);
+    expect(notices(updates)).toEqual(before);
+    expect(unmappedReasons(updates)).toContainEqual(expect.stringContaining('rateLimits.primary expected an object or null, got undefined'));
+  });
+
+  it('emits no reading when the driver read carries no window information', async () => {
+    const { updates } = await started([{ ordinaryUsageAllowed: true }]);
+
+    expect(readings(updates)).toEqual([]);
+    expect(unmappedReasons(updates)).toContainEqual(expect.stringContaining('rateLimits.primary expected an object or null, got undefined'));
+  });
+
+  it('still announces explicit nulls as unavailable through the driver', async () => {
+    const { transport, updates } = await started([spent]);
+    transport.frame({ jsonrpc: '2.0', method: 'account/rateLimits/updated', params: { rateLimits: { primary: null, secondary: null } } });
 
     expect(readings(updates).at(-1)).toMatchObject({ primary: null, secondary: null });
     expect(notices(updates).at(-1)).toBe(unavailable);
