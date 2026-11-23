@@ -985,9 +985,12 @@ Three things a consumer needs and cannot infer:
   its allowance is a real state; the parse does not cap it, because a capped
   figure would be one this package made up. Clamp where you draw the bar, next
   to `isUsingOverage`.
-- **`status` and `overageStatus` are open string unions.** Every frame captured
-  says `"allowed"`; no breached frame has ever been captured, so the breached
-  spelling is unknown. Test `status !== 'allowed'`, and never match a specific
+- **`status` and `overageStatus` are open string unions.** Every stream frame
+  captured says `"allowed"`. Claude Code transcripts record rejections as
+  `status: "rejected"` with the window and reset time but **no
+  `unifiedWindows`**, so a rejection parses with `windows: {}` and has no
+  percentage. No rejection has been captured off the stream itself and other
+  spellings are unknown: test `status !== 'allowed'`, and never match a specific
   breach value.
 
 `parseRateLimit` returns `undefined` rather than a partial, and a payload it
@@ -1024,6 +1027,53 @@ Malformed balances are refused with a type-and-length diagnostic.
 Both parsers accept usage beyond the allowance (`usedPercent` above 100 or
 `utilization` above 1) without capping it. Overage is real state, and capping
 would invent a reading; clamp only the rendered bar, not the reported value.
+
+### One reading for any provider
+
+To draw one gauge without knowing the provider, read
+`particle.academy/rate_limit_reading` (`META_RATE_LIMIT_READING`). It sits beside
+`particle.academy/rate_limit`, which is unchanged, and is plain JSON with no raw
+payload, plan or account identifiers:
+
+```ts
+type RateLimitReading = {
+  state: 'reported' | 'not_yet_reported' | 'unreadable' | 'unsupported';
+  reason?: string;   // when unreadable; describes values, never quotes them
+  asOfMs: number;
+  limited: boolean;  // the provider clearly says usage is limited now
+  windows: Array<{
+    id: string;                   // claude:seven_day, codex:10080m
+    label: string;
+    lengthSeconds: number | null; // null = the provider did not state it
+    usedPercent: number | null;   // not capped; null = not stated, never a guessed 100
+    resetsAtMs: number | null;
+    binding?: boolean;            // absent when the provider does not say
+    limited?: boolean;            // absent unless this window's own status says so
+  }>;
+  absent: 'provider_says_none' | 'not_stated'; // how to read a window not in the list
+};
+```
+
+- **An empty `windows` is not headroom.** Check `state` first, and show
+  `limited` even when a window has no percentage: a Claude rejection names its
+  window and reset time but reports no figure.
+- **`absent` decides what a missing window means.** Claude is always
+  `not_stated`, because one frame does not prove an account lacks a window.
+  Codex is `provider_says_none` only on a full read with an explicit `null` slot
+  and no omitted one.
+- **Codex's live updates are sparse.** `account/rateLimits/updated` is meant to be
+  merged into the last read, so its readings are `not_stated`, and one with no
+  window and no limit emits no reading at all. Merge windows by `id`.
+- **Ids follow length, not slot.** Codex can put its weekly window in `primary`.
+  Two windows of one length get `codex:10080m` and `codex:10080m:2`.
+- **Codex never sets `binding`.** Its reached-limit values name a cause, not a
+  window.
+- A refused payload gives `state: 'unreadable'`, no windows and the reason. An
+  API-key session gives `unsupported`. Before the first frame, use
+  `notYetReportedRateLimitReading(Date.now())`. `claudeRateLimitReading` and
+  `codexRateLimitReading` are exported if you hold a payload yourself.
+- `readRateLimits()` still resolves to nothing: the fresh reading arrives on the
+  update it emits.
 
 ## Using it
 

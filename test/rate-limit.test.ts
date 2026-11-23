@@ -219,8 +219,8 @@ describe('what the parse must NOT refuse', () => {
     const payload = onePayload();
     payload.status = 'something_we_have_never_seen';
 
-    // No breached frame has ever been captured, so the breached spelling is
-    // unknown. A closed union would turn the first real breach into a
+    // No breach has been captured off the stream, and transcripts show only
+    // "rejected", so other spellings are unknown. A closed union would turn the first real breach into a
     // consumer's build error -- the guarded-against failure, inverted.
     expect(parseRateLimit(payload)?.status).toBe('something_we_have_never_seen');
   });

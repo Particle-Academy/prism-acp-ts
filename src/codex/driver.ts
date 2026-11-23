@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childEnv } from '../env.js';
 import { apiKeyEnvironment, apiKeyHome, type ProviderCredentials } from '../credentials.js';
+import { codexRateLimitReading, unreadableRateLimitReading, unsupportedRateLimitReading } from '../rate-limit-reading.js';
 import { fileAsText, promptBlocks, type PromptBlock, type PromptContent } from '../prompt.js';
 import { codexFailureOf } from '../turn-failure.js';
 import { codexMcpConfig, codexMcpSessionConfig, codexMcpShellPolicy, codexMcpDisabledConfig, readDisabledMcpServers, readMcpServers, type McpServer, type McpToolApproval } from '../mcp.js';
@@ -30,6 +31,7 @@ import {
   META_EXEC_POLICY_AMENDMENT,
   META_MCP_SERVERS,
   META_RATE_LIMIT,
+  META_RATE_LIMIT_READING,
   META_REPLAY,
   META_REPLAY_SUMMARY,
   META_UNMAPPED_FRAME,
@@ -927,6 +929,10 @@ export class CodexDriver implements AgentDriver {
       // Account telemetry is optional; an unavailable read is not a turn error.
       this.#recordUnmapped(safeError('account/rateLimits/read failed', cause), {
         method: 'account/rateLimits/read',
+      }, undefined, {
+        [META_RATE_LIMIT_READING]: this.#apiKeySession()
+          ? unsupportedRateLimitReading(Date.now())
+          : unreadableRateLimitReading('account/rateLimits/read failed', Date.now()),
       });
     }
   }
@@ -1320,7 +1326,7 @@ export class CodexDriver implements AgentDriver {
         this.#emitUsage(object.tokenUsage);
         return;
       case 'account/rateLimits/updated':
-        this.#emitRateLimit(object.rateLimits);
+        this.#emitRateLimit(object.rateLimits, true);
         return;
       case 'mcpServer/startupStatus/updated': {
         // genie#1202. Measured on codex-cli 0.163.0: a server whose tools/list fails reports starting ->
@@ -1742,10 +1748,27 @@ export class CodexDriver implements AgentDriver {
     return { request, choices };
   }
 
-  #emitRateLimit(value: unknown): void {
+  #apiKeySession(): boolean {
+    return this.#options.credentials?.mode === 'apiKey';
+  }
+
+  /**
+   * The neutral reading's `_meta`, or nothing for a sparse update with no window and no limit: Codex says to merge
+   * those into the last read, so emitting an empty reading would replace a real gauge with a blank one.
+   */
+  #rateLimitReadingMeta(value: unknown, sparse: boolean): Record<string, unknown> {
+    const asOfMs = Date.now();
+    if (this.#apiKeySession()) return { [META_RATE_LIMIT_READING]: unsupportedRateLimitReading(asOfMs) };
+    const reading = codexRateLimitReading(value, asOfMs, { sparse });
+    if (sparse && reading.state === 'reported' && reading.windows.length === 0 && !reading.limited) return {};
+    return { [META_RATE_LIMIT_READING]: reading };
+  }
+
+  #emitRateLimit(value: unknown, sparse = false): void {
     const read = readCodexRateLimit(value);
+    const readingMeta = this.#rateLimitReadingMeta(value, sparse);
     if (!read.ok) {
-      this.#recordUnmapped(read.reason, { method: 'account/rateLimits' });
+      this.#recordUnmapped(read.reason, { method: 'account/rateLimits' }, undefined, readingMeta);
       return;
     }
     this.#emit(
@@ -1757,7 +1780,7 @@ export class CodexDriver implements AgentDriver {
             message: codexRateLimitNotice(read.limit),
           },
         },
-        { [META_RATE_LIMIT]: read.limit },
+        { [META_RATE_LIMIT]: read.limit, ...readingMeta },
       ),
     );
   }
@@ -1871,7 +1894,7 @@ export class CodexDriver implements AgentDriver {
     this.#emit(withMeta({ sessionUpdate: 'notice', notice: { level: 'debug', message: 'model' } }, { [META_MODEL]: model }));
   }
 
-  #recordUnmapped(reason: string, frame: unknown, replay?: ReplayState): void {
+  #recordUnmapped(reason: string, frame: unknown, replay?: ReplayState, extraMeta: Record<string, unknown> = {}): void {
     if (replay !== undefined) {
       replay.diagnostics++;
       // Keep summary size independent of history length and never copy historical payloads into diagnostic metadata.
@@ -1885,7 +1908,7 @@ export class CodexDriver implements AgentDriver {
     this.#emit(
       withMeta(
         { sessionUpdate: 'notice', notice: { level: 'debug', message: reason } },
-        { [META_UNMAPPED_FRAME]: { reason, frame: safeFrame } },
+        { [META_UNMAPPED_FRAME]: { reason, frame: safeFrame }, ...extraMeta },
       ),
     );
   }
