@@ -41,7 +41,7 @@ import {
 } from '../meta.js';
 import { codexListedReport, codexStartupReport, type McpServerReport } from '../mcp-status.js';
 import { LivenessGate, pingTimeoutMs, type PingOptions } from '../liveness.js';
-import { assertNoRemoteControlArgs, assertNotRemoteControlFrame } from '../remote-control.js';
+import { assertNoRemoteControlArgs, encodeCodexFrame } from '../remote-control.js';
 import { codexFileEdits, FileEditRefused, type FileEdit } from '../edits.js';
 import { codexCommand, commandsMeasured, CommandUnsupported, type CodexCommand } from './commands.js';
 import type {
@@ -2222,8 +2222,8 @@ export function guardRemoteControl(transport: CodexTransport): CodexTransport {
     get(target, property) {
       if (property === 'send') {
         return (frame: unknown) => {
-          assertNotRemoteControlFrame(frame);
-          target.send(frame);
+          // The custom transport receives the value that was checked, read-only, not the original.
+          target.send(JSON.parse(encodeCodexFrame(frame), (_key, value: unknown) => (typeof value === 'object' && value !== null ? Object.freeze(value) : value)));
         };
       }
       const value: unknown = Reflect.get(target, property, target);
