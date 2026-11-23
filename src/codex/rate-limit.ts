@@ -47,7 +47,8 @@ function finite(value: unknown, min: number): value is number {
 }
 
 function readWindow(value: unknown, path: string): CodexRateLimitRead | CodexRateLimitWindow | null {
-  if (value === null) return null;
+  // An omitted window is no window. Anything else that is present must be a whole, valid window.
+  if (value === null || value === undefined) return null;
   if (!isObject(value)) return refuse(path, 'an object or null', value);
   if (!finite(value.usedPercent, 0)) {
     return refuse(`${path}.usedPercent`, 'finite number >= 0', value.usedPercent);
@@ -74,6 +75,10 @@ function readWindow(value: unknown, path: string): CodexRateLimitRead | CodexRat
 export function readCodexRateLimit(value: unknown): CodexRateLimitRead {
   if (!isObject(value)) return refuse('payload', 'an object', value);
   const outer = value;
+  // Windows may be omitted, so a malformed container must be refused here or it would read as "no windows".
+  if (value.rateLimits !== undefined && !isObject(value.rateLimits)) {
+    return refuse('rateLimits', 'an object', value.rateLimits);
+  }
   const rates = isObject(value.rateLimits) ? value.rateLimits : value;
   const ordinaryUsageAllowed = outer.ordinaryUsageAllowed ?? rates.ordinaryUsageAllowed ?? null;
   if (ordinaryUsageAllowed !== null && typeof ordinaryUsageAllowed !== 'boolean') {
@@ -158,7 +163,7 @@ export function parseCodexRateLimit(value: unknown): CodexRateLimit | undefined 
 }
 
 export function codexRateLimitNotice(limit: CodexRateLimit): string {
-  const window = limit.primary;
+  const window = limit.primary ?? limit.secondary;
   if (window === null) return 'Codex rate limit usage is unavailable.';
   return `Codex rate limit: ${window.usedPercent}% used in ${window.windowDurationMins} minutes, resets ${new Date(window.resetsAtMs).toISOString()}.`;
 }
