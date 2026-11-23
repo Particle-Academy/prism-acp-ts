@@ -50,6 +50,7 @@ export {
   META_NS,
   META_PARENT_TOOL_CALL,
   META_RATE_LIMIT,
+  META_RATE_LIMIT_READING,
   META_REPLAY,
   META_REPLAY_SUMMARY,
   META_TASK,
@@ -123,6 +124,19 @@ export { PING_TIMEOUT_DEFAULT_MS, PING_TIMEOUT_MAX_MS, PING_TIMEOUT_MIN_MS, ping
 export type { PingOptions } from './liveness.js';
 export { parseRateLimit, rateLimitNotice, readRateLimit } from './claude/rate-limit.js';
 export type { ClaudeRateLimit, ClaudeRateLimitWindow, RateLimitRead } from './claude/rate-limit.js';
+export {
+  claudeRateLimitReading,
+  codexRateLimitReading,
+  notYetReportedRateLimitReading,
+  unreadableRateLimitReading,
+  unsupportedRateLimitReading,
+} from './rate-limit-reading.js';
+export type {
+  RateLimitAbsent,
+  RateLimitReading,
+  RateLimitReadingState,
+  RateLimitReadingWindow,
+} from './rate-limit-reading.js';
 
 export {
   CLAUDE_DRIVER_CAPABILITIES,

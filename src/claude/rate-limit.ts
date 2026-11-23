@@ -25,10 +25,11 @@
  *
  * ## What the captures do NOT tell us
  *
- * Every captured frame says `status: "allowed"`. **No breached frame has ever
- * been captured**, so how a breach is spelled is genuinely unknown, and so are
- * the `overageStatus` values beyond `"rejected"`. Those stay open string unions
- * on purpose -- see {@link ClaudeRateLimit.status}.
+ * Every captured STREAM frame says `status: "allowed"`. Claude Code transcripts
+ * record rejections as `status: "rejected"` with no `unifiedWindows`, but no
+ * rejection has been captured off the stream itself, so other breach spellings
+ * and the `overageStatus` values beyond `"rejected"` remain unknown. Those stay
+ * open string unions on purpose -- see {@link ClaudeRateLimit.status}.
  */
 
 /** One rate-limit window, as the provider reports it. */
@@ -52,15 +53,16 @@ export interface ClaudeRateLimitWindow {
 /** The structured rate-limit detail carried under `particle.academy/rate_limit`. */
 export interface ClaudeRateLimit {
   /**
-   * `"allowed"` in every frame captured so far.
+   * `"allowed"` in every stream frame captured so far; transcripts also record
+   * `"rejected"`.
    *
    * The union is OPEN (`'allowed' | (string & {})`) deliberately, which keeps
    * the known literal in autocomplete while accepting any string. A closed
    * union would be the same silent-failure class inverted: it would break a
-   * consumer's BUILD the first time a real breach arrived, which is worse than
+   * consumer's BUILD the first time a new spelling arrived, which is worse than
    * the problem it was guarding against. Test `status !== 'allowed'` for "not
-   * allowed"; never match a specific breach spelling, because nobody here has
-   * seen one.
+   * allowed"; never match a specific breach spelling, because `"rejected"` is
+   * only the one seen so far.
    */
   readonly status: 'allowed' | (string & {});
   /**
@@ -207,11 +209,12 @@ export function readRateLimit(value: unknown): RateLimitRead {
   // Past JavaScript's last date the notice's toISOString() throws, and that throw used to end the agent (G-97).
   if (!representable(resetsAtSeconds)) return refuse('resetsAt', REPRESENTABLE, value.resetsAt);
 
-  // An absent `unifiedWindows` is refused, not treated as "no windows": it is
-  // the only part of this payload that answers "how much is left", so a
-  // consumer receiving a typed value without it would have a reset time and no
-  // gauge, which is the shape this type exists to stop being ambiguous.
-  if (!isObject(value.unifiedWindows)) {
+  // An absent `unifiedWindows` is refused on an allowed frame, not treated as
+  // "no windows": it is the only part of that payload that answers "how much is
+  // left". A REJECTION legitimately omits it (seen in transcript rejection
+  // records), and refusing those lost the gauge at the moment the limit was hit.
+  const unifiedWindows = value.unifiedWindows === undefined && status !== 'allowed' ? {} : value.unifiedWindows;
+  if (!isObject(unifiedWindows)) {
     return refuse('unifiedWindows', 'an object', value.unifiedWindows);
   }
 
@@ -219,7 +222,7 @@ export function readRateLimit(value: unknown): RateLimitRead {
   // window the provider named `__proto__` set the object's prototype instead, so the window vanished from `_meta`
   // while the notice still read it (G-96).
   const entries: Array<[string, ClaudeRateLimitWindow]> = [];
-  for (const [name, window] of Object.entries(value.unifiedWindows)) {
+  for (const [name, window] of Object.entries(unifiedWindows)) {
     if (!isObject(window)) return refuse(`unifiedWindows.${name}`, 'an object', window);
 
     const utilization = finite(window.utilization, 0);
