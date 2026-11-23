@@ -75,15 +75,30 @@ export function assertNoRemoteControlArgs(provider: 'claude' | 'codex', args: re
 }
 
 /**
- * Refuse a `remoteControl/*` JSON-RPC request or notification to Codex app-server. Throws before the frame is written.
- * Replies (no `method`) pass.
+ * The line to write for a Codex frame. It is serialized once and that serialized form is what gets checked, so a
+ * `toJSON` or an accessor cannot show the check one value and the wire another.
+ *
+ * A frame is one JSON-RPC object. A list is refused outright: nothing in the driver sends one. Replies (no `method`)
+ * pass.
  */
-export function assertNotRemoteControlFrame(frame: unknown): void {
-  if (typeof frame !== 'object' || frame === null) return;
-  const method = (frame as { method?: unknown }).method;
-  if (typeof method !== 'string') return;
-  const name = normalised(method);
-  if (name === 'remotecontrol' || name.startsWith('remotecontrol/')) {
-    throw new RemoteControlRefused('remoteControl RPCs are refused: remote control is forced off for codex launches');
+export function encodeCodexFrame(frame: unknown): string {
+  const text = JSON.stringify(frame);
+  if (text === undefined) throw new RemoteControlRefused('frame could not be serialized');
+  const written: unknown = JSON.parse(text);
+  if (Array.isArray(written)) throw new RemoteControlRefused('list frames are refused: a Codex frame is one JSON-RPC object');
+  if (typeof written === 'object' && written !== null) {
+    const method = (written as { method?: unknown }).method;
+    if (typeof method === 'string') {
+      const name = normalised(method);
+      if (name === 'remotecontrol' || name.startsWith('remotecontrol/')) {
+        throw new RemoteControlRefused('remoteControl RPCs are refused: remote control is forced off for codex launches');
+      }
+    }
   }
+  return `${text}\n`;
+}
+
+/** Refuse a frame {@link encodeCodexFrame} would refuse. Throws before anything is written. */
+export function assertNotRemoteControlFrame(frame: unknown): void {
+  encodeCodexFrame(frame);
 }

@@ -6,7 +6,7 @@ import { NdjsonFramer, encodeLine } from './ndjson.js';
 import { launchProvider, type ProcessTreeOptions } from './process-tree.js';
 import { stripAnsiControlSequences } from './text.js';
 import { claudeConfigDir, type ClaudeConfigDir } from './claude/accounts.js';
-import { assertNoRemoteControlArgs, assertNotRemoteControlFrame, claudeFeatureFlagEnv, claudeForcedSettingsJson } from './remote-control.js';
+import { assertNoRemoteControlArgs, claudeFeatureFlagEnv, claudeForcedSettingsJson, encodeCodexFrame } from './remote-control.js';
 
 /**
  * THE MODELS A PROVIDER ACTUALLY OFFERS (tynn, Genie's model picker, 2026-10-21). Genie's picker was a hardcoded
@@ -195,15 +195,16 @@ export async function listModels(provider: 'claude' | 'codex', options: ListMode
       resolve: (value) => { clearTimeout(timer); resolve(value); },
       reject: (cause) => { clearTimeout(timer); reject(cause); },
     });
+    let line: string;
     try {
-      if (provider === 'codex') assertNotRemoteControlFrame(frame);
+      line = provider === 'codex' ? encodeCodexFrame(frame) : encodeLine(frame);
     } catch (cause) {
       waiters.delete(id);
       clearTimeout(timer);
       reject(cause);
       return;
     }
-    io.stdin?.write(encodeLine(frame));
+    io.stdin?.write(line);
   });
 
   try {

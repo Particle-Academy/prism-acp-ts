@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
-import { NdjsonFramer, encodeLine } from '../ndjson.js';
-import { assertNoRemoteControlArgs, assertNotRemoteControlFrame } from '../remote-control.js';
+import { NdjsonFramer } from '../ndjson.js';
+import { assertNoRemoteControlArgs, encodeCodexFrame } from '../remote-control.js';
 import { launchProvider, type ProcessTree, type ProcessTreeOptions, type ProviderIo, type ProviderProcess, type StopOptions, type StopVerdict } from '../process-tree.js';
 
 export interface CodexTransportHandlers {
@@ -97,12 +97,12 @@ export class StdioCodexTransport implements CodexTransport {
   }
 
   send(frame: unknown): void {
-    assertNotRemoteControlFrame(frame);
+    const line = encodeCodexFrame(frame);
     const stdin = this.#io?.stdin;
     if (stdin === null || stdin === undefined || stdin.destroyed || this.#closed) {
       throw new Error('Codex app-server stdin is not open');
     }
-    stdin.write(encodeLine(frame));
+    stdin.write(line);
   }
 
   close(signal: NodeJS.Signals = 'SIGTERM'): void {
