@@ -85,6 +85,11 @@ export function readCodexRateLimit(value: unknown): CodexRateLimitRead {
     return refuse('ordinaryUsageAllowed', 'boolean or null', ordinaryUsageAllowed);
   }
 
+  // No window keys at all is not a reading: emitting one would let a consumer replace a good reading with nothing.
+  if (rates.primary === undefined && rates.secondary === undefined) {
+    return refuse('rateLimits.primary', 'an object or null', undefined);
+  }
+
   const primary = readWindow(rates.primary, 'rateLimits.primary');
   if (primary !== null && 'ok' in primary && primary.ok === false) return primary;
   const secondary = readWindow(rates.secondary, 'rateLimits.secondary');
@@ -163,7 +168,9 @@ export function parseCodexRateLimit(value: unknown): CodexRateLimit | undefined 
 }
 
 export function codexRateLimitNotice(limit: CodexRateLimit): string {
-  const window = limit.primary ?? limit.secondary;
+  const { primary, secondary } = limit;
+  // Report the most spent window, so a nearly exhausted one is never hidden. A tie stays on primary.
+  const window = primary === null || (secondary !== null && secondary.usedPercent > primary.usedPercent) ? secondary : primary;
   if (window === null) return 'Codex rate limit usage is unavailable.';
   return `Codex rate limit: ${window.usedPercent}% used in ${window.windowDurationMins} minutes, resets ${new Date(window.resetsAtMs).toISOString()}.`;
 }
