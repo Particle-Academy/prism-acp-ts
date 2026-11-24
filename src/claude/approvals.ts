@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { windowsApprovalAdapter } from '../process-tree.js';
 import type { PermissionOutcome, PermissionRequest } from '../acp/agent.js';
+import { ALLOW_ONCE_OR_DENY, permissionDecision } from '../permissions.js';
 
 /**
  * PERMISSION PROMPTS FOR CLAUDE (issue #1): a person approves a tool call before it runs, as CodexDriver already
@@ -99,25 +100,14 @@ export function permissionRequestFor(input: HookInput): PermissionRequest {
       title: summary ? `${tool}: ${summary}` : tool,
       rawInput: input.tool_input ?? null,
     },
-    options: [
-      { optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' },
-      { optionId: 'reject_once', name: 'Deny', kind: 'reject_once' },
-    ],
+    options: ALLOW_ONCE_OR_DENY,
   };
 }
 
-/** The hook's answer: allow ONLY for an explicit "allow once". */
-export function decisionFor(outcome: PermissionOutcome): HookDecision {
-  if (typeof outcome !== 'object' || outcome === null) return { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'No valid approval was received.' };
-  const given = typeof outcome.reason === 'string' && outcome.reason !== '' ? outcome.reason : undefined;
-  if (outcome.outcome === 'selected' && outcome.optionId === 'allow_once') {
-    // An allow the client made itself (nobody was asked) says so when it gives a reason.
-    return { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: given ?? 'Allowed by the person.' };
-  }
-  const fallback = outcome.outcome === 'cancelled' ? 'The request was cancelled.' : 'The person denied this tool call.';
-  // The client's own reason when it gave one (a limit it enforces is not the person's refusal); today's text otherwise.
-  const why = given ?? fallback;
-  return { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: why };
+/** The hook's answer, by the package's one permission rule ({@link permissionDecision}) against the options offered. */
+export function decisionFor(outcome: unknown): HookDecision {
+  const decision = permissionDecision(ALLOW_ONCE_OR_DENY, outcome);
+  return { hookEventName: 'PreToolUse', permissionDecision: decision.allow ? 'allow' : 'deny', permissionDecisionReason: decision.reason };
 }
 
 /**

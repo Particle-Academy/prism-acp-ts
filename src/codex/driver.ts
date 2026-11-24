@@ -185,6 +185,8 @@ export const CODEX_DRIVER_CAPABILITIES = {
   // session/cancel interrupts the turn with app-server `turn/interrupt` and keeps the app-server and thread (#16).
   cancel: true,
   steer: true,
+  // session/load resumes through the CLI's own session identity (see AcpAgent's session/load).
+  loadSession: true,
 } as const satisfies DriverCapabilities;
 
 /** The file extension of each image type a prompt may carry, for the localImage file Codex reads. */

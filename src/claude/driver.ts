@@ -54,6 +54,8 @@ export const CLAUDE_DRIVER_CAPABILITIES = {
   // Turn cancel (issue #16): session/cancel interrupts the turn and keeps the CLI. See {@link ClaudeDriver.cancel} for
   // what is documented and what was measured.
   cancel: true,
+  // session/load resumes through the CLI's own session identity (see AcpAgent's session/load).
+  loadSession: true,
 } as const satisfies DriverCapabilities;
 
 /** ACP permission modes map onto the CLI's own `--permission-mode` values. */
