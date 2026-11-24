@@ -332,5 +332,3 @@ function compile(schema) {
 }
 
 export { compile, validate };
-//# sourceMappingURL=index.js.map
-//# sourceMappingURL=index.js.map

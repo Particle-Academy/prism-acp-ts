@@ -7,7 +7,8 @@
  * commit above together.
  *
  * The validator is Fancy's `@particle-academy/fancy-schema` 0.2.1 (Particle-Academy/fancy-schema@315c1c1, the v0.2.1
- * tag), its built `dist/index.js` and `index.d.ts` VENDORED under test/vendor/fancy-schema with its LICENSE. It is not a
+ * tag), its built `dist/index.js` and `index.d.ts` VENDORED under test/vendor/fancy-schema with its LICENSE; the one change is the
+ * removed `sourceMappingURL` line, since the map is not vendored. It is not a
  * devDependency because package.json's bytes are pinned by the release-signing verifier manifest, which is re-pinned
  * only by a release, and because it is published only as a git tag. vendor.test.ts pins the copied bytes by hash.
  *
