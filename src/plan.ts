@@ -35,8 +35,11 @@ import type { AcpUpdate } from './claude/to-acp.js';
 import { META_PLAN, META_PLAN_STEP } from './meta.js';
 import { stripAnsiControlSequences } from './text.js';
 
-/** A step's state, as prism-harness records it (G-360 §1.3). */
-export type PlanStepState = 'todo' | 'running' | 'held' | 'waiting_input' | 'waiting_condition' | 'done' | 'failed' | 'skipped';
+/**
+ * A step's state, as prism-harness records it (G-360 §1.3). `proposed` is a step a pending change would add: it is not
+ * in the plan yet, so it is shown pending, never in progress or completed, with the real state in `_meta`.
+ */
+export type PlanStepState = 'todo' | 'running' | 'held' | 'waiting_input' | 'waiting_condition' | 'proposed' | 'done' | 'failed' | 'skipped';
 /** Who does the step. `human` steps are the person's. */
 export type PlanStepOwner = 'agent' | 'human';
 /** A plan's status (G-360 §1.1). */
@@ -86,6 +89,7 @@ const STATUS: Readonly<Record<PlanStepState, 'pending' | 'in_progress' | 'comple
   todo: 'pending',
   waiting_input: 'pending',
   waiting_condition: 'pending',
+  proposed: 'pending',
   running: 'in_progress',
   held: 'in_progress',
   done: 'completed',
