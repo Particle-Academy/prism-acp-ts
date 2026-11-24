@@ -1,0 +1,22 @@
+{
+  "_provenance": "Hand-written, not captured stream frames. Reset times are synthetic, and so is the per-window status value: the live reading recorded only that the field is a string. weeklyOnlyAllowed is derived from a live allow-listed reading (.ai/evidence/g328-claude-usage-reading.json in the envelope). rejectedWithoutWindows is derived from the shape of a transcript rejection record, not from a captured stream frame.",
+  "weeklyOnlyAllowed": {
+    "status": "allowed",
+    "resetsAt": 1861000000,
+    "rateLimitType": "seven_day",
+    "overageStatus": "rejected",
+    "overageDisabledReason": "org_level_disabled",
+    "isUsingOverage": false,
+    "unifiedWindows": {
+      "seven_day": { "utilization": 0.15, "resetsAt": 1861000000, "status": "allowed" }
+    }
+  },
+  "rejectedWithoutWindows": {
+    "status": "rejected",
+    "resetsAt": 1861000000,
+    "rateLimitType": "five_hour",
+    "overageStatus": "rejected",
+    "overageDisabledReason": "out_of_credits",
+    "isUsingOverage": false
+  }
+}

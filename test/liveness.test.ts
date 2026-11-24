@@ -7,6 +7,7 @@ import { ClaudeDriver, type TurnOutcome } from '../src/claude/driver.js';
 import { CodexDriver, type CodexTransportFactory } from '../src/codex/driver.js';
 import type { CodexTransport, CodexTransportHandlers } from '../src/codex/transport.js';
 import { PING_TIMEOUT_DEFAULT_MS, PING_TIMEOUT_MAX_MS, PING_TIMEOUT_MIN_MS, pingTimeoutMs } from '../src/liveness.js';
+import { META_RATE_LIMIT_READING } from '../src/meta.js';
 
 /**
  * G-314 (Tynn #855): a host must tell a stalled provider from a busy one and offer Stop/Restart. Both drivers get
@@ -28,6 +29,13 @@ const until = async (what: string, ready: () => boolean, ms = 8000) => {
 };
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 /** The driver mints a random id for a message streamed before the CLI names it; keep identity, drop the randomness. */
+/** A rate-limit reading's `asOfMs` is the wall clock, so two runs differ there and must match everywhere else. */
+const withoutReadingClock = (updates: unknown[]) => updates.map((update) => {
+  const meta = (update as { _meta?: Record<string, unknown> })._meta;
+  const reading = meta?.[META_RATE_LIMIT_READING] as Record<string, unknown> | undefined;
+  return reading === undefined ? update : { ...(update as object), _meta: { ...meta, [META_RATE_LIMIT_READING]: { ...reading, asOfMs: 0 } } };
+});
+
 const minted = (updates: unknown[]) => {
   const seen = new Map<string, string>();
   return JSON.parse(JSON.stringify(updates).replace(/prism_msg_[0-9a-f-]{36}/g, id => seen.get(id) ?? (seen.set(id, `minted-${seen.size}`), seen.get(id)!))) as unknown[];
@@ -336,7 +344,7 @@ describe('CodexDriver.ping() (G-314)', () => {
     expect(pinged.pinged).toBe(true);
     expect(pinged.s.ends).toEqual(plain.s.ends);
     expect(pinged.s.ends).toHaveLength(1);
-    expect(pinged.s.updates).toEqual(plain.s.updates);
+    expect(withoutReadingClock(pinged.s.updates)).toEqual(withoutReadingClock(plain.s.updates));
     expect(pinged.s.updates.filter(u => (u as { sessionUpdate?: string }).sessionUpdate === 'usage_update')).toHaveLength(1);
     // Exactly what the plain run wrote, plus the one model/list.
     const methods = (sent: Record<string, unknown>[]) => sent.map(frame => frame.method).filter(method => method !== 'model/list');

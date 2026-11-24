@@ -671,7 +671,7 @@ export class ClaudeDriver {
     if (options.processTree?.windowsStdio === 'local-pipes' && ((!restricted && this.#mcpServers.length > 0) || options.permissionPrompts !== undefined || this.#options.disabledMcpServers!.length > 0)) {
       throw new ProcessTreeError('LOCAL transport does not support generated Claude MCP configuration or permission hooks');
     }
-    this.#mapper = new ClaudeToAcp(this.#options.cwd);
+    this.#mapper = new ClaudeToAcp(this.#options.cwd, { rateLimitsSupported: options.credentials?.mode !== 'apiKey' });
     this.#events = events;
   }
 

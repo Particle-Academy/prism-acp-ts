@@ -90,6 +90,12 @@ export const META_THINKING_TOKENS_ESTIMATE = metaKey('thinking_tokens_estimate')
 export const META_RATE_LIMIT = metaKey('rate_limit');
 
 /**
+ * The provider-neutral {@link RateLimitReading} (src/rate-limit-reading.ts), beside the provider's own detail under
+ * {@link META_RATE_LIMIT}. Plain JSON: no raw payload, plan or account identifiers.
+ */
+export const META_RATE_LIMIT_READING = metaKey('rate_limit_reading');
+
+/**
  * The session's MCP servers as `McpServerReport[]` (src/mcp-status.ts): name, normalised status, and how
  * many of each server's tools are callable. Claude reports it once, from system/init; Codex every time a
  * server's startup status changes, as the full current list.

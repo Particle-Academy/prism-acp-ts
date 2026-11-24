@@ -38,6 +38,7 @@ import {
   META_PLUGINS,
   META_SUBAGENTS,
   META_RATE_LIMIT,
+  META_RATE_LIMIT_READING,
   META_TASK,
   META_THINKING_SIGNATURE,
   META_THINKING_TOKENS_ESTIMATE,
@@ -53,6 +54,7 @@ import { randomUUID } from 'node:crypto';
 import { claudeMcpServers } from '../mcp-status.js';
 import { stripAnsiControlSequences } from '../text.js';
 import { rateLimitNotice, readRateLimit } from './rate-limit.js';
+import { claudeRateLimitReading, unsupportedRateLimitReading } from '../rate-limit-reading.js';
 import { claudeFileEdits, FileEditRefused } from '../edits.js';
 
 /** An ACP `session/update` payload: the `update` object, without the sessionId. */
@@ -98,8 +100,16 @@ interface BlockState {
 export class ClaudeToAcp {
   readonly #cwd: string | undefined;
 
-  /** A known workspace enables file-relative normalisation; the legacy standalone mapper needs no root. */
-  constructor(cwd?: string) { this.#cwd = cwd; }
+  readonly #rateLimitsSupported: boolean;
+
+  /**
+   * A known workspace enables file-relative normalisation; the legacy standalone mapper needs no root.
+   * `rateLimitsSupported: false` marks an API-key session, whose rate-limit reading is `unsupported`.
+   */
+  constructor(cwd?: string, options: { readonly rateLimitsSupported?: boolean } = {}) {
+    this.#cwd = cwd;
+    this.#rateLimitsSupported = options.rateLimitsSupported !== false;
+  }
 
   /** Live content blocks, keyed by the index the CLI assigns them. */
   readonly #blocks = new Map<number, BlockState>();
@@ -749,7 +759,11 @@ export class ClaudeToAcp {
     // A generic "not recognised" would turn a bug report from "they renamed
     // utilization" into "the gauge vanished", and someone diffing a frame by
     // hand to tell the difference.
-    const read = readRateLimit(input.rate_limit_info ?? input);
+    const payload = input.rate_limit_info ?? input;
+    const read = readRateLimit(payload);
+    const reading = this.#rateLimitsSupported
+      ? claudeRateLimitReading(payload, Date.now())
+      : unsupportedRateLimitReading(Date.now());
 
     if (!read.ok) {
       return [
@@ -760,6 +774,7 @@ export class ClaudeToAcp {
           },
           {
             [META_UNMAPPED_FRAME]: { reason: read.reason, frame: input },
+            [META_RATE_LIMIT_READING]: reading,
           },
         ),
       ];
@@ -771,7 +786,7 @@ export class ClaudeToAcp {
           sessionUpdate: 'notice',
           notice: { level: 'warning', message: rateLimitNotice(read.limit) },
         },
-        { [META_RATE_LIMIT]: read.limit },
+        { [META_RATE_LIMIT]: read.limit, [META_RATE_LIMIT_READING]: reading },
       ),
     ];
   }
