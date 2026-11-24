@@ -65,6 +65,41 @@ plan kinds could only ever be *synthesised* here, and that is a decision to take
 deliberately rather than a mapping to add casually. Until then a plan is not
 lost — it is visible as the tool calls that built it.
 
+### Plans
+
+Codex sends its plan whole, and it goes to the client as `plan`, with every
+entry's required `priority` (`medium`; Codex has none).
+
+A driver that keeps its own plan projects it with `planUpdate(snapshot, client)`:
+
+```ts
+import { clientAcceptsPlanUpdates, planRemoved, planUpdate } from '@particle-academy/prism-acp';
+
+// In a DriverFactory: options.clientCapabilities is { plan: boolean }, read from the client's initialize.
+events.onUpdate?.(planUpdate({ planId, revision, planStatus: 'active', holdingApprovalId: null, steps }, options.clientCapabilities ?? { plan: false }));
+```
+
+- A client that advertised `clientCapabilities.plan` gets `plan_update`, keyed
+  by `planId`. Any other client gets the full-replacement `plan`.
+- `planRemoved` returns `plan_removed` for the first kind of client, and `null`
+  (send nothing) for the second.
+- ACP has no failed or skipped status, and `completed` means "successfully
+  completed". So a failed or skipped step is shown unchecked, labelled
+  `[failed]` or `[skipped]`. A person's step is labelled `(you)`.
+- Each entry's real state is in `_meta["particle.academy/plan_step"]`. The
+  plan's revision and status are in `_meta["particle.academy/plan"]`.
+- Titles are treated as model text. Controls and invisible characters are
+  removed, the title is capped at 160 characters, and it cannot begin with one
+  of the labels above.
+- A snapshot with an unknown state, owner or status, or a bad id, throws
+  `PlanProjectionError`.
+
+`AcpAgent` checks every plan update a driver sends, whichever driver sent it.
+It never sends `plan_update` or `plan_removed` to a client that did not
+advertise `plan`. For that client, an items `plan_update` is sent as `plan`, and
+anything else is dropped and reported. An entry without a valid priority is
+sent as `medium`, and that is reported too.
+
 ## Why drive a CLI rather than call an API
 
 Because of the authentication, and it is the whole reason this package exists.

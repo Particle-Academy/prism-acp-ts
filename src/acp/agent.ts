@@ -29,6 +29,7 @@ import type { StopReason, TurnOutcome } from '../claude/driver.js';
 import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, META_MODEL_INFO, META_PERMISSION_REASON, META_TURN_FAILURE, withMeta } from '../meta.js';
 import type { SessionModelState } from '../models.js';
 import { observeStopVerdict } from '../stop-verdict.js';
+import { clientAcceptsPlanUpdates, PLAN_ENTRY_PRIORITY, type PlanClient } from '../plan.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
 import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
 import type { PingOptions } from '../liveness.js';
@@ -159,7 +160,16 @@ export type PermissionOutcome =
  * bookkeeping covered by nothing.
  */
 export type DriverFactory = (
-  options: { readonly cwd: string; readonly resumeSessionId?: string; readonly mcpServers?: readonly McpServer[] },
+  options: {
+    readonly cwd: string;
+    readonly resumeSessionId?: string;
+    readonly mcpServers?: readonly McpServer[];
+    /**
+     * What the client said it can receive, from its `initialize`. `plan: true` means `plan_update` and
+     * `plan_removed` may be sent (see plan.ts); AcpAgent enforces it on every update either way.
+     */
+    readonly clientCapabilities?: PlanClient;
+  },
   events: DriverEvents,
 ) => AgentDriver;
 
@@ -230,6 +240,9 @@ interface Session {
  */
 const MINTED_SESSION_ID = /^sess_\d+_\d+$/;
 
+/** ACP's plan entry priorities. */
+const PRIORITIES: ReadonlySet<string> = new Set(['high', 'medium', 'low']);
+
 export class AcpAgent {
   readonly #peer: JsonRpcPeer;
   readonly #options: AcpAgentOptions;
@@ -237,6 +250,8 @@ export class AcpAgent {
   #counter = 0;
   /** Ids this process handed out via session/new. See the refusal in #sessionLoad. */
   readonly #minted = new Set<string>();
+  /** Whether the client advertised `clientCapabilities.plan` (G-362). False until it says so. */
+  #clientAcceptsPlan = false;
 
   constructor(peer: JsonRpcPeer, options: AcpAgentOptions) {
     this.#peer = peer;
@@ -308,6 +323,7 @@ export class AcpAgent {
     // speak 1, and say so whatever was asked, rather than echoing a number we
     // do not implement back at the client.
     void requested;
+    this.#clientAcceptsPlan = clientAcceptsPlanUpdates(asObject(params)?.clientCapabilities);
 
     const response = {
       protocolVersion: PROTOCOL_VERSION,
@@ -548,10 +564,11 @@ export class AcpAgent {
     };
 
     const driver = this.#options.driverFactory(
-      { cwd, mcpServers, ...(resumeSessionId === undefined ? {} : { resumeSessionId }) },
+      { cwd, mcpServers, clientCapabilities: { plan: this.#clientAcceptsPlan }, ...(resumeSessionId === undefined ? {} : { resumeSessionId }) },
       {
         onUpdate: (update) => {
-          this.#peer.notify('session/update', { sessionId: id, update });
+          const sent = this.#planGate(id, update);
+          if (sent !== null) this.#peer.notify('session/update', { sessionId: id, update: sent });
         },
         onRequestPermission: async (request) => {
           const result = await this.#peer.request('session/request_permission', {
@@ -600,6 +617,64 @@ export class AcpAgent {
     this.#sessions.set(id, session);
     driver.start();
     return session;
+  }
+
+  /**
+   * Plan updates, held to the protocol at the one place every driver's updates leave (G-362). `plan_update` and
+   * `plan_removed` MUST NOT reach a client that did not advertise `clientCapabilities.plan`: an items update becomes
+   * the full-replacement `plan` it is equivalent to, and anything else is not sent. A plan_update that is not ACP's
+   * shape is never sent. A plan entry with no valid priority is given `medium`, because a client built from the
+   * schema drops it otherwise. Each correction is reported, so a driver that needs one is visible.
+   */
+  #planGate(sessionId: string, update: AcpUpdate): AcpUpdate | null {
+    const refuse = (problem: string): null => {
+      this.#options.onProtocolError?.(sessionId, problem, { recoverable: true });
+      return null;
+    };
+    switch (update.sessionUpdate) {
+      case 'plan': {
+        if (!Array.isArray(update.entries)) return refuse('plan update without an entries list was not sent');
+        const entries = this.#planEntries(sessionId, update.entries);
+        return entries === update.entries ? update : { ...update, entries };
+      }
+      case 'plan_update': {
+        const plan = asObject(update.plan);
+        const planId = asString(plan?.planId);
+        const items = plan?.type === 'items' && Array.isArray(plan.entries);
+        const markdown = plan?.type === 'markdown' && typeof plan.content === 'string';
+        if (plan === undefined || planId === undefined || planId === '' || (!items && !markdown)) {
+          return refuse('plan_update that is not an ACP plan update was not sent');
+        }
+        if (!this.#clientAcceptsPlan && !items) return refuse('plan_update was not sent: the client did not advertise plan updates');
+        const entries = items ? this.#planEntries(sessionId, plan.entries as unknown[]) : undefined;
+        if (!this.#clientAcceptsPlan) {
+          const meta = asObject(plan._meta);
+          return { sessionUpdate: 'plan', entries, ...(meta === undefined ? {} : { _meta: meta }) };
+        }
+        return entries === undefined || entries === plan.entries ? update : { ...update, plan: { ...plan, entries } };
+      }
+      case 'plan_removed': {
+        const planId = asString(update.planId);
+        if (planId === undefined || planId === '') return refuse('plan_removed without a planId was not sent');
+        if (!this.#clientAcceptsPlan) return refuse('plan_removed was not sent: the client did not advertise plan updates');
+        return update;
+      }
+      default:
+        return update;
+    }
+  }
+
+  #planEntries(sessionId: string, entries: readonly unknown[]): readonly unknown[] {
+    let fixed = 0;
+    const out = entries.map((entry) => {
+      const object = asObject(entry);
+      if (object === undefined || (typeof object.priority === 'string' && PRIORITIES.has(object.priority))) return entry;
+      fixed += 1;
+      return { ...object, priority: PLAN_ENTRY_PRIORITY };
+    });
+    if (fixed === 0) return entries;
+    this.#options.onProtocolError?.(sessionId, `${fixed} plan entr${fixed === 1 ? 'y' : 'ies'} had no valid priority and were sent as medium`, { recoverable: true });
+    return out;
   }
 
   async #sessionPrompt(params: unknown): Promise<Record<string, unknown>> {

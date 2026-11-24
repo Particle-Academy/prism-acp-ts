@@ -129,6 +129,18 @@ export const META_EXEC_POLICY_AMENDMENT = metaKey('execpolicy_amendment');
 export const META_BACKGROUND_TASKS = metaKey('background_tasks');
 
 /**
+ * On a plan update (the `plan`, or `plan_update`'s plan): `{ planId, revision, planStatus, holdingApprovalId }`. The
+ * plan's own state, which ACP has no field for. See plan.ts.
+ */
+export const META_PLAN = metaKey('plan');
+
+/**
+ * On each plan entry: `{ id, state, owner, approvalId }` -- the step's real state. ACP has no failed or skipped
+ * status, so such an entry is unchecked and labelled, and this is where the state is. See plan.ts.
+ */
+export const META_PLAN_STEP = metaKey('plan_step');
+
+/**
  * One task's lifecycle event, from Claude Code's `task_started` / `task_progress` / `task_updated` /
  * `task_notification` frames, camelCased with `event: 'started' | 'progress' | 'updated' | 'ended'`.
  * `taskId` is always present; key a task by `taskId` (and `runId` when given -- a resumed task gets a new run).
