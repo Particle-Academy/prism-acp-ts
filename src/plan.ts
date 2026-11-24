@@ -167,13 +167,21 @@ export function planEntry(step: PlanStep): { content: string; priority: string; 
 
 /** A model-written title, made safe to show: one line, nothing hidden, no host label, at most {@link PLAN_TITLE_MAX}. */
 export function planTitle(value: string): string {
-  let text = stripAnsiControlSequences(value).text.replace(HIDDEN, ' ').replace(/ {2,}/g, ' ').replace(/^ +| +$/g, '');
+  // Runs of spaces collapse to one first, so trimming is one character at each end, with no backtracking regex.
+  let text = trimSpace(stripAnsiControlSequences(value).text.replace(HIDDEN, ' ').replace(/ {2,}/g, ' '));
   for (let match = LABEL.exec(text); match !== null; match = LABEL.exec(text)) {
-    text = text.slice(match[0].length).replace(/^ +/, '');
+    text = trimSpace(text.slice(match[0].length));
   }
   const points = Array.from(text);
-  if (points.length > PLAN_TITLE_MAX) text = points.slice(0, PLAN_TITLE_MAX - 1).join('').replace(/ +$/, '') + '…';
+  if (points.length > PLAN_TITLE_MAX) text = trimSpace(points.slice(0, PLAN_TITLE_MAX - 1).join('')) + '…';
   return text === '' ? PLAN_UNTITLED : text;
+}
+
+/** Remove one space from each end. Callers have already collapsed runs of spaces, so one is all there can be. */
+function trimSpace(text: string): string {
+  const start = text.startsWith(' ') ? 1 : 0;
+  const end = text.endsWith(' ') && text.length > start ? text.length - 1 : text.length;
+  return text.slice(start, end);
 }
 
 function checkedId(value: unknown, name: string): string {
