@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AcpAgent, PROTOCOL_VERSION, type AcpAgentOptions, type AgentDriver, type DriverEvents } from '../src/acp/agent.js';
 import { JsonRpcPeer } from '../src/jsonrpc.js';
 import type { TurnOutcome } from '../src/claude/driver.js';
+import { sessionNotificationProblems } from './acp-schema.js';
 
 /**
  * A driver that records what it was asked and lets a test decide the outcome.
@@ -891,5 +892,87 @@ describe('models', () => {
   it('CONTROL: a driver with no model support answers session/new as before', async () => {
     const h = harness();
     expect((await call(h, 'session/new', { cwd: '/work', mcpServers: [] })).result).toEqual({ sessionId: 'sess_1' });
+  });
+});
+
+/**
+ * G-362 at the seam every driver shares. `plan_update` and `plan_removed` MUST NOT reach a client that did not
+ * advertise `clientCapabilities.plan`, and a plan entry MUST carry a priority. Both are enforced here, where every
+ * driver's updates leave the agent, so no driver -- shipped, external, or one not written yet -- can send either.
+ */
+describe('plan updates and the client capability (G-362)', () => {
+  const entry = { content: 'step', priority: 'medium', status: 'pending' };
+  const itemsUpdate = { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [entry], _meta: { 'particle.academy/plan': { revision: 1 } } } };
+
+  async function session(clientCapabilities: unknown) {
+    const sent: Record<string, unknown>[] = [];
+    const drivers: FakeDriver[] = [];
+    const problems: string[] = [];
+    const peer = new JsonRpcPeer({ send: (m) => sent.push(m as Record<string, unknown>) });
+    new AcpAgent(peer, {
+      driverFactory: (options, events) => {
+        const driver = new FakeDriver(options, events);
+        drivers.push(driver);
+        return driver;
+      },
+      newSessionId: () => 'sess_plan',
+      onProtocolError: (_id, problem) => problems.push(problem),
+    });
+    const params = clientCapabilities === undefined ? { protocolVersion: 1 } : { protocolVersion: 1, clientCapabilities };
+    await peer.receive({ jsonrpc: '2.0', id: 1, method: 'initialize', params });
+    await peer.receive({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: process.cwd(), mcpServers: [] } });
+    const driver = drivers.at(-1)!;
+    const updates = () => sent.filter((m) => m.method === 'session/update').map((m) => (m.params as Record<string, unknown>));
+    return { driver, updates, problems };
+  }
+
+  it('tells each driver whether the client accepts plan updates', async () => {
+    expect((await session({ plan: {} })).driver.options).toMatchObject({ clientCapabilities: { plan: true } });
+    expect((await session({ plan: null })).driver.options).toMatchObject({ clientCapabilities: { plan: false } });
+    expect((await session(undefined)).driver.options).toMatchObject({ clientCapabilities: { plan: false } });
+  });
+
+  it('forwards plan_update and plan_removed to a client that advertised plan', async () => {
+    const s = await session({ plan: {} });
+    s.driver.emit(itemsUpdate);
+    s.driver.emit({ sessionUpdate: 'plan_removed', planId: 'pl_1' });
+    expect(s.updates().map((u) => u.update)).toEqual([itemsUpdate, { sessionUpdate: 'plan_removed', planId: 'pl_1' }]);
+    for (const params of s.updates()) expect(sessionNotificationProblems(params)).toEqual([]);
+  });
+
+  it('turns plan_update into the full-replacement plan for a client that did not', async () => {
+    const s = await session({});
+    s.driver.emit(itemsUpdate);
+    expect(s.updates().map((u) => u.update)).toEqual([
+      { sessionUpdate: 'plan', entries: [entry], _meta: { 'particle.academy/plan': { revision: 1 } } },
+    ]);
+    for (const params of s.updates()) expect(sessionNotificationProblems(params)).toEqual([]);
+  });
+
+  it('sends no plan_removed, and no markdown plan_update, to a client that did not advertise plan, and reports it', async () => {
+    const s = await session(undefined);
+    s.driver.emit({ sessionUpdate: 'plan_removed', planId: 'pl_1' });
+    s.driver.emit({ sessionUpdate: 'plan_update', plan: { type: 'markdown', planId: 'pl_1', content: '# plan' } });
+    s.driver.emit({ sessionUpdate: 'plan_update', delta: 'progress' });
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toHaveLength(3);
+  });
+
+  it('refuses a plan_update that is not ACP-shaped even for a client that advertised plan', async () => {
+    // The old Codex `{sessionUpdate: 'plan_update', delta}` was this shape.
+    const s = await session({ plan: {} });
+    s.driver.emit({ sessionUpdate: 'plan_update', delta: 'progress' });
+    s.driver.emit({ sessionUpdate: 'plan_update', plan: { type: 'items', entries: [] } });
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toHaveLength(2);
+  });
+
+  it.each([{ plan: {} }, {}])('gives a plan entry with no valid priority the neutral one (client %j)', async (caps) => {
+    const s = await session(caps);
+    s.driver.emit({ sessionUpdate: 'plan', entries: [{ content: 'a', status: 'pending' }, { content: 'b', priority: 'urgent', status: 'completed' }, { content: 'c', priority: 'high', status: 'pending' }] });
+    const update = s.updates()[0]!.update as { entries: Record<string, unknown>[] };
+    expect(update.entries.map((e) => e.priority)).toEqual(['medium', 'medium', 'high']);
+    expect(sessionNotificationProblems(s.updates()[0])).toEqual([]);
+    expect(s.problems).toHaveLength(1);
   });
 });

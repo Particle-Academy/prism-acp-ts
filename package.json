@@ -35,6 +35,7 @@
     "probe:codex-models": "node scripts/probe-codex-models.mjs"
   },
   "devDependencies": {
+    "@particle-academy/fancy-schema": "github:Particle-Academy/fancy-schema#315c1c11b2b6b002b1f95b3c226e9b23c152c733",
     "@types/node": "^26.3.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.11"
