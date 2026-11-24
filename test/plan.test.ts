@@ -34,7 +34,7 @@ function entries(update: Record<string, unknown>): Entry[] {
   return (update.plan as { entries: Entry[] }).entries;
 }
 
-const ALL: readonly PlanStepState[] = ['todo', 'running', 'held', 'waiting_input', 'waiting_condition', 'done', 'failed', 'skipped'];
+const ALL: readonly PlanStepState[] = ['todo', 'running', 'held', 'waiting_input', 'waiting_condition', 'proposed', 'done', 'failed', 'skipped'];
 
 describe('the client capability', () => {
   it.each([
@@ -84,6 +84,7 @@ describe('planUpdate', () => {
     ['todo', 'pending'],
     ['waiting_input', 'pending'],
     ['waiting_condition', 'pending'],
+    ['proposed', 'pending'],
     ['running', 'in_progress'],
     ['held', 'in_progress'],
     ['done', 'completed'],
@@ -99,6 +100,18 @@ describe('planUpdate', () => {
     expect(entry!.status).not.toBe('completed');
     expect(entry!.content).toBe(`[${state}] Deploy`);
     expect(entry!._meta[META_PLAN_STEP]).toMatchObject({ id: `ps_${state}`, state });
+  });
+
+  it('shows a step a pending change proposes as pending, with its real state and the change\'s approval in _meta', () => {
+    // prism-harness (G-360) sends a change's new steps with state `proposed` while the change waits on the person.
+    // They are not in the plan yet: never in progress, never completed, and no host label.
+    const update = planUpdate(snapshot([step('done', 'Read'), step('proposed', 'Check the totals', { approvalId: 'apr_change' })],
+      { planStatus: 'waiting', holdingApprovalId: 'apr_change' }), WITH);
+    const [, proposed] = entries(update);
+    expect(proposed!.status).toBe('pending');
+    expect(proposed!.content).toBe('Check the totals');
+    expect(proposed!._meta[META_PLAN_STEP]).toEqual({ id: 'ps_proposed', state: 'proposed', owner: 'agent', approvalId: 'apr_change' });
+    expect(sessionUpdateProblems(update)).toEqual([]);
   });
 
   it('prefixes a person step, after the outcome label', () => {
