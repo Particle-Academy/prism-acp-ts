@@ -242,6 +242,17 @@ const MINTED_SESSION_ID = /^sess_\d+_\d+$/;
 
 /** ACP's plan entry priorities. */
 const PRIORITIES: ReadonlySet<string> = new Set(['high', 'medium', 'low']);
+/** ACP's plan entry statuses. A failed or skipped step has none of its own; see plan.ts. */
+const PLAN_ENTRY_STATUSES: ReadonlySet<string> = new Set(['pending', 'in_progress', 'completed']);
+const MALFORMED_ENTRIES = 'plan update was not sent: an entry was not an object with a string content and an ACP status';
+
+/** Whether every entry is one ACP can carry (priority aside, which the gate supplies). */
+function planEntriesValid(entries: readonly unknown[]): boolean {
+  return entries.every((entry) => {
+    const object = asObject(entry);
+    return object !== undefined && typeof object.content === 'string' && typeof object.status === 'string' && PLAN_ENTRY_STATUSES.has(object.status);
+  });
+}
 
 export class AcpAgent {
   readonly #peer: JsonRpcPeer;
@@ -623,8 +634,10 @@ export class AcpAgent {
    * Plan updates, held to the protocol at the one place every driver's updates leave (G-362). `plan_update` and
    * `plan_removed` MUST NOT reach a client that did not advertise `clientCapabilities.plan`: an items update becomes
    * the full-replacement `plan` it is equivalent to, and anything else is not sent. A plan_update that is not ACP's
-   * shape is never sent. A plan entry with no valid priority is given `medium`, because a client built from the
-   * schema drops it otherwise. Each correction is reported, so a driver that needs one is visible.
+   * shape is never sent, and neither is a plan (of either kind) with an entry that is not an object with a string
+   * `content` and a status of `pending`, `in_progress` or `completed`. A plan entry with no valid priority is given
+   * `medium`, because a client built from the schema drops it otherwise. Each refusal and correction is reported, so
+   * a driver that needs one is visible.
    */
   #planGate(sessionId: string, update: AcpUpdate): AcpUpdate | null {
     const refuse = (problem: string): null => {
@@ -634,6 +647,7 @@ export class AcpAgent {
     switch (update.sessionUpdate) {
       case 'plan': {
         if (!Array.isArray(update.entries)) return refuse('plan update without an entries list was not sent');
+        if (!planEntriesValid(update.entries)) return refuse(MALFORMED_ENTRIES);
         const entries = this.#planEntries(sessionId, update.entries);
         return entries === update.entries ? update : { ...update, entries };
       }
@@ -646,6 +660,7 @@ export class AcpAgent {
           return refuse('plan_update that is not an ACP plan update was not sent');
         }
         if (!this.#clientAcceptsPlan && !items) return refuse('plan_update was not sent: the client did not advertise plan updates');
+        if (items && !planEntriesValid(plan.entries as unknown[])) return refuse(MALFORMED_ENTRIES);
         const entries = items ? this.#planEntries(sessionId, plan.entries as unknown[]) : undefined;
         if (!this.#clientAcceptsPlan) {
           const meta = asObject(plan._meta);

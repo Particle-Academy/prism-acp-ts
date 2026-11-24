@@ -39,7 +39,7 @@ import {
   withMeta,
   projectBudgetedToolMeta,
 } from '../meta.js';
-import { PLAN_ENTRY_PRIORITY } from '../plan.js';
+import { PLAN_ENTRY_PRIORITY, planTitle } from '../plan.js';
 import { codexListedReport, codexStartupReport, type McpServerReport } from '../mcp-status.js';
 import { LivenessGate, pingTimeoutMs, type PingOptions } from '../liveness.js';
 import { assertNoRemoteControlArgs, encodeCodexFrame } from '../remote-control.js';
@@ -1863,7 +1863,8 @@ export class CodexDriver implements AgentDriver {
         this.#recordUnmapped('turn/plan/updated entry had an unknown status', entry);
       }
       return {
-        content: asString(object.step) ?? asString(object.title) ?? `Step ${index + 1}`,
+        // Model text, shown beside host plans that use the `(you)` and `[failed]` labels: cleaned the same way.
+        content: planTitle(asString(object.step) ?? asString(object.title) ?? `Step ${index + 1}`),
         // Required by ACP (G-362): a client built from the schema drops an entry without one. Codex has no priority.
         priority: PLAN_ENTRY_PRIORITY,
         status: status === 'completed' ? 'completed' : status === 'inProgress' ? 'in_progress' : 'pending',
