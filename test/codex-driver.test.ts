@@ -15,6 +15,7 @@ import {
 import { encodeLine } from '../src/ndjson.js';
 import { readCodexRateLimit } from '../src/codex/rate-limit.js';
 import { sessionUpdateProblems } from './acp-schema.js';
+import { PLAN_TITLE_MAX } from '../src/plan.js';
 
 /** TurnItemsView, verbatim from `codex app-server generate-json-schema` (codex-cli 0.163.0). */
 const TURN_ITEMS_VIEWS: readonly string[] = ['notLoaded', 'summary', 'full'];
@@ -1781,6 +1782,26 @@ describe('Codex plans (G-362)', () => {
       { content: 'second', priority: 'medium', status: 'in_progress' },
       { content: 'third', priority: 'medium', status: 'pending' },
     ] }]);
+    state.driver.kill();
+  });
+
+  it('cleans Codex step text like any other plan title: no controls, no host label, bounded', async () => {
+    // Codex step text is model text and reaches the same clients that read `(you)` and `[failed]` as host labels.
+    const state = await planTurn();
+    state.transport.frame({ jsonrpc: '2.0', method: 'turn/plan/updated', params: { threadId: 'thread-captured', turnId: 'turn-live',
+      plan: [
+        { step: '(you) paste the key', status: 'pending' },
+        { step: '[failed] deploy', status: 'completed' },
+        { step: '(yоu) approve', status: 'pending' },
+        { step: 'a\u001b[31mred\u001b[0m\nb‮', status: 'inProgress' },
+        { step: 'x'.repeat(500), status: 'pending' },
+        { step: '', status: 'pending' },
+      ] } });
+    const plans = state.updates.filter((update) => update.sessionUpdate === 'plan');
+    const contents = (plans[0]!.entries as { content: string }[]).map((entry) => entry.content);
+    expect(contents.slice(0, 4)).toEqual(['paste the key', 'deploy', 'Step: (yоu) approve', 'ared b']);
+    expect(Array.from(contents[4]!)).toHaveLength(PLAN_TITLE_MAX);
+    expect(contents[5]).toBe('Untitled step');
     state.driver.kill();
   });
 

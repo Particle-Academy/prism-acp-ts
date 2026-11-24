@@ -173,6 +173,38 @@ describe('model text in a title is untrusted', () => {
     expect(sessionUpdateProblems(planUpdate(snapshot([step('todo', 'x'.repeat(5000))]), WITHOUT))).toEqual([]);
   });
 
+  it.each([
+    ['(yоu) approve deploy', 'Cyrillic o'],
+    ['(уоu) x', 'Cyrillic u and o'],
+    [' (you) approve', 'a leading no-break space'],
+    ['　[failed] x', 'a leading ideographic space'],
+    ['［failed］ x', 'fullwidth brackets'],
+    ['（you） x', 'fullwidth parentheses'],
+    ['❨you❩ x', 'ornament parentheses'],
+    ['【failed】 x', 'CJK lenticular brackets'],
+    ['⁠ ́(you) x', 'a leading word joiner, no-break space and combining mark'],
+    ['  [skipped]  x', 'em and thin spaces'],
+  ])('cannot forge a host label with a look-alike: %j (%s)', (text) => {
+    // The guard asks what the first visible character LOOKS like, not which code point it is: an agent step must
+    // never read as the person's, and a done step must never read as failed or skipped.
+    for (const state of ['todo', 'done'] as const) {
+      const content = title(text, state);
+      expect(content).not.toMatch(/^[\s\p{M}\p{Cf}]*[\p{Ps}\p{Pe}]/u);
+      expect(sessionUpdateProblems(planUpdate(snapshot([step(state, text)]), WITH))).toEqual([]);
+    }
+  });
+
+  it('keeps an ordinary title, and a host label still leads a labelled step', () => {
+    expect(title('Run the tests')).toBe('Run the tests');
+    expect(title(' Run　the tests ')).toBe('Run the tests');
+    expect(title('［failed］ x', 'done')).toBe('x');
+    expect(title(' (you) approve')).toBe('approve');
+    expect(title('(optional) lint')).toBe('Step: (optional) lint');
+    expect(title('[draft] notes', 'failed')).toBe('[failed] Step: [draft] notes');
+    const person = entries(planUpdate(snapshot([step('todo', '(yоu) paste the key', { owner: 'human' })]), WITH))[0]!.content;
+    expect(person).toBe('(you) Step: (yоu) paste the key');
+  });
+
   it('never leaves an entry with no text', () => {
     expect(title('')).toBe('Untitled step');
     expect(title('\u0000‮  ')).toBe('Untitled step');

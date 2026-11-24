@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AcpAgent, PROTOCOL_VERSION, type AcpAgentOptions, type AgentDriver, type DriverEvents } from '../src/acp/agent.js';
 import { JsonRpcPeer } from '../src/jsonrpc.js';
 import type { TurnOutcome } from '../src/claude/driver.js';
-import { sessionNotificationProblems } from './acp-schema.js';
+import { sessionNotificationProblems, sessionUpdateProblems } from './acp-schema.js';
 
 /**
  * A driver that records what it was asked and lets a test decide the outcome.
@@ -974,5 +974,32 @@ describe('plan updates and the client capability (G-362)', () => {
     expect(update.entries.map((e) => e.priority)).toEqual(['medium', 'medium', 'high']);
     expect(sessionNotificationProblems(s.updates()[0])).toEqual([]);
     expect(s.problems).toHaveLength(1);
+  });
+
+  it.each([{ plan: {} }, {}])('sends no plan whose entries the ACP schema rejects, and reports each (client %j)', async (caps) => {
+    // The gate is the one place every driver's plan leaves. A schema-built client is told the shape is guaranteed
+    // and does not guard, so an entry it cannot read must never reach it.
+    const s = await session(caps);
+    const bad: unknown[][] = [
+      [null],
+      ['x'],
+      [7],
+      [[]],
+      [{ content: 'a', priority: 'high', status: 'bogus' }],
+      [{ content: 'a', priority: 'medium', status: 'failed' }],
+      [{ content: 'a', priority: 'medium', status: 'done' }],
+      [{ content: 'a', priority: 'medium' }],
+      [{ content: 42, priority: 'medium', status: 'pending' }],
+      [{ priority: 'medium', status: 'pending' }],
+      [entry, { content: 'b', priority: 'medium', status: 'skipped' }],
+    ];
+    for (const entries of bad) {
+      // Each is checked against the schema first, so this cannot pass on an entry that is actually valid.
+      expect(sessionUpdateProblems({ sessionUpdate: 'plan', entries })).not.toEqual([]);
+      s.driver.emit({ sessionUpdate: 'plan', entries });
+      s.driver.emit({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries } });
+    }
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toHaveLength(bad.length * 2);
   });
 });
