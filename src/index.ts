@@ -25,6 +25,8 @@ export type {
 
 export {
   META_BACKGROUND_TASKS,
+  META_PLAN,
+  META_PLAN_STEP,
   META_CLI_SESSION_ID,
   META_COMMAND_SOURCE,
   META_NATIVE_ITEM_TYPE,
@@ -193,3 +195,16 @@ export { ModelListError, listModels } from './models.js';
 export { CLAUDE_FORCED_SETTINGS, RemoteControlRefused, assertNoRemoteControlArgs, assertNotRemoteControlFrame, claudeFeatureFlagEnv, claudeLaunchSettings } from './remote-control.js';
 export type { AvailableModel, ListModelsOptions, SessionModelState } from './models.js';
 export type { Containment, LaunchOptions, ProcessTreeOptions, ProcessTree, ProviderIo, ProviderProcess, StopOptions, StopVerdict } from './process-tree.js';
+export {
+  PLAN_ENTRY_PRIORITY,
+  PLAN_STEPS_MAX,
+  PLAN_TITLE_MAX,
+  PLAN_UNTITLED,
+  PlanProjectionError,
+  clientAcceptsPlanUpdates,
+  planEntry,
+  planRemoved,
+  planTitle,
+  planUpdate,
+} from './plan.js';
+export type { PlanClient, PlanSnapshot, PlanStatus, PlanStep, PlanStepOwner, PlanStepState } from './plan.js';

@@ -39,6 +39,7 @@ import {
   withMeta,
   projectBudgetedToolMeta,
 } from '../meta.js';
+import { PLAN_ENTRY_PRIORITY } from '../plan.js';
 import { codexListedReport, codexStartupReport, type McpServerReport } from '../mcp-status.js';
 import { LivenessGate, pingTimeoutMs, type PingOptions } from '../liveness.js';
 import { assertNoRemoteControlArgs, encodeCodexFrame } from '../remote-control.js';
@@ -1322,7 +1323,9 @@ export class CodexDriver implements AgentDriver {
         this.#emitPlan(object.plan, 'plan');
         return;
       case 'turn/plan/delta':
-        this.#emit({ sessionUpdate: 'plan_update', delta: object.delta ?? object });
+        // Not forwarded (G-362). ACP's `plan_update` replaces a whole plan by id and may be sent only to a client that
+        // advertised plan updates; a delta fits neither. Codex 0.163.0 sends its plan whole, through turn/plan/updated.
+        this.#recordUnmapped('turn/plan/delta is not a plan snapshot', object);
         return;
       case 'thread/tokenUsage/updated':
         this.#emitUsage(object.tokenUsage);
@@ -1861,6 +1864,8 @@ export class CodexDriver implements AgentDriver {
       }
       return {
         content: asString(object.step) ?? asString(object.title) ?? `Step ${index + 1}`,
+        // Required by ACP (G-362): a client built from the schema drops an entry without one. Codex has no priority.
+        priority: PLAN_ENTRY_PRIORITY,
         status: status === 'completed' ? 'completed' : status === 'inProgress' ? 'in_progress' : 'pending',
       };
     });

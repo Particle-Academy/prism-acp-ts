@@ -14,6 +14,7 @@ import {
 } from '../src/meta.js';
 import { encodeLine } from '../src/ndjson.js';
 import { readCodexRateLimit } from '../src/codex/rate-limit.js';
+import { sessionUpdateProblems } from './acp-schema.js';
 
 /** TurnItemsView, verbatim from `codex app-server generate-json-schema` (codex-cli 0.163.0). */
 const TURN_ITEMS_VIEWS: readonly string[] = ['notLoaded', 'summary', 'full'];
@@ -1751,5 +1752,70 @@ describe('CodexDriver graceful restart', () => {
     expect(failure).toContain('Invalid request: unknown variant `none`');
     // Cleaned: no terminal control sequences, and on one line.
     expect(failure).not.toMatch(/\u001b|\n/);
+  });
+});
+
+/**
+ * G-362. Codex plans were sent with no `priority` (required: a client built from the ACP schema drops every entry, so
+ * Codex plans were invisible there), and `turn/plan/delta` was forwarded as `plan_update` with a `delta` field -- a
+ * shape that is not ACP's, sent to clients that never advertised plan updates. Codex 0.163.0's generated schema has
+ * no `turn/plan/delta` at all; a plan arrives whole, through `turn/plan/updated`.
+ */
+describe('Codex plans (G-362)', () => {
+  async function planTurn() {
+    const state = setup();
+    state.driver.start();
+    await state.driver.ready;
+    state.driver.prompt('plan it');
+    await flushMicrotasks();
+    return state;
+  }
+
+  it('sends every plan entry with the priority the schema requires', async () => {
+    const state = await planTurn();
+    state.transport.frame({ jsonrpc: '2.0', method: 'turn/plan/updated', params: { threadId: 'thread-captured', turnId: 'turn-live',
+      plan: [{ step: 'first', status: 'completed' }, { step: 'second', status: 'inProgress' }, { step: 'third', status: 'pending' }] } });
+    const plans = state.updates.filter((update) => update.sessionUpdate === 'plan');
+    expect(plans).toEqual([{ sessionUpdate: 'plan', entries: [
+      { content: 'first', priority: 'medium', status: 'completed' },
+      { content: 'second', priority: 'medium', status: 'in_progress' },
+      { content: 'third', priority: 'medium', status: 'pending' },
+    ] }]);
+    state.driver.kill();
+  });
+
+  it('never sends plan_update for a plan delta, and says it did not map it', async () => {
+    const state = await planTurn();
+    state.transport.frame({ jsonrpc: '2.0', method: 'turn/plan/delta', params: { turnId: 'turn-live', delta: 'progress' } });
+    expect(state.updates.some((update) => update.sessionUpdate === 'plan_update')).toBe(false);
+    expect(state.updates.some((update) => 'delta' in update)).toBe(false);
+    const unmapped = state.updates.filter((update) =>
+      (update._meta?.[META_UNMAPPED_FRAME] as Record<string, unknown> | undefined)?.reason === 'turn/plan/delta is not a plan snapshot');
+    expect(unmapped).toHaveLength(1);
+    state.driver.kill();
+  });
+
+  it('keeps a step with an unknown status unchecked, and reports it', async () => {
+    const state = await planTurn();
+    state.transport.frame({ jsonrpc: '2.0', method: 'turn/plan/updated', params: { turnId: 'turn-live', plan: [{ step: 'odd', status: 'future' }] } });
+    expect(state.updates.find((update) => update.sessionUpdate === 'plan')).toEqual(
+      { sessionUpdate: 'plan', entries: [{ content: 'odd', priority: 'medium', status: 'pending' }] });
+    state.driver.kill();
+  });
+
+  // Every plan-family message. The driver's own `notice` and `compaction_update` predate ACP's stable shapes for those
+  // variants and do not match them; that is a separate gap in the register, not something this test may hide.
+  it('sends only schema-valid plan messages through a whole plan turn', async () => {
+    const state = await planTurn();
+    for (const params of [
+      { turnId: 'turn-live', plan: [{ step: 'a', status: 'inProgress' }, { step: 7, status: 'pending' }, {}] },
+      { turnId: 'turn-live', delta: 'progress' },
+      { turnId: 'turn-live', plan: [] },
+    ]) state.transport.frame({ jsonrpc: '2.0', method: 'delta' in params ? 'turn/plan/delta' : 'turn/plan/updated', params });
+    state.transport.frame({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { id: 'turn-live', status: 'completed' } } });
+    await flushMicrotasks();
+    const plans = state.updates.filter((update) => String(update.sessionUpdate).startsWith('plan'));
+    expect(plans.map((update) => update.sessionUpdate)).toEqual(['plan', 'plan']);
+    for (const update of plans) expect(sessionUpdateProblems(update), JSON.stringify(update)).toEqual([]);
   });
 });
