@@ -99,7 +99,7 @@ describe('planUpdate', () => {
     // ACP's `completed` means "successfully completed"; a failed or skipped step reported that way is a false claim.
     const [entry] = entries(planUpdate(snapshot([step(state, 'Deploy')]), WITH));
     expect(entry!.status).not.toBe('completed');
-    expect(entry!.content).toBe(`[${state}] Deploy`);
+    expect(entry!.content).toBe(`[${state}] Step: Deploy`);
     expect(entry!._meta[META_PLAN_STEP]).toMatchObject({ id: `ps_${state}`, state });
   });
 
@@ -110,7 +110,7 @@ describe('planUpdate', () => {
       { planStatus: 'waiting', holdingApprovalId: 'apr_change' }), WITH);
     const [, proposed] = entries(update);
     expect(proposed!.status).toBe('pending');
-    expect(proposed!.content).toBe('Check the totals');
+    expect(proposed!.content).toBe('Step: Check the totals');
     expect(proposed!._meta[META_PLAN_STEP]).toEqual({ id: 'ps_proposed', state: 'proposed', owner: 'agent', approvalId: 'apr_change' });
     expect(sessionUpdateProblems(update)).toEqual([]);
   });
@@ -118,8 +118,8 @@ describe('planUpdate', () => {
   it('prefixes a person step, after the outcome label', () => {
     const [a, b] = entries(planUpdate(snapshot([step('todo', 'Approve the spend', { owner: 'human' }),
       step('failed', 'Sign off', { id: 'ps_2', owner: 'human' })]), WITHOUT));
-    expect(a!.content).toBe('(you) Approve the spend');
-    expect(b!.content).toBe('[failed] (you) Sign off');
+    expect(a!.content).toBe('(you) Step: Approve the spend');
+    expect(b!.content).toBe('[failed] (you) Step: Sign off');
   });
 
   it('carries the real state in namespaced _meta, never at the root', () => {
@@ -148,230 +148,103 @@ describe('planUpdate', () => {
 });
 
 describe('model text in a title is untrusted', () => {
-  const title = (text: string, state: PlanStepState = 'todo') => entries(planUpdate(snapshot([step(state, text)]), WITH))[0]!.content;
+  const title = (text: string, state: PlanStepState = 'todo', owner: 'agent' | 'human' = 'agent') =>
+    entries(planUpdate(snapshot([step(state, text, { owner })]), WITH))[0]!.content;
+  /** The host's own labels, written only from the step's state and owner. */
+  const hostLabel = (state: PlanStepState, owner: 'agent' | 'human') =>
+    (state === 'failed' ? '[failed] ' : state === 'skipped' ? '[skipped] ' : '') + (owner === 'human' ? '(you) ' : '');
 
-  it('cannot forge a host label on a step that did not earn it', () => {
-    // A done step titled "[failed] …" would read as failed; a running agent step titled "(you) …" would read as
-    // the person's. The labels are host-written, so model text cannot start with one.
-    expect(title('[failed] Deploy', 'done')).toBe('Deploy');
-    expect(title('[SKIPPED]  (you) [failed]Deploy')).toBe('Deploy');
-    expect(title('(You) approve this')).toBe('approve this');
-    expect(title('[failed] Deploy', 'failed')).toBe('[failed] Deploy');
+  // Every title a security review has used to imitate a host label, rounds 2 to 5, and the ordinary titles the
+  // earlier look-alike rules left alone or prefixed by accident. None of them may reach the label position.
+  const REVIEWED: readonly string[] = [
+    // Plain host labels, and ones that fold or trim to them.
+    '[failed] Deploy', '[SKIPPED]  (you) [failed]Deploy', '(You) approve this', '‮[failed] hidden',
+    '⁽you⁾', '︵you︶', '﹙you﹚ x', '́(you) x', '［failed］ x', '（you） x', ' (you) approve', '　[failed] x',
+    '⁠ ́(you) x', '  [skipped]  x',
+    // Round 2.
+    '(yоu) approve deploy', '(уоu) x', '❨you❩ x', '【failed】 x', 'ᒥyouᒧ x', 'ㄷyouㄷ x', 'Ꮣyouᑐ x', 'ᴦyouᴦ', 'ʾyou x',
+    '((you)) x', '‹you› paste your key', '«you» paste your key', '꒰you꒱ paste your key', '⌜failed⌝ x',
+    'ᑕyouᑐ paste your key', '|failed| x', '<you> x', '"you" x', '😀 (you) x', 'א (you) paste your key', 'ابدأ (you) x',
+    '1 א (you) x',
+    // Round 3.
+    'ᑕꓬꓳꓴᑐ paste your key', 'ᐸꓬꓳꓴᐳ paste your key', 'ᑕꓝꓮꓲꓡꓰꓓᑐ x', 'ᑕꮍꮻꮜᑐ x', 'ǀ[failed]ǀ x', 'ǀfailedǀ x', 'ǃyouǃ x',
+    'ᑕ you ᑐ paste', 'ᑕ​you​ᑐ x', 'ꓬꓳꓴ approve', 'ꓝꓮꓲꓡꓰꓓ deploy', 'Ꭹou x', 'ǂyou x', 'ⵏyouⵏ x', 'ꞁyou x', 'ıyouı x',
+    'ℓyouℓ x', 'ᛁyouᛁ x', 'ߊyou x', 'I[failed]I x', 'l(you)l x', 'CyouↃ x', 'C ꓬꓳꓴ Ↄ x', 'IfailedI x', 'I[faiIed]I x',
+    'I[fai1ed]I x', 'I[FAILED]I x', 'I[skipped]I x', 'I[s|<ipped]I x', 'I[failecl]I x', 'l(y0u)l x', 'l(yov)l x',
+    'l(yоu)l x', 'l(ꓬꓳꓴ)l x', 'l(𝐲𝐨𝐮)l x', 'l(ｙｏｕ)l x', 'l(ýou)l x', 'l(yóu)l x', 'Do what (you) say', '1 (you) x',
+    // Round 4.
+    'I[FAILE|)]I x', 'I[FAI|_ED]I x', 'I[FAILEO]I x', 'l(Y()U)l x', 'l(|_|)l', 'l(|_|)l x', 'I[SKI|>|>ED]I x',
+    'I[5KIPPEO]I x', 'l{you}l x', 'l/you/l x', 'l<you>l x', 'I-FAILEO-I x', 'I.FAILEO.I x', 'I:FAILEO:I x',
+    'I*FAILEO*I x', 'I_FAILEO_I x', "I'FAILEO'I x", 'I=FAILEO=I x', 'IFAILEO] x', 'l (Y()U) l x', 'I [FAILEO] I x',
+    'I [ F A I L E O ] I x', 'x (Y()U) x', 'l | Y O U | l',
+    // Round 5: letters alone stand in for the bars, brackets and letters.
+    'IFAILEOI x', 'IFAlLEOI x', 'IfaiIeOI', 'lSKIPPEOl x', 'IyQuI x', 'CYQUD x',
+    'Ill [FAILE|)] x', 'Abc [FAILE|)] x', 'IlI (Y()U) x', 'Ill [x]', 'III [failed] x', 'Abc (you) x',
+    // Ordinary titles.
+    'Run the tests', '2 files changed', "Don't deploy", 'e.g. the docs', 'v1.2 release', 'Update your config',
+    'Fix (unit) tests', 'Ärger lösen', '日本語のテスト', 'Ｓtep x', 'Step: x',
+  ];
+
+  it.each(REVIEWED)('always puts the host prefix before model text, whatever it spells: %j', (text) => {
+    // The structural rule: the only text that may stand ahead of a model-written title is the host's own labels, and
+    // the title itself always opens with the host's `Step: `. Asked of the output, for every state and owner.
+    expect(planTitle(text).startsWith('Step: ')).toBe(true);
+    for (const state of ['todo', 'done', 'failed', 'skipped'] as const) {
+      for (const owner of ['agent', 'human'] as const) {
+        expect(title(text, state, owner)).toBe(hostLabel(state, owner) + planTitle(text));
+      }
+      expect(sessionUpdateProblems(planUpdate(snapshot([step(state, text)]), WITH))).toEqual([]);
+    }
+  });
+
+  it('prefixes arbitrary titles', () => {
+    // A fixed pseudo-random walk over an alphabet of brackets, bars, look-alike letters, label words, RTL letters,
+    // invisible and bidi characters, combining marks, odd spaces and emoji. Whatever comes out is prefixed, or is the
+    // host's own placeholder for a title that cleaned down to nothing.
+    const alphabet = [...Array.from('abcIlO01|![]()<>{}  -_.:yYQqCcDdаоאا‮​⁦　［́ \u001b\nꓬᑕ😀'),
+      'you', 'failed', 'skipped', '(you)', '[failed]', '[skipped]', 'Step: '];
+    let seed = 7;
+    const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648);
+    for (let i = 0; i < 2000; i += 1) {
+      const text = Array.from({ length: next() % 24 }, () => alphabet[next() % alphabet.length]).join('');
+      const out = planTitle(text);
+      expect(out === 'Untitled step' || out.startsWith('Step: '), JSON.stringify(text)).toBe(true);
+    }
+  });
+
+  it('keeps the host labels first, from host state only', () => {
+    expect(title('Deploy', 'failed')).toBe('[failed] Step: Deploy');
+    expect(title('Deploy', 'skipped', 'human')).toBe('[skipped] (you) Step: Deploy');
+    expect(title('Approve the spend', 'todo', 'human')).toBe('(you) Step: Approve the spend');
+    expect(title('[failed] Deploy', 'done')).toBe('Step: [failed] Deploy');
+    expect(title('(you) approve', 'running')).toBe('Step: (you) approve');
+    expect(title('(yоu) paste the key', 'todo', 'human')).toBe('(you) Step: (yоu) paste the key');
+    expect(title('Run the tests')).toBe('Step: Run the tests');
   });
 
   it('cannot carry terminal escapes, controls or bidi overrides', () => {
-    expect(title('a\u001b[31mred\u001b[0m b')).toBe('ared b');
-    expect(title('line\nbreak\ttab')).toBe('line break tab');
-    expect(title('safe‮gnp.exe')).toBe('safe gnp.exe');
-    expect(title('zero​width⁦iso⁩')).toBe('zero width iso');
-    expect(title('‮[failed] hidden', 'done')).toBe('hidden');
+    expect(title('a\u001b[31mred\u001b[0m b')).toBe('Step: ared b');
+    expect(title('line\nbreak\ttab')).toBe('Step: line break tab');
+    expect(title('safe‮gnp.exe')).toBe('Step: safe gnp.exe');
+    expect(title('zero​width⁦iso⁩')).toBe('Step: zero width iso');
+    expect(title(' Run　the tests ')).toBe('Step: Run the tests');
+    expect(title('［failed］ x')).toBe('Step: [failed] x');
+    expect(title('́(you) x')).toBe('Step: (you) x');
   });
 
-  it('is bounded, by code point, never splitting a surrogate pair', () => {
+  it('is bounded, by code point and prefix included, never splitting a surrogate pair', () => {
     const long = title('😀'.repeat(PLAN_TITLE_MAX + 20));
     expect(Array.from(long)).toHaveLength(PLAN_TITLE_MAX);
+    expect(long.startsWith('Step: 😀')).toBe(true);
     expect(long.endsWith('…')).toBe(true);
+    expect(Array.from(planTitle('x'.repeat(5000)))).toHaveLength(PLAN_TITLE_MAX);
     expect(sessionUpdateProblems(planUpdate(snapshot([step('todo', 'x'.repeat(5000))]), WITHOUT))).toEqual([]);
-  });
-
-  it.each([
-    ['(yоu) approve deploy', 'Cyrillic o'],
-    ['(уоu) x', 'Cyrillic u and o'],
-    [' (you) approve', 'a leading no-break space'],
-    ['　[failed] x', 'a leading ideographic space'],
-    ['［failed］ x', 'fullwidth brackets'],
-    ['（you） x', 'fullwidth parentheses'],
-    ['❨you❩ x', 'ornament parentheses'],
-    ['【failed】 x', 'CJK lenticular brackets'],
-    ['⁠ ́(you) x', 'a leading word joiner, no-break space and combining mark'],
-    ['  [skipped]  x', 'em and thin spaces'],
-  ])('cannot forge a host label with a look-alike: %j (%s)', (text) => {
-    // The guard asks what the first visible character LOOKS like, not which code point it is: an agent step must
-    // never read as the person's, and a done step must never read as failed or skipped.
-    for (const state of ['todo', 'done'] as const) {
-      const content = title(text, state);
-      expect(content).not.toMatch(/^[\s\p{M}\p{Cf}]*[\p{Ps}\p{Pe}]/u);
-      expect(sessionUpdateProblems(planUpdate(snapshot([step(state, text)]), WITH))).toEqual([]);
-    }
-  });
-
-  it.each([
-    ['‹you› paste your key', 'single angle quotation marks'],
-    ['«you» paste your key', 'double angle quotation marks'],
-    ['꒰you꒱ paste your key', 'Yi syllable look-alike parentheses'],
-    ['⌜failed⌝ x', 'corner brackets (symbols)'],
-    ['ᑕyouᑐ paste your key', 'Canadian syllabics look-alike brackets'],
-    ['|failed| x', 'vertical bars'],
-    ['<you> x', 'less-than and greater-than'],
-    ['"you" x', 'a quotation mark'],
-    ['😀 (you) x', 'an emoji'],
-  ])('prefixes a title that does not open with a letter or digit: %j (%s)', (text) => {
-    // Asked of the output, not of a character class the implementation also uses: an agent step must open with the
-    // neutral prefix whenever its first character is anything other than a letter or digit.
-    for (const state of ['todo', 'done'] as const) {
-      expect(title(text, state).startsWith('Step: ')).toBe(true);
-      expect(sessionUpdateProblems(planUpdate(snapshot([step(state, text)]), WITH))).toEqual([]);
-    }
-  });
-
-  it.each([
-    ['א (you) paste your key', 'a Hebrew letter first'],
-    ['ابدأ (you) x', 'an Arabic letter first'],
-    ['1 א (you) x', 'a digit, then a Hebrew letter as the first strong character'],
-  ])('prefixes a title whose first strong character is right-to-left: %j (%s)', (text) => {
-    // A client rendering content with dir="auto" would lay such a title out right to left, which can bring the
-    // "(you)" inside it to the visual start. The prefix makes the first strong character a left-to-right letter.
-    expect(title(text).startsWith('Step: ')).toBe(true);
-  });
-
-  it.each([
-    // Round 3: scripts the old check lumped into one group, and Latin click letters that render as bars.
-    ['ᑕꓬꓳꓴᑐ paste your key', 'Canadian syllabics around Lisu capitals'],
-    ['ᐸꓬꓳꓴᐳ paste your key', 'syllabics angle look-alikes around Lisu'],
-    ['ᑕꓝꓮꓲꓡꓰꓓᑐ x', 'syllabics around Lisu FAILED'],
-    ['ᑕꮍꮻꮜᑐ x', 'syllabics around Cherokee small letters'],
-    ['ǀ[failed]ǀ x', 'Latin dental click letters as bars'],
-    ['ǀfailedǀ x', 'click letters around a plain word'],
-    ['ǃyouǃ x', 'Latin retroflex click letters'],
-    ['ᑕ you ᑐ paste', 'syllabics with spaces inside'],
-    ['ᑕ​you​ᑐ x', 'syllabics with zero-width spaces inside'],
-    // Round 2.
-    ['ᒥyouᒧ x', 'syllabics corner look-alikes'],
-    ['ㄷyouㄷ x', 'Bopomofo'],
-    ['Ꮣyouᑐ x', 'Cherokee and syllabics'],
-    ['ᴦyouᴦ', 'small capital gamma'],
-    ['ʾyou x', 'a modifier letter'],
-    ['((you)) x', 'doubled parentheses'],
-    // Neighbours: every way to open with something other than an ASCII letter or digit.
-    ['Ｓtep x', 'a fullwidth letter that NFKC folds is fine, but the rest must still be checked'],
-    ['Ärger lösen', 'a Latin letter outside ASCII'],
-    ['日本語のテスト', 'a CJK title'],
-    ['ꓬꓳꓴ approve', 'Lisu capitals that read as YOU'],
-    ['ꓝꓮꓲꓡꓰꓓ deploy', 'Lisu capitals that read as FAILED'],
-    ['Ꭹou x', 'a Cherokee letter that reads as Y'],
-    ['ǂyou x', 'a Latin click letter'],
-    ['ⵏyouⵏ x', 'Tifinagh bars'],
-    ['ꞁyou x', 'a Latin letter outside ASCII'],
-    ['ıyouı x', 'dotless i as bars'],
-    ['ℓyouℓ x', 'script small l'],
-    ['ᛁyouᛁ x', 'runic bars'],
-    ['ߊyou x', 'an NKo letter'],
-  ])('prefixes a title that does not open with an ASCII letter or digit: %j (%s)', (text) => {
-    for (const state of ['todo', 'done'] as const) {
-      const content = title(text, state);
-      if (text === 'Ｓtep x') expect(content).toBe('Step x');
-      else expect(content.startsWith('Step: ')).toBe(true);
-      expect(sessionUpdateProblems(planUpdate(snapshot([step(state, text)]), WITH))).toEqual([]);
-    }
-    if (text !== 'Ｓtep x') expect(planTitle(text).startsWith('Step: ')).toBe(true);
-  });
-
-  it.each([
-    ['⁽you⁾', 'Untitled step'],
-    ['︵you︶', 'Untitled step'],
-    ['﹙you﹚ x', 'x'],
-    ['́(you) x', 'x'],
-  ])('removes a label that folds to the real one: %j', (text, expected) => {
-    // NFKC folds these onto the ASCII label, and a leading combining mark is stripped, so the label itself is removed.
-    expect(title(text, 'done')).toBe(expected);
-  });
-
-  it.each([
-    // An ASCII opening can still be followed by a label in any form: ASCII letters that read as brackets or bars
-    // (I, l, C), or a label word spelled with look-alikes. Any such title is prefixed.
-    ['I[failed]I x', 'capital I as bars'],
-    ['l(you)l x', 'small l as bars'],
-    ['CyouↃ x', 'C and a reversed C'],
-    ['C ꓬꓳꓴ Ↄ x', 'Lisu inside'],
-    ['IfailedI x', 'bars around a plain word'],
-    ['I[faiIed]I x', 'capital I for small l'],
-    ['I[fai1ed]I x', 'digit 1 for small l'],
-    ['I[FAILED]I x', 'capitals'],
-    ['I[skipped]I x', 'skipped'],
-    ['I[s|<ipped]I x', 'a bar and less-than for k'],
-    ['I[failecl]I x', 'cl for d'],
-    ['l(y0u)l x', 'zero for o'],
-    ['l(yov)l x', 'v for u'],
-    ['l(yоu)l x', 'Cyrillic o'],
-    ['l(ꓬꓳꓴ)l x', 'Lisu capitals'],
-    ['l(𝐲𝐨𝐮)l x', 'mathematical bold letters'],
-    ['l(ｙｏｕ)l x', 'fullwidth letters'],
-    ['l(ýou)l x', 'a combining mark inside'],
-    ['l(yóu)l x', 'a precomposed accent'],
-    ['Do what (you) say', 'the label word later in the title'],
-    ['Update your config', 'the label word inside another word'],
-    ['1 א (you) x', 'a digit, then a Hebrew letter'],
-    ['1 (you) x', 'a digit, then a label'],
-    // Round 4: ASCII stand-ins for letters (|) for D, |_ for L, O for D, () for O, |_| for U) can spell a label word
-    // no look-alike table lists. The first word holding any punctuation is prefixed, whatever it spells.
-    ['I[FAILE|)]I x', 'a bar and parenthesis for D'],
-    ['I[FAI|_ED]I x', 'a bar and underscore for L'],
-    ['I[FAILEO]I x', 'capital O for D'],
-    ['l(Y()U)l x', 'parentheses for O'],
-    ['l(|_|)l', 'bars and underscore for U'],
-    ['l(|_|)l x', 'bars and underscore for U, then more'],
-    ['I[SKI|>|>ED]I x', 'bars and greater-than for P'],
-    ['I[5KIPPEO]I x', 'a digit and capital O'],
-    ['l{you}l x', 'braces'],
-    ['l/you/l x', 'slashes'],
-    ['l<you>l x', 'angle brackets'],
-    ['I-FAILEO-I x', 'hyphens'],
-    ['I.FAILEO.I x', 'dots'],
-    ['I:FAILEO:I x', 'colons'],
-    ['I*FAILEO*I x', 'asterisks'],
-    ['I_FAILEO_I x', 'underscores'],
-    ["I'FAILEO'I x", 'quotes'],
-    ['I=FAILEO=I x', 'equals signs'],
-    ['IFAILEO] x', 'a closing bracket alone'],
-    ['l (Y()U) l x', 'punctuation before the first three-letter run, spaced out'],
-    ['I [FAILEO] I x', 'brackets spaced out'],
-    ['I [ F A I L E O ] I x', 'every letter spaced out'],
-    ['x (Y()U) x', 'a one-letter word, then punctuation'],
-    ['l | Y O U | l', 'bars spaced out'],
-  ])('prefixes a title that contains a label word in any form: %j (%s)', (text) => {
-    for (const state of ['todo', 'done'] as const) expect(title(text, state).startsWith('Step: ')).toBe(true);
-  });
-
-  it('leaves a title that opens with an ASCII letter or digit and holds no label word alone', () => {
-    expect(title('2 files changed')).toBe('2 files changed');
-    expect(title('Deploy א')).toBe('Deploy א');
-    expect(title('Run the tests')).toBe('Run the tests');
-    expect(title('Lint and type-check')).toBe('Lint and type-check');
-    expect(planTitle('Fix the build')).toBe('Fix the build');
-    // Punctuation after the first word, once a run of three ASCII letters has opened the title, is left alone.
-    expect(title('Fix (unit) tests')).toBe('Fix (unit) tests');
-    expect(title('Lint it, then build')).toBe('Lint it, then build');
-    expect(title('Run a/b checks')).toBe('Run a/b checks');
-  });
-
-  it.each([
-    ["Don't deploy", 'an apostrophe in the first word'],
-    ['e.g. the docs', 'dots in the first word'],
-    ['v1.2 release', 'a version'],
-    ['a/b test', 'a slash'],
-    ['Re-run the job', 'a hyphen in the first word'],
-    ['Lint, then build', 'a comma ending the first word'],
-    ['A (big) change', 'a one-letter word, then brackets'],
-  ])('prefixes a title whose first word, or opening before a three-letter word, holds punctuation: %j (%s)', (text) => {
-    expect(title(text)).toBe('Step: ' + text);
-    expect(planTitle(text)).toBe('Step: ' + text);
-  });
-
-  it('keeps an ordinary title, and a host label still leads a labelled step', () => {
-    expect(title('Run the tests')).toBe('Run the tests');
-    expect(title(' Run　the tests ')).toBe('Run the tests');
-    expect(title('［failed］ x', 'done')).toBe('x');
-    expect(title(' (you) approve')).toBe('approve');
-    expect(title('(optional) lint')).toBe('Step: (optional) lint');
-    expect(title('[draft] notes', 'failed')).toBe('[failed] Step: [draft] notes');
-    const person = entries(planUpdate(snapshot([step('todo', '(yоu) paste the key', { owner: 'human' })]), WITH))[0]!.content;
-    expect(person).toBe('(you) Step: (yоu) paste the key');
   });
 
   it('never leaves an entry with no text', () => {
     expect(title('')).toBe('Untitled step');
     expect(title('\u0000‮  ')).toBe('Untitled step');
-    expect(title('[failed]', 'skipped')).toBe('[skipped] Untitled step');
+    expect(title('', 'skipped')).toBe('[skipped] Untitled step');
   });
 });
 

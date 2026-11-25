@@ -1778,14 +1778,14 @@ describe('Codex plans (G-362)', () => {
       plan: [{ step: 'first', status: 'completed' }, { step: 'second', status: 'inProgress' }, { step: 'third', status: 'pending' }] } });
     const plans = state.updates.filter((update) => update.sessionUpdate === 'plan');
     expect(plans).toEqual([{ sessionUpdate: 'plan', entries: [
-      { content: 'first', priority: 'medium', status: 'completed' },
-      { content: 'second', priority: 'medium', status: 'in_progress' },
-      { content: 'third', priority: 'medium', status: 'pending' },
+      { content: 'Step: first', priority: 'medium', status: 'completed' },
+      { content: 'Step: second', priority: 'medium', status: 'in_progress' },
+      { content: 'Step: third', priority: 'medium', status: 'pending' },
     ] }]);
     state.driver.kill();
   });
 
-  it('cleans Codex step text like any other plan title: no controls, no host label, bounded', async () => {
+  it('cleans Codex step text like any other plan title: no controls, always prefixed, bounded', async () => {
     // Codex step text is model text and reaches the same clients that read `(you)` and `[failed]` as host labels.
     const state = await planTurn();
     state.transport.frame({ jsonrpc: '2.0', method: 'turn/plan/updated', params: { threadId: 'thread-captured', turnId: 'turn-live',
@@ -1796,12 +1796,16 @@ describe('Codex plans (G-362)', () => {
         { step: 'a\u001b[31mred\u001b[0m\nb‮', status: 'inProgress' },
         { step: 'x'.repeat(500), status: 'pending' },
         { step: '', status: 'pending' },
+        { status: 'pending' },
       ] } });
     const plans = state.updates.filter((update) => update.sessionUpdate === 'plan');
     const contents = (plans[0]!.entries as { content: string }[]).map((entry) => entry.content);
-    expect(contents.slice(0, 4)).toEqual(['paste the key', 'deploy', 'Step: (yоu) approve', 'ared b']);
+    // Model text always carries the host's prefix, so it can never stand where a host label stands.
+    expect(contents.slice(0, 4)).toEqual(['Step: (you) paste the key', 'Step: [failed] deploy', 'Step: (yоu) approve', 'Step: ared b']);
     expect(Array.from(contents[4]!)).toHaveLength(PLAN_TITLE_MAX);
     expect(contents[5]).toBe('Untitled step');
+    // A step Codex sent no text for is named by the host, not run through the model-text path.
+    expect(contents[6]).toBe('Step 7');
     state.driver.kill();
   });
 
@@ -1820,7 +1824,7 @@ describe('Codex plans (G-362)', () => {
     const state = await planTurn();
     state.transport.frame({ jsonrpc: '2.0', method: 'turn/plan/updated', params: { turnId: 'turn-live', plan: [{ step: 'odd', status: 'future' }] } });
     expect(state.updates.find((update) => update.sessionUpdate === 'plan')).toEqual(
-      { sessionUpdate: 'plan', entries: [{ content: 'odd', priority: 'medium', status: 'pending' }] });
+      { sessionUpdate: 'plan', entries: [{ content: 'Step: odd', priority: 'medium', status: 'pending' }] });
     state.driver.kill();
   });
 
