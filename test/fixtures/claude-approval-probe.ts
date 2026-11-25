@@ -76,7 +76,7 @@ export async function probeClaudeApproval(options: { binary: string; electron: s
   const closed=new Promise<void>(resolve=>{resolveClosed=resolve;});
   const driver = new ClaudeDriver({
     cwd:root,binary:realNode,binaryArgs:[bridge,config],parentEnv:parent,allowEnv:['PRISM_FAKE_ELECTRON_NODE'],
-    credentials:{mode:'apiKey',apiKey:'prism-fake-not-a-real-key',home},model:'claude-sonnet-4-6',
+    credentials:{mode:'apiKey',apiKey:'prism-fake-not-a-real-key',home},model:'claude-sonnet-5-5',
     permissionMode:'bypassPermissions',permissionPrompts:{tools:['Bash'],timeoutSeconds:options.captureLauncher?20:5,...(options.nodeOverride?{nodePath:realNode}:{})},
   }, {
     onProtocolError:reason=>errors.push(reason),

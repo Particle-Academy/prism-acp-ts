@@ -92,7 +92,7 @@ export async function probeRestrictedClaude(binary) {
       const requestAt = requests.length, mcpAt = mcpRequests.length;
       driver = new ClaudeDriver({ cwd, binary: process.execPath, binaryArgs: [bridge, binary, model.url, receipt], parentEnv,
         allowEnv: ['ENABLE_TOOL_SEARCH', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', 'DISABLE_AUTOUPDATER', 'DISABLE_TELEMETRY', 'DISABLE_ERROR_REPORTING'],
-        credentials: { mode: 'apiKey', apiKey: 'owned-restricted-synthetic-key', home: configHome }, model: 'claude-sonnet-4-6', permissionMode: 'dontAsk', allowedTools: ['mcp__owned__echo'],
+        credentials: { mode: 'apiKey', apiKey: 'owned-restricted-synthetic-key', home: configHome }, model: 'claude-sonnet-5-5', permissionMode: 'dontAsk', allowedTools: ['mcp__owned__echo'],
         mcpServers: [{ type: 'http', name: 'owned', url: `${mcp.url}/owned`, headers: [] }],
         ...(scenario === 'baseline' ? {} : { nativeTools: 'none', ...(process.platform === 'win32' ? { processTree: { windowsStdio: 'local-pipes', startupTimeoutMs: 5000 } } : {}) }),
       }, { onProtocolError: error => errors.push(error), onTurnEnd: outcome => finish(outcome) });

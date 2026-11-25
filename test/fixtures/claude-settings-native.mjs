@@ -100,7 +100,7 @@ export async function probeClaudeSettings(binary, { ClaudeDriver, prepareProcess
       const receipt = join(world.ownRoot, name + '-launch.json');
       driver = new ClaudeDriver({ cwd: world.cwd, binary: process.execPath, binaryArgs: [bridge, binary, model.url, receipt, ...(explicit ? ['--fixture-explicit-settings=' + world.explicit] : [])], parentEnv,
         allowEnv: ['ENABLE_TOOL_SEARCH', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', 'DISABLE_AUTOUPDATER', 'DISABLE_TELEMETRY', 'DISABLE_ERROR_REPORTING'],
-        credentials: { mode: 'apiKey', apiKey: key, home: world.configHome }, model: 'claude-sonnet-4-6', permissionMode: 'dontAsk', allowedTools: ['mcp__supplied__echo'],
+        credentials: { mode: 'apiKey', apiKey: key, home: world.configHome }, model: 'claude-sonnet-5-5', permissionMode: 'dontAsk', allowedTools: ['mcp__supplied__echo'],
         mcpServers: [{ type: 'http', name: 'supplied', url: `${mcp.url}/supplied`, headers: [] }], ...policy, ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
       }, { onProtocolError: error => errors.push(error), onTurnEnd: outcome => finish(outcome) });
       let outcome, stop, sessionId, reports;
