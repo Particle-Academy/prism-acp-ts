@@ -125,7 +125,11 @@ valid priority is sent as `medium`, and that is reported too. An entry
 `content` longer than `PLAN_ENTRY_CONTENT_MAX` (1024 code points), or a
 `_meta` whose JSON is larger than `PLAN_META_MAX_BYTES` (16384 bytes, on an
 entry, the plan or the update), refuses the whole update, and that is
-reported. Every update's
+reported. So does an update with more than `PLAN_ENTRIES_MAX` (256) entries,
+which is counted before any entry is read. The same applies to markdown
+`content` longer than `PLAN_MARKDOWN_MAX` (65536 code points), a `path` longer
+than `PLAN_PATH_MAX` (4096), and a `planId` longer than `PLAN_ID_MAX` (256).
+Every update's
 `sessionUpdate` is read once, from the update's own property; one without its
 own string `sessionUpdate` is not sent and is reported. Every update that is
 not a plan is sent as its JSON serialization read back, never as the driver's
@@ -1496,7 +1500,10 @@ the SAME session. You do not need `session/load` or a new session.
   Neither shipped CLI forwards the provider's `retry-after` today, so the
   shipped drivers do not send it. Choose your own backoff when it is absent. A
   driver you write can set it; it is capped at one hour and dropped unless it
-  is a finite number of 0 or more.
+  is a finite number of 0 or more. The failure is rebuilt from its JSON form,
+  and only the fields above are sent, each checked again. An unknown `kind`
+  becomes `other`, text is bounded and marked as provider text, and anything
+  else a driver attached is dropped.
 - **Both CLIs have already retried before you see the failure.** Claude Code
   retries 10 times by default with its own growing backoff, which is about two
   and a half minutes in total. It announces each attempt as an unmapped
@@ -1505,8 +1512,11 @@ the SAME session. You do not need `session/load` or a new session.
   `request_max_retries` / `stream_max_retries`, waits out `retry-after`, and
   sends an `error` notification with `willRetry: true` for each attempt. That
   notification does not end the turn.
-- **`resumable: true`** means the agent process is still running, and the next
-  `session/prompt` in this session continues the same conversation.
+- **`resumable: true`** means the agent process was still running when the
+  failure was answered, and the next `session/prompt` in this session continues
+  the same conversation. If the agent exits after that answer, the retry fails
+  with `error.data.code: 'session_exited'`. Then `session/load` the session to
+  keep the conversation.
   Everything before the failed turn is kept, and so is any tool work the failed
   turn finished. It is `false` once the session's agent has gone; that session
   fails the next prompt, so `session/load` it or start a new one. When it is

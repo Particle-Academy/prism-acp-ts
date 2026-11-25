@@ -91,6 +91,17 @@ export const PLAN_ENTRY_CONTENT_MAX = 1024;
  * one refuses the whole update, and that is reported.
  */
 export const PLAN_META_MAX_BYTES = 16384;
+/**
+ * The most entries `AcpAgent` sends in one plan update. More refuses the whole update, and that is reported. Above
+ * {@link PLAN_STEPS_MAX} on purpose: that is the harness's ceiling for plans it builds, this is the gate's ceiling for
+ * whatever a driver hands it, including a model-written Codex plan.
+ */
+export const PLAN_ENTRIES_MAX = 256;
+/** The longest markdown plan `content` `AcpAgent` sends, in code points. Longer refuses the update, and that is reported. */
+export const PLAN_MARKDOWN_MAX = 65536;
+/** The longest markdown plan `path`, and the longest `planId`, `AcpAgent` sends, in code points. */
+export const PLAN_PATH_MAX = 4096;
+export const PLAN_ID_MAX = 256;
 
 export class PlanProjectionError extends Error {
   constructor(message: string) {

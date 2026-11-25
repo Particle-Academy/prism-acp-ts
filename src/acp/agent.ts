@@ -29,13 +29,13 @@ import type { StopReason, TurnOutcome } from '../claude/driver.js';
 import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, META_MODEL_INFO, META_PERMISSION_REASON, META_TURN_FAILURE, withMeta } from '../meta.js';
 import type { SessionModelState } from '../models.js';
 import { observeStopVerdict } from '../stop-verdict.js';
-import { clientAcceptsPlanUpdates, PLAN_ENTRY_CONTENT_MAX, PLAN_ENTRY_PRIORITY, PLAN_META_MAX_BYTES, type PlanClient } from '../plan.js';
+import { clientAcceptsPlanUpdates, PLAN_ENTRIES_MAX, PLAN_ENTRY_CONTENT_MAX, PLAN_ENTRY_PRIORITY, PLAN_ID_MAX, PLAN_MARKDOWN_MAX, PLAN_META_MAX_BYTES, PLAN_PATH_MAX, type PlanClient } from '../plan.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
 import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
 import type { PingOptions } from '../liveness.js';
 import { PromptRefused, promptBlockKind, promptBlocks, type PromptBlockKind, type PromptContent } from '../prompt.js';
 import { CommandUnsupported } from '../codex/commands.js';
-import { wireTurnFailure, type TurnFailure } from '../turn-failure.js';
+import { wireTurnFailure } from '../turn-failure.js';
 import { SteerInputError, SteerUnsupported, safeNativeId, validSteerId, type SteerAcceptance, type SteerOptions, type SteerState, type SteerUpdate, type SteeringState } from '../steer.js';
 
 /** The protocol version this agent speaks. */
@@ -251,6 +251,9 @@ const MALFORMED_READ = 'plan update was not sent: reading it threw';
 const OVERSIZE_CONTENT = `plan update was not sent: an entry content is larger than ${PLAN_ENTRY_CONTENT_MAX} code points`;
 const OVERSIZE_META = `plan update was not sent: a _meta is larger than ${PLAN_META_MAX_BYTES} bytes of JSON`;
 const MALFORMED_SNAPSHOT = 'update was not sent: it does not serialize as an object of the kind it declares';
+const OVERSIZE_ENTRIES = `plan update was not sent: it has more than ${PLAN_ENTRIES_MAX} entries`;
+const OVERSIZE_MARKDOWN = `plan update was not sent: its markdown content is larger than ${PLAN_MARKDOWN_MAX} code points or its path larger than ${PLAN_PATH_MAX}`;
+const OVERSIZE_PLAN_ID = `plan update was not sent: its planId is larger than ${PLAN_ID_MAX} code points`;
 
 /**
  * A property the object itself holds, read once. Inherited values are not read: a check that sees them passes an
@@ -308,6 +311,9 @@ type CheckedEntry = { content: string; priority: string | undefined; status: str
  * properties only; or the problem with the first entry that is not.
  */
 function checkedPlanEntries(entries: readonly unknown[]): CheckedEntry[] | string {
+  // Counted before any entry is read: a model-written plan can hold any number of steps, and every update replaces the
+  // client's whole plan.
+  if (entries.length > PLAN_ENTRIES_MAX) return OVERSIZE_ENTRIES;
   const out: CheckedEntry[] = [];
   for (const entry of entries) {
     const object = asObject(entry);
@@ -772,6 +778,10 @@ export class AcpAgent {
           return refuse('plan_update that is not an ACP plan update was not sent');
         }
         if (!this.#clientAcceptsPlan && !items) return refuse('plan_update was not sent: the client did not advertise plan updates');
+        if (longerThan(planId, PLAN_ID_MAX)) return refuse(OVERSIZE_PLAN_ID);
+        if (markdown && (longerThan(content as string, PLAN_MARKDOWN_MAX) || (typeof path === 'string' && longerThan(path, PLAN_PATH_MAX)))) {
+          return refuse(OVERSIZE_MARKDOWN);
+        }
         const checked = items ? checkedPlanEntries(list as unknown[]) : undefined;
         if (typeof checked === 'string') return refuse(checked);
         const planMetaValue = planMeta(own(plan, '_meta'));
@@ -789,6 +799,7 @@ export class AcpAgent {
         const planId = asString(own(update, 'planId'));
         if (planId === undefined || planId === '') return refuse('plan_removed without a planId was not sent');
         if (!this.#clientAcceptsPlan) return refuse('plan_removed was not sent: the client did not advertise plan updates');
+        if (longerThan(planId, PLAN_ID_MAX)) return refuse(OVERSIZE_PLAN_ID);
         const meta = planMeta(own(update, '_meta'));
         if (!meta.ok) return refuse(meta.problem!);
         return withMeta({ sessionUpdate: 'plan_removed', planId }, meta.meta);
@@ -835,7 +846,9 @@ export class AcpAgent {
       throw new RpcError(RPC_INVALID_PARAMS, `no such session: ${sessionId}`);
     }
     if (session.exited) {
-      throw new RpcError(RPC_INTERNAL_ERROR, `session ${sessionId} has exited`);
+      // Distinguishable (`data.code`), so a client retrying a turn whose failure said resumable -- true as of that reply
+      // -- knows the agent has gone since, and reloads the session instead of starting a new one.
+      throw new RpcError(RPC_INTERNAL_ERROR, `session ${sessionId} has exited`, { code: 'session_exited' });
     }
     if (session.turn !== null) {
       // One turn at a time per session. Interleaving two would mix their
@@ -873,7 +886,7 @@ export class AcpAgent {
       throw new RpcError(
         RPC_INTERNAL_ERROR,
         `turn did not complete${outcome.raw === null ? '' : `: ${outcome.raw}`}`,
-        outcome.failure === undefined ? undefined : { [META_TURN_FAILURE]: this.#wireFailure(session, outcome.failure) },
+        this.#failureData(session, outcome.failure),
       );
     }
 
@@ -885,15 +898,16 @@ export class AcpAgent {
    * bounded, and never resumable once the session's agent is gone -- checked here, where the session is known, not
    * taken from the driver's word. A driver whose `running` throws counts as not running.
    */
-  #wireFailure(session: Session, failure: TurnFailure): TurnFailure {
-    if (typeof failure !== 'object' || failure === null) return failure;
+  #failureData(session: Session, failure: unknown): Record<string, unknown> | undefined {
+    if (failure === undefined) return undefined;
     let running = !session.exited;
     try {
       if (running && session.driver.running === false) running = false;
     } catch {
       running = false;
     }
-    return wireTurnFailure(failure, running);
+    const wire = wireTurnFailure(failure, running);
+    return wire === undefined ? undefined : { [META_TURN_FAILURE]: wire };
   }
 
   /** The prompt block kinds this agent's driver declared; text only when it declared none. */

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AcpAgent, PROTOCOL_VERSION, type AcpAgentOptions, type AgentDriver, type DriverEvents } from '../src/acp/agent.js';
 import { JsonRpcPeer } from '../src/jsonrpc.js';
-import { PLAN_ENTRY_CONTENT_MAX, PLAN_META_MAX_BYTES } from '../src/plan.js';
+import { PLAN_ENTRIES_MAX, PLAN_ENTRY_CONTENT_MAX, PLAN_ID_MAX, PLAN_MARKDOWN_MAX, PLAN_META_MAX_BYTES, PLAN_PATH_MAX } from '../src/plan.js';
 import type { TurnOutcome } from '../src/claude/driver.js';
 import { sessionNotificationProblems, sessionUpdateProblems } from './acp-schema.js';
 
@@ -1196,6 +1196,47 @@ describe('plan updates and the client capability (G-362)', () => {
     expect(s.problems).toHaveLength(bad.length);
     // A client without plan support is refused plan_removed before its _meta is read; every other refusal names the cap.
     for (const problem of 'plan' in caps ? s.problems : s.problems.slice(0, -1)) expect(problem).toMatch(/larger than/);
+  });
+
+  it.each([{ plan: {} }, {}])('refuses, and reports, more entries than the cap, before reading any (client %j)', async (caps) => {
+    const s = await session(caps);
+    expect(PLAN_ENTRIES_MAX).toBe(256);
+    const at = Array.from({ length: PLAN_ENTRIES_MAX }, (_, i) => ({ content: `step ${i}`, priority: 'medium', status: 'pending' }));
+    s.driver.emit({ sessionUpdate: 'plan', entries: at } as never);
+    s.driver.emit({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: at } } as never);
+    expect(s.updates()).toHaveLength(2);
+    expect(s.problems).toEqual([]);
+    // One more, where the extra entry would throw if it were read: the count refuses first.
+    const reads: string[] = [];
+    const trap = Object.defineProperty({}, 'content', { enumerable: true, get() { reads.push('read'); throw new Error('read'); } });
+    const over = [...at, trap];
+    s.driver.emit({ sessionUpdate: 'plan', entries: over } as never);
+    s.driver.emit({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: over } } as never);
+    expect(s.updates()).toHaveLength(2);
+    expect(reads).toEqual([]);
+    expect(s.problems).toEqual([`plan update was not sent: it has more than ${PLAN_ENTRIES_MAX} entries`, `plan update was not sent: it has more than ${PLAN_ENTRIES_MAX} entries`]);
+  });
+
+  it('refuses, and reports, markdown content, a path or a planId over the documented caps', async () => {
+    const s = await session({ plan: {} });
+    expect([PLAN_MARKDOWN_MAX, PLAN_PATH_MAX, PLAN_ID_MAX]).toEqual([65536, 4096, 256]);
+    const markdown = (plan: Record<string, unknown>) => ({ sessionUpdate: 'plan_update', plan: { type: 'markdown', planId: 'pl_md', content: '# plan', ...plan } });
+    // At every cap, counted in code points (an astral character is one).
+    s.driver.emit(markdown({ content: '\u{1F600}'.repeat(PLAN_MARKDOWN_MAX), path: 'p'.repeat(PLAN_PATH_MAX), planId: 'i'.repeat(PLAN_ID_MAX) }) as never);
+    s.driver.emit({ sessionUpdate: 'plan_removed', planId: 'i'.repeat(PLAN_ID_MAX) } as never);
+    expect(s.updates()).toHaveLength(2);
+    expect(s.problems).toEqual([]);
+    const bad: unknown[] = [
+      markdown({ content: 'x'.repeat(PLAN_MARKDOWN_MAX + 1) }),
+      markdown({ path: 'p'.repeat(PLAN_PATH_MAX + 1) }),
+      markdown({ planId: 'i'.repeat(PLAN_ID_MAX + 1) }),
+      { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'i'.repeat(PLAN_ID_MAX + 1), entries: [entry] } },
+      { sessionUpdate: 'plan_removed', planId: 'i'.repeat(PLAN_ID_MAX + 1) },
+    ];
+    for (const update of bad) s.driver.emit(update as never);
+    expect(s.updates()).toHaveLength(2);
+    expect(s.problems).toHaveLength(bad.length);
+    for (const problem of s.problems) expect(problem).toMatch(/larger than/);
   });
 
   it('does not send an update whose kind is not its own string', async () => {

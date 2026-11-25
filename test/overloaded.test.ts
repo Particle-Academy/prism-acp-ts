@@ -134,17 +134,19 @@ describe('Claude: a 529 is an overloaded, retryable failure, and the same sessio
       .toEqual({ reason: 'server_error', kind: 'other' });
   });
 
-  it('a session whose CLI is gone is NOT resumable, whatever the failure says', async () => {
+  it('resumable holds as of the reply: a CLI that exits after it answers the retry with session_exited', async () => {
+    // The CLI exits 20 ms after its failure. That reply already went out with resumable true, which was the case when it
+    // was sent; no reply can promise a crash will not come next. So the retry must say, distinguishably, that the agent
+    // has gone since, and a client reloads the session rather than losing the conversation in a new one.
     const s = await claudeSession();
-    const failed = await s.prompt('OVERLOADED-EXIT');
+    const failure = s.failureOf(await s.prompt('OVERLOADED-EXIT'));
+    expect(failure).toEqual(OVERLOADED_CLAUDE);
     const deadline = Date.now() + 5000;
     while (s.driver().running && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
-    // The failure may be answered before the exit lands; either way it never claims a session that is not there.
-    const failure = s.failureOf(failed);
-    expect(failure).toMatchObject({ kind: 'overloaded', retryable: true });
-    if (failure.resumable === true) expect(s.driver().running === false).toBe(true);
+    expect(s.driver().running).toBe(false);
     const after = await s.prompt('after exit');
-    expect(after.error).toBeDefined();
+    expect(after.result).toBeUndefined();
+    expect(after.error).toMatchObject({ message: 'session sess_overloaded has exited', data: { code: 'session_exited' } });
   });
 });
 
@@ -300,6 +302,35 @@ describe('retryAfterMs: only what the provider stated, bounded', () => {
   it('a failure with no retry-after carries none (the control)', async () => {
     const failure = await externalSession().fail({ reason: 'r', kind: 'overloaded' });
     expect(failure).toEqual({ reason: 'r', kind: 'overloaded', retryable: true });
+  });
+
+  it('is rebuilt from what the failure serializes as: a toJSON cannot lift a kind, a bound or a dead session', async () => {
+    const lying = { reason: 'x', kind: 'auth', toJSON: () => ({ reason: 'x', kind: 'overloaded', retryable: true, retryAfterMs: 1e15, resumable: true }) };
+    // The snapshot is what the wire would have carried, and every field of it is checked again.
+    expect(await externalSession(() => false).fail(lying))
+      .toEqual({ reason: 'x', kind: 'overloaded', retryable: true, retryAfterMs: MAX_RETRY_AFTER_MS, resumable: false });
+    // A getter that throws, a cycle, or a BigInt: no failure data, and the client still gets its error.
+    const throwing = Object.defineProperty({ reason: 'x', kind: 'overloaded' }, 'resumable', { enumerable: true, get() { throw new Error('no'); } });
+    const cyclic: Row = { reason: 'x', kind: 'overloaded' }; cyclic.self = cyclic;
+    for (const failure of [throwing, cyclic, { reason: 'x', kind: 'overloaded', resetsAtMs: 1n }]) expect(await externalSession().fail(failure)).toBeNull();
+  });
+
+  it('sends only the documented fields, each checked: a field it does not know never reaches the client', async () => {
+    const failure = await externalSession().fail({
+      reason: 'r‮', kind: 'not-a-kind', resetsAtMs: -1, providerMessage: 'm'.repeat(10_000), extra: 'secret-shaped', _meta: { x: 1 },
+      providerDetails: { httpStatusCode: 529, __proto__x: 'no', 'bad name': 'no', nested: { a: 1 }, ...Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`f${i}`, i])) },
+    });
+    expect(failure.reason).toBe('r<U+202E>');
+    expect(failure.kind).toBe('other');
+    expect(failure).not.toHaveProperty('resetsAtMs');
+    expect(failure).not.toHaveProperty('extra');
+    expect(failure).not.toHaveProperty('_meta');
+    expect(failure.providerMessage.length).toBeLessThan(2100);
+    expect(Object.keys(failure.providerDetails)).toHaveLength(16);
+    expect(failure.providerDetails.httpStatusCode).toBe(529);
+    for (const name of ['__proto__x', 'bad name', 'nested']) expect(failure.providerDetails).not.toHaveProperty(name);
+    // A reason that is not a non-empty string is no reason: no failure data, as for a provider that gave none.
+    for (const reason of ['', 7, null, undefined]) expect(await externalSession().fail({ reason, kind: 'overloaded' })).toBeNull();
   });
 
   it('resumable is never true for a session whose agent is not running, nor for a non-boolean claim', async () => {

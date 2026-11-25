@@ -1,6 +1,6 @@
 import { bindingWindow, readRateLimit } from './claude/rate-limit.js';
 import { REDACTED } from './redact.js';
-import { boundProviderText } from './text.js';
+import { MAX_PROVIDER_TEXT_CHARS, PROVIDER_TEXT_TRUNCATED, boundProviderText } from './text.js';
 
 /**
  * Why a turn failed, when the provider said: carried on `TurnOutcome.failure` and on the error a failed
@@ -66,23 +66,68 @@ export function boundRetryAfterMs(value: unknown): number | undefined {
   return Math.min(Math.ceil(value), MAX_RETRY_AFTER_MS);
 }
 
+const KINDS: ReadonlySet<string> = new Set<TurnFailureKind>(['rate_limit', 'overloaded', 'auth', 'billing', 'other']);
+/** The wire's bound on provider text: the driver's own bound plus its marker, so text a driver already bounded is unchanged. */
+const WIRE_TEXT_MAX = MAX_PROVIDER_TEXT_CHARS + PROVIDER_TEXT_TRUNCATED.length;
+const DETAIL_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const MAX_DETAILS = 16;
+
 /**
- * A failure as the wire carries it. `retryable` is set from the kind alone; `retryAfterMs` is kept only bounded and
- * only on a retryable failure; `resumable` is the driver's boolean claim, and false whatever it said when the agent is
- * no longer running. Every other field passes as the driver gave it.
+ * A failure as the wire carries it, rebuilt -- never the driver's object. The transport calls JSON.stringify, so an own
+ * `toJSON`, a getter or a Proxy would decide what is sent after any check; the failure is therefore read ONCE, as it
+ * serializes, and only the documented fields are taken from that snapshot, each checked:
+ *   reason (non-empty string, bounded and marked as provider text), kind (one of the five, else `other`),
+ *   resetsAtMs (non-negative safe integer), providerMessage (string, bounded and marked), providerDetails (at most
+ *   16 plain-named scalar fields, strings bounded and marked);
+ *   retryable from the kind alone; retryAfterMs bounded and only on a retryable failure; resumable the driver's boolean
+ *   claim, and false whatever it said when the agent is no longer running -- as of this reply: an agent that exits
+ *   after it is answered `session_exited` on the next prompt.
+ * Undefined when the failure cannot be serialized or names no reason: then no failure data is sent, as for a turn the
+ * provider gave no reason for.
  */
-export function wireTurnFailure(failure: TurnFailure, agentRunning: boolean): TurnFailure {
-  const { retryable: _retryable, retryAfterMs, resumable, ...rest } = failure;
-  const retryable = isRetryableKind(rest.kind);
-  const after = retryable ? boundRetryAfterMs(retryAfterMs) : undefined;
-  const claim = typeof resumable === 'boolean' ? resumable : undefined;
-  const resume = agentRunning ? claim : false;
+export function wireTurnFailure(failure: unknown, agentRunning: boolean): TurnFailure | undefined {
+  let snapshot: unknown;
+  try {
+    const text = JSON.stringify(failure);
+    snapshot = typeof text === 'string' ? JSON.parse(text) : undefined;
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(snapshot)) return undefined;
+  const reason = own(snapshot, 'reason');
+  if (typeof reason !== 'string' || reason === '') return undefined;
+  const kindValue = own(snapshot, 'kind');
+  const kind: TurnFailureKind = typeof kindValue === 'string' && KINDS.has(kindValue) ? kindValue as TurnFailureKind : 'other';
+  const resetsAtMs = own(snapshot, 'resetsAtMs');
+  const message = own(snapshot, 'providerMessage');
+  const details = wireDetails(own(snapshot, 'providerDetails'));
+  const retryable = isRetryableKind(kind);
+  const after = retryable ? boundRetryAfterMs(own(snapshot, 'retryAfterMs')) : undefined;
+  const claim = own(snapshot, 'resumable');
+  const resume = agentRunning ? (typeof claim === 'boolean' ? claim : undefined) : false;
   return {
-    ...rest,
+    reason: boundProviderText(reason, WIRE_TEXT_MAX),
+    kind,
+    ...(typeof resetsAtMs === 'number' && Number.isSafeInteger(resetsAtMs) && resetsAtMs >= 0 ? { resetsAtMs } : {}),
+    ...(typeof message === 'string' && message !== '' ? { providerMessage: boundProviderText(message, WIRE_TEXT_MAX) } : {}),
+    ...(details === undefined ? {} : { providerDetails: details }),
     ...(retryable ? { retryable: true as const } : {}),
     ...(after === undefined ? {} : { retryAfterMs: after }),
     ...(resume === undefined ? {} : { resumable: resume }),
   };
+}
+
+function wireDetails(value: unknown): Record<string, string | number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const details = new Map<string, string | number>();
+  for (const name of Object.keys(value)) {
+    if (details.size >= MAX_DETAILS) break;
+    if (!DETAIL_NAME.test(name)) continue;
+    const entry = value[name];
+    if (typeof entry === 'string' && entry !== '') details.set(name, boundProviderText(entry, WIRE_TEXT_MAX));
+    if (typeof entry === 'number' && Number.isSafeInteger(entry)) details.set(name, entry);
+  }
+  return details.size === 0 ? undefined : Object.fromEntries(details);
 }
 
 /**
