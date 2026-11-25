@@ -904,7 +904,7 @@ describe('plan updates and the client capability (G-362)', () => {
   const entry = { content: 'step', priority: 'medium', status: 'pending' };
   const itemsUpdate = { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [entry], _meta: { 'particle.academy/plan': { revision: 1 } } } };
 
-  async function session(clientCapabilities: unknown) {
+  async function session(clientCapabilities: unknown, report?: (problem: string) => void) {
     const sent: Record<string, unknown>[] = [];
     const drivers: FakeDriver[] = [];
     const problems: string[] = [];
@@ -916,7 +916,7 @@ describe('plan updates and the client capability (G-362)', () => {
         return driver;
       },
       newSessionId: () => 'sess_plan',
-      onProtocolError: (_id, problem) => problems.push(problem),
+      onProtocolError: (_id, problem) => { problems.push(problem); report?.(problem); },
     });
     const params = clientCapabilities === undefined ? { protocolVersion: 1 } : { protocolVersion: 1, clientCapabilities };
     await peer.receive({ jsonrpc: '2.0', id: 1, method: 'initialize', params });
@@ -1116,6 +1116,49 @@ describe('plan updates and the client capability (G-362)', () => {
     for (const update of bad) expect(() => s.driver.emit(update as never)).not.toThrow();
     expect(s.updates()).toEqual([]);
     expect(s.problems).toHaveLength(bad.length);
+  });
+
+  it.each([{ plan: {} }, {}])('checks and sends the same kind: a getter cannot turn a chunk into an unchecked plan (client %j)', async (caps) => {
+    const s = await session(caps);
+    const flipping = () => {
+      let reads = 0;
+      return Object.defineProperty({ content: { type: 'text', text: 'hi' }, entries: [{ content: 'x', status: 'bogus' }] }, 'sessionUpdate', {
+        enumerable: true,
+        get() { reads += 1; return reads === 1 ? 'agent_message_chunk' : 'plan'; },
+      });
+    };
+    const proxied = () => {
+      let reads = 0;
+      return new Proxy({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } } as Record<string, unknown>, {
+        get(target, key) { if (key === 'sessionUpdate') { reads += 1; return reads === 1 ? 'agent_message_chunk' : 'plan_removed'; } return target[key as string]; },
+      });
+    };
+    s.driver.emit(flipping() as never);
+    s.driver.emit(proxied() as never);
+    const wire = JSON.parse(JSON.stringify(s.updates())) as { update: Record<string, unknown> }[];
+    expect(wire.map((u) => u.update.sessionUpdate)).toEqual(['agent_message_chunk', 'agent_message_chunk']);
+    expect(s.problems).toEqual([]);
+  });
+
+  it('does not send an update whose kind is not its own string', async () => {
+    const s = await session({ plan: {} });
+    const inherited = Object.assign(Object.create({ sessionUpdate: 'plan' }) as Record<string, unknown>, { entries: [{ content: 'x', status: 'bogus' }] });
+    s.driver.emit(inherited as never);
+    s.driver.emit({ sessionUpdate: 7 } as never);
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toHaveLength(2);
+  });
+
+  it.each([{ plan: {} }, {}])('a host reporter that throws neither reaches the driver nor relabels the problem (client %j)', async (caps) => {
+    const s = await session(caps, () => { throw new Error('reporter'); });
+    expect(() => s.driver.emit({ sessionUpdate: 'plan' } as never)).not.toThrow();
+    expect(s.problems).toEqual(['plan update without an entries list was not sent']);
+    const throwing = Object.defineProperty({ sessionUpdate: 'plan_removed' }, 'planId', { enumerable: true, get() { throw new Error('no'); } });
+    expect(() => s.driver.emit(throwing as never)).not.toThrow();
+    expect(s.problems).toEqual(['plan update without an entries list was not sent', 'plan update was not sent: reading it threw']);
+    // A correction is still sent when reporting it throws.
+    expect(() => s.driver.emit({ sessionUpdate: 'plan', entries: [{ content: 'x', status: 'pending' }] } as never)).not.toThrow();
+    expect(s.updates().map((u) => (u.update as { entries: unknown }).entries)).toEqual([[{ content: 'x', priority: 'medium', status: 'pending' }]]);
   });
 
   it('holds plan_removed to the same rules: own planId, checked _meta, only the checked fields sent', async () => {
