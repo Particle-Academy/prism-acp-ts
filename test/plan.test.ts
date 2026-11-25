@@ -302,6 +302,32 @@ describe('model text in a title is untrusted', () => {
     ['Update your config', 'the label word inside another word'],
     ['1 א (you) x', 'a digit, then a Hebrew letter'],
     ['1 (you) x', 'a digit, then a label'],
+    // Round 4: ASCII stand-ins for letters (|) for D, |_ for L, O for D, () for O, |_| for U) can spell a label word
+    // no look-alike table lists. The first word holding any punctuation is prefixed, whatever it spells.
+    ['I[FAILE|)]I x', 'a bar and parenthesis for D'],
+    ['I[FAI|_ED]I x', 'a bar and underscore for L'],
+    ['I[FAILEO]I x', 'capital O for D'],
+    ['l(Y()U)l x', 'parentheses for O'],
+    ['l(|_|)l', 'bars and underscore for U'],
+    ['l(|_|)l x', 'bars and underscore for U, then more'],
+    ['I[SKI|>|>ED]I x', 'bars and greater-than for P'],
+    ['I[5KIPPEO]I x', 'a digit and capital O'],
+    ['l{you}l x', 'braces'],
+    ['l/you/l x', 'slashes'],
+    ['l<you>l x', 'angle brackets'],
+    ['I-FAILEO-I x', 'hyphens'],
+    ['I.FAILEO.I x', 'dots'],
+    ['I:FAILEO:I x', 'colons'],
+    ['I*FAILEO*I x', 'asterisks'],
+    ['I_FAILEO_I x', 'underscores'],
+    ["I'FAILEO'I x", 'quotes'],
+    ['I=FAILEO=I x', 'equals signs'],
+    ['IFAILEO] x', 'a closing bracket alone'],
+    ['l (Y()U) l x', 'punctuation before the first three-letter run, spaced out'],
+    ['I [FAILEO] I x', 'brackets spaced out'],
+    ['I [ F A I L E O ] I x', 'every letter spaced out'],
+    ['x (Y()U) x', 'a one-letter word, then punctuation'],
+    ['l | Y O U | l', 'bars spaced out'],
   ])('prefixes a title that contains a label word in any form: %j (%s)', (text) => {
     for (const state of ['todo', 'done'] as const) expect(title(text, state).startsWith('Step: ')).toBe(true);
   });
@@ -312,6 +338,23 @@ describe('model text in a title is untrusted', () => {
     expect(title('Run the tests')).toBe('Run the tests');
     expect(title('Lint and type-check')).toBe('Lint and type-check');
     expect(planTitle('Fix the build')).toBe('Fix the build');
+    // Punctuation after the first word, once a run of three ASCII letters has opened the title, is left alone.
+    expect(title('Fix (unit) tests')).toBe('Fix (unit) tests');
+    expect(title('Lint it, then build')).toBe('Lint it, then build');
+    expect(title('Run a/b checks')).toBe('Run a/b checks');
+  });
+
+  it.each([
+    ["Don't deploy", 'an apostrophe in the first word'],
+    ['e.g. the docs', 'dots in the first word'],
+    ['v1.2 release', 'a version'],
+    ['a/b test', 'a slash'],
+    ['Re-run the job', 'a hyphen in the first word'],
+    ['Lint, then build', 'a comma ending the first word'],
+    ['A (big) change', 'a one-letter word, then brackets'],
+  ])('prefixes a title whose first word, or opening before a three-letter word, holds punctuation: %j (%s)', (text) => {
+    expect(title(text)).toBe('Step: ' + text);
+    expect(planTitle(text)).toBe('Step: ' + text);
   });
 
   it('keeps an ordinary title, and a host label still leads a labelled step', () => {

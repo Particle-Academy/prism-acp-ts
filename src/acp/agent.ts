@@ -693,21 +693,37 @@ export class AcpAgent {
     try {
       return this.#checkPlan(sessionId, update);
     } catch {
-      this.#options.onProtocolError?.(sessionId, MALFORMED_READ, { recoverable: true });
+      this.#reportPlan(sessionId, MALFORMED_READ);
       return null;
+    }
+  }
+
+  /**
+   * Report a plan gate problem through the host's `onProtocolError`. The host's reporter throwing is the host's own
+   * fault: it is contained here, so it neither reaches the driver nor reads as the driver's update having thrown.
+   */
+  #reportPlan(sessionId: string, problem: string): void {
+    try {
+      this.#options.onProtocolError?.(sessionId, problem, { recoverable: true });
+    } catch {
+      // Nothing left to report it to.
     }
   }
 
   #checkPlan(sessionId: string, update: AcpUpdate): AcpUpdate | null {
     const refuse = (problem: string): null => {
-      this.#options.onProtocolError?.(sessionId, problem, { recoverable: true });
+      this.#reportPlan(sessionId, problem);
       return null;
     };
     // What is sent is built here from the fields checked here, read from own properties only, never a copy of the
     // driver's object: a copy would carry whatever the check did not look at.
     const withMeta = <T extends Record<string, unknown>>(body: T, meta: Record<string, unknown> | undefined) =>
       meta === undefined ? body : { ...body, _meta: meta };
-    switch (update.sessionUpdate) {
+    // The kind is read once, from the update's own property, and the update sent carries that same kind: a getter or
+    // Proxy cannot answer this switch with a chunk and the serializer with a plan.
+    const kind = own(update as unknown as Record<string, unknown>, 'sessionUpdate');
+    if (typeof kind !== 'string') return refuse('update without a string sessionUpdate of its own was not sent');
+    switch (kind) {
       case 'plan': {
         const list = own(update, 'entries');
         if (!Array.isArray(list)) return refuse('plan update without an entries list was not sent');
@@ -751,7 +767,9 @@ export class AcpAgent {
         return withMeta({ sessionUpdate: 'plan_removed', planId }, meta.meta);
       }
       default:
-        return update;
+        // A fresh object whose kind is the one checked above, whatever the driver's object would answer on a second
+        // read. Its other fields are the driver's own enumerable ones, as before.
+        return { ...update, sessionUpdate: kind } as AcpUpdate;
     }
   }
 
@@ -763,7 +781,7 @@ export class AcpAgent {
       return { content, priority: valid ? priority : PLAN_ENTRY_PRIORITY, status, ...(_meta === undefined ? {} : { _meta }) };
     });
     if (fixed === 0) return out;
-    this.#options.onProtocolError?.(sessionId, `${fixed} plan entr${fixed === 1 ? 'y' : 'ies'} had no valid priority and were sent as medium`, { recoverable: true });
+    this.#reportPlan(sessionId, `${fixed} plan entr${fixed === 1 ? 'y' : 'ies'} had no valid priority and were sent as medium`);
     return out;
   }
 

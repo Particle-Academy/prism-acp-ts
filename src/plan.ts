@@ -128,6 +128,13 @@ const LEADING = /^(?:\[failed\]|\[skipped\]|\(you\)|[ \p{M}])+/iu;
  */
 const OPENS_PLAIN = /^[A-Za-z0-9]/;
 /**
+ * The first run of three ASCII letters: the first real word. Everything before it, and the whole first word, is the
+ * title's opening; see {@link opensLikeLabel}.
+ */
+const FIRST_WORD = /[A-Za-z]{3}/;
+/** Anything in a title's opening but an ASCII letter, digit or space. */
+const NOT_PLAIN = /[^A-Za-z0-9 ]/;
+/**
  * Letters and digits of the right-to-left scripts (bidi classes R and AL: Hebrew, Arabic, Syriac, Thaana, NKo, ...
  * and the supplementary-plane RTL scripts). A title whose first strong character is one of these is laid out right
  * to left by a client that renders it with `dir="auto"`, which can bring a `(you)` inside it to the visual start, so
@@ -235,11 +242,21 @@ export function planTitle(value: string): string {
 }
 
 /**
- * Whether a cleaned title must be prefixed: it opens with anything but an ASCII letter or digit, its first strong
- * character is right-to-left, or it holds a label word in any form ({@link LABEL_WORDS}).
+ * Whether a cleaned title must be prefixed: it opens with anything but an ASCII letter or digit, its opening (the
+ * first word, and everything before the first run of three ASCII letters) holds anything but ASCII letters, digits
+ * and spaces, its first strong character is right-to-left, or it holds a label word in any form ({@link LABEL_WORDS}).
+ *
+ * The opening rule is structural, and it is the one that cannot be out-spelled: a label needs a bracket, a bar or
+ * some other mark around its word, and ASCII alone can spell that word in more ways than any look-alike table lists
+ * (`I[FAILE|)]I`, `l(Y()U)l`, `l(|_|)l`). So any punctuation there prefixes the title, whatever it spells, at the cost
+ * of a `Step: ` before `Don't ...`, `e.g. ...` or `v1.2 ...`.
  */
 function opensLikeLabel(text: string): boolean {
   if (!OPENS_PLAIN.test(text)) return true;
+  const space = text.indexOf(' ');
+  const word = FIRST_WORD.exec(text);
+  const opening = text.slice(0, Math.max(space === -1 ? text.length : space, word === null ? text.length : word.index));
+  if (NOT_PLAIN.test(opening)) return true;
   for (const point of text) {
     if (LETTER_OR_DIGIT.test(point) && RTL.test(point)) return true;
     if (LETTER.test(point)) break;
