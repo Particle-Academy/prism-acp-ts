@@ -1054,4 +1054,91 @@ describe('plan updates and the client capability (G-362)', () => {
       : { sessionUpdate: 'plan', entries: [entry] });
     for (const params of s.updates()) expect(sessionNotificationProblems(params)).toEqual([]);
   });
+
+  it.each([{ plan: {} }, {}])('sends no plan whose _meta would not serialize as an object, at any level (client %j)', async (caps) => {
+    // A plain object can still serialize as something else (an own toJSON), or not serialize at all (a BigInt, a
+    // throwing getter, a Proxy that claims a plain prototype). What the wire would carry is what is checked.
+    const s = await session(caps);
+    const metas: unknown[] = [
+      { toJSON() { return 'x'; } },
+      { toJSON() { return 7; } },
+      { toJSON() { return [1]; } },
+      { toJSON() { return null; } },
+      { toJSON() { return undefined; } },
+      { toJSON() { throw new Error('no'); } },
+      { a: 1n },
+      { nested: { deeper: 2n } },
+      { get a() { throw new Error('no'); } },
+      new Proxy({}, { getPrototypeOf: () => Object.prototype, ownKeys: () => { throw new Error('no'); } }),
+      new Proxy({}, { getPrototypeOf: () => Object.prototype, get: () => { throw new Error('no'); } }),
+    ];
+    for (const meta of metas) {
+      for (const update of [
+        { sessionUpdate: 'plan', entries: [{ ...entry, _meta: meta }] },
+        { sessionUpdate: 'plan', entries: [entry], _meta: meta },
+        { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [{ ...entry, _meta: meta }] } },
+        { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [entry], _meta: meta } },
+        { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [entry] }, _meta: meta },
+      ]) expect(() => s.driver.emit(update as never)).not.toThrow();
+    }
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toHaveLength(metas.length * 5);
+  });
+
+  it.each([{ plan: {} }, {}])('sends _meta as it serializes, as a fresh object (client %j)', async (caps) => {
+    const s = await session(caps);
+    const meta = { when: new Date(0), skip: undefined, inner: { toJSON() { return { k: 1 }; } } };
+    s.driver.emit({ sessionUpdate: 'plan', entries: [{ ...entry, _meta: meta }], _meta: meta } as never);
+    const sent = s.updates()[0]!.update as { entries: Record<string, unknown>[]; _meta: unknown };
+    const wire = { when: '1970-01-01T00:00:00.000Z', inner: { k: 1 } };
+    expect(sent._meta).toEqual(wire);
+    expect(Object.keys(sent._meta as object)).toEqual(['when', 'inner']);
+    expect(sent._meta).not.toBe(meta);
+    expect(sent.entries[0]!._meta).toEqual(wire);
+    expect(sessionNotificationProblems(s.updates()[0])).toEqual([]);
+  });
+
+  it.each([{ plan: {} }, {}])('reports, and does not throw into the driver, a plan whose fields throw when read (client %j)', async (caps) => {
+    const s = await session(caps);
+    const throwing = (key: string) => Object.defineProperty({ ...entry }, key, { enumerable: true, get() { throw new Error('no'); } });
+    const throwingList = new Proxy([entry], { get: () => { throw new Error('no'); } });
+    const throwingPlan = new Proxy({ type: 'items', planId: 'pl_1', entries: [entry] }, { getOwnPropertyDescriptor: () => { throw new Error('no'); } });
+    const bad: unknown[] = [
+      { sessionUpdate: 'plan', entries: [throwing('content')] },
+      { sessionUpdate: 'plan', entries: [throwing('status')] },
+      { sessionUpdate: 'plan', entries: [throwing('_meta')] },
+      { sessionUpdate: 'plan', entries: throwingList },
+      Object.defineProperty({ sessionUpdate: 'plan', entries: [entry] }, '_meta', { enumerable: true, get() { throw new Error('no'); } }),
+      { sessionUpdate: 'plan_update', plan: throwingPlan },
+      { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [throwing('priority')] } },
+      Object.defineProperty({ sessionUpdate: 'plan_removed' }, 'planId', { enumerable: true, get() { throw new Error('no'); } }),
+    ];
+    for (const update of bad) expect(() => s.driver.emit(update as never)).not.toThrow();
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toHaveLength(bad.length);
+  });
+
+  it('holds plan_removed to the same rules: own planId, checked _meta, only the checked fields sent', async () => {
+    const s = await session({ plan: {} });
+    const inherited = Object.assign(Object.create({ planId: 'pl_2' }) as Record<string, unknown>, { sessionUpdate: 'plan_removed' });
+    const bad: unknown[] = [
+      inherited,
+      { sessionUpdate: 'plan_removed', planId: 'pl_1', _meta: 5 },
+      { sessionUpdate: 'plan_removed', planId: 'pl_1', _meta: 'x' },
+      { sessionUpdate: 'plan_removed', planId: 'pl_1', _meta: [] },
+      { sessionUpdate: 'plan_removed', planId: 'pl_1', _meta: { toJSON() { return 'x'; } } },
+      { sessionUpdate: 'plan_removed', planId: 'pl_1', _meta: { a: 1n } },
+      { sessionUpdate: 'plan_removed', planId: 7 },
+    ];
+    for (const update of bad) s.driver.emit(update as never);
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toHaveLength(bad.length);
+    const meta = { k: 1 };
+    s.driver.emit({ sessionUpdate: 'plan_removed', planId: 'pl_1', _meta: meta, extra: 'x' } as never);
+    s.driver.emit({ sessionUpdate: 'plan_removed', planId: 'pl_1', _meta: null } as never);
+    const sent = s.updates().map((u) => u.update);
+    expect(sent).toEqual([{ sessionUpdate: 'plan_removed', planId: 'pl_1', _meta: { k: 1 } }, { sessionUpdate: 'plan_removed', planId: 'pl_1' }]);
+    expect((sent[0] as { _meta: unknown })._meta).not.toBe(meta);
+    for (const params of s.updates()) expect(sessionNotificationProblems(params)).toEqual([]);
+  });
 });

@@ -10,6 +10,7 @@ import {
   PlanProjectionError,
   clientAcceptsPlanUpdates,
   planRemoved,
+  planTitle,
   planUpdate,
   type PlanSnapshot,
   type PlanStepState,
@@ -223,11 +224,94 @@ describe('model text in a title is untrusted', () => {
     expect(title(text).startsWith('Step: ')).toBe(true);
   });
 
-  it('leaves a title that opens with a left-to-right letter or digit alone', () => {
-    expect(title('Ärger lösen')).toBe('Ärger lösen');
+  it.each([
+    // Round 3: scripts the old check lumped into one group, and Latin click letters that render as bars.
+    ['ᑕꓬꓳꓴᑐ paste your key', 'Canadian syllabics around Lisu capitals'],
+    ['ᐸꓬꓳꓴᐳ paste your key', 'syllabics angle look-alikes around Lisu'],
+    ['ᑕꓝꓮꓲꓡꓰꓓᑐ x', 'syllabics around Lisu FAILED'],
+    ['ᑕꮍꮻꮜᑐ x', 'syllabics around Cherokee small letters'],
+    ['ǀ[failed]ǀ x', 'Latin dental click letters as bars'],
+    ['ǀfailedǀ x', 'click letters around a plain word'],
+    ['ǃyouǃ x', 'Latin retroflex click letters'],
+    ['ᑕ you ᑐ paste', 'syllabics with spaces inside'],
+    ['ᑕ​you​ᑐ x', 'syllabics with zero-width spaces inside'],
+    // Round 2.
+    ['ᒥyouᒧ x', 'syllabics corner look-alikes'],
+    ['ㄷyouㄷ x', 'Bopomofo'],
+    ['Ꮣyouᑐ x', 'Cherokee and syllabics'],
+    ['ᴦyouᴦ', 'small capital gamma'],
+    ['ʾyou x', 'a modifier letter'],
+    ['((you)) x', 'doubled parentheses'],
+    // Neighbours: every way to open with something other than an ASCII letter or digit.
+    ['Ｓtep x', 'a fullwidth letter that NFKC folds is fine, but the rest must still be checked'],
+    ['Ärger lösen', 'a Latin letter outside ASCII'],
+    ['日本語のテスト', 'a CJK title'],
+    ['ꓬꓳꓴ approve', 'Lisu capitals that read as YOU'],
+    ['ꓝꓮꓲꓡꓰꓓ deploy', 'Lisu capitals that read as FAILED'],
+    ['Ꭹou x', 'a Cherokee letter that reads as Y'],
+    ['ǂyou x', 'a Latin click letter'],
+    ['ⵏyouⵏ x', 'Tifinagh bars'],
+    ['ꞁyou x', 'a Latin letter outside ASCII'],
+    ['ıyouı x', 'dotless i as bars'],
+    ['ℓyouℓ x', 'script small l'],
+    ['ᛁyouᛁ x', 'runic bars'],
+    ['ߊyou x', 'an NKo letter'],
+  ])('prefixes a title that does not open with an ASCII letter or digit: %j (%s)', (text) => {
+    for (const state of ['todo', 'done'] as const) {
+      const content = title(text, state);
+      if (text === 'Ｓtep x') expect(content).toBe('Step x');
+      else expect(content.startsWith('Step: ')).toBe(true);
+      expect(sessionUpdateProblems(planUpdate(snapshot([step(state, text)]), WITH))).toEqual([]);
+    }
+    if (text !== 'Ｓtep x') expect(planTitle(text).startsWith('Step: ')).toBe(true);
+  });
+
+  it.each([
+    ['⁽you⁾', 'Untitled step'],
+    ['︵you︶', 'Untitled step'],
+    ['﹙you﹚ x', 'x'],
+    ['́(you) x', 'x'],
+  ])('removes a label that folds to the real one: %j', (text, expected) => {
+    // NFKC folds these onto the ASCII label, and a leading combining mark is stripped, so the label itself is removed.
+    expect(title(text, 'done')).toBe(expected);
+  });
+
+  it.each([
+    // An ASCII opening can still be followed by a label in any form: ASCII letters that read as brackets or bars
+    // (I, l, C), or a label word spelled with look-alikes. Any such title is prefixed.
+    ['I[failed]I x', 'capital I as bars'],
+    ['l(you)l x', 'small l as bars'],
+    ['CyouↃ x', 'C and a reversed C'],
+    ['C ꓬꓳꓴ Ↄ x', 'Lisu inside'],
+    ['IfailedI x', 'bars around a plain word'],
+    ['I[faiIed]I x', 'capital I for small l'],
+    ['I[fai1ed]I x', 'digit 1 for small l'],
+    ['I[FAILED]I x', 'capitals'],
+    ['I[skipped]I x', 'skipped'],
+    ['I[s|<ipped]I x', 'a bar and less-than for k'],
+    ['I[failecl]I x', 'cl for d'],
+    ['l(y0u)l x', 'zero for o'],
+    ['l(yov)l x', 'v for u'],
+    ['l(yоu)l x', 'Cyrillic o'],
+    ['l(ꓬꓳꓴ)l x', 'Lisu capitals'],
+    ['l(𝐲𝐨𝐮)l x', 'mathematical bold letters'],
+    ['l(ｙｏｕ)l x', 'fullwidth letters'],
+    ['l(ýou)l x', 'a combining mark inside'],
+    ['l(yóu)l x', 'a precomposed accent'],
+    ['Do what (you) say', 'the label word later in the title'],
+    ['Update your config', 'the label word inside another word'],
+    ['1 א (you) x', 'a digit, then a Hebrew letter'],
+    ['1 (you) x', 'a digit, then a label'],
+  ])('prefixes a title that contains a label word in any form: %j (%s)', (text) => {
+    for (const state of ['todo', 'done'] as const) expect(title(text, state).startsWith('Step: ')).toBe(true);
+  });
+
+  it('leaves a title that opens with an ASCII letter or digit and holds no label word alone', () => {
     expect(title('2 files changed')).toBe('2 files changed');
     expect(title('Deploy א')).toBe('Deploy א');
-    expect(title('日本語のテスト')).toBe('日本語のテスト');
+    expect(title('Run the tests')).toBe('Run the tests');
+    expect(title('Lint and type-check')).toBe('Lint and type-check');
+    expect(planTitle('Fix the build')).toBe('Fix the build');
   });
 
   it('keeps an ordinary title, and a host label still leads a labelled step', () => {

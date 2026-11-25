@@ -92,10 +92,14 @@ events.onUpdate?.(planUpdate({ planId, revision, planStatus: 'active', holdingAp
   removed, fullwidth forms are folded (NFKC) and every Unicode space becomes a
   plain one, the title is capped at 160 characters, and it cannot begin with
   one of the labels above. A title is shown with `Step: ` in front when it
-  does not begin with a letter or digit (any bracket, quote, symbol or emoji,
-  such as `‹you›`, or a look-alike `(you)` spelled with a Cyrillic letter),
-  when its first strong character is right-to-left, or when its first word
-  mixes scripts. Codex plan step text is cleaned the same way.
+  does not begin with an ASCII letter or digit (any bracket, quote, symbol,
+  emoji, accented letter or non-Latin script), when its first strong character
+  is right-to-left, or when it contains `you`, `failed` or `skipped` anywhere
+  in any form: any case, with combining marks, with ASCII stand-ins such as
+  `0` for `o` or `1` for `l`, or with any non-ASCII character in place of a
+  letter (so `(yоu)` with a Cyrillic letter, or `I[fai1ed]I`, is prefixed).
+  The rule is deliberately broad; a false match costs only the prefix. Codex
+  plan step text is cleaned the same way.
 - A snapshot with an unknown state, owner or status, or a bad id, throws
   `PlanProjectionError`.
 
@@ -105,10 +109,14 @@ advertise `plan`. For that client, an items `plan_update` is sent as `plan`, and
 anything else is dropped and reported. A plan with an entry that is not an
 object with a string `content` and a status of `pending`, `in_progress` or
 `completed`, or with a `_meta` (on an entry, the plan or the update) that is
-not a plain object, is not sent at all, and that is reported. Only an object's
-own properties are read, and what is sent is built from the checked fields, so
-nothing else the driver attached goes with it. An entry without a valid
-priority is sent as `medium`, and that is reported too.
+not a plain object, is not sent at all, and that is reported. A `_meta` is sent
+as its JSON serialization read back, so one that serializes as anything but an
+object (an own `toJSON`), or cannot be serialized (a `BigInt`), is refused the
+same way. `plan_removed` follows the same rules. Only an object's own
+properties are read, a read that throws refuses the update (it is reported, not
+thrown back into the driver), and what is sent is built from the checked
+fields, so nothing else the driver attached goes with it. An entry without a
+valid priority is sent as `medium`, and that is reported too.
 
 ## Why drive a CLI rather than call an API
 
