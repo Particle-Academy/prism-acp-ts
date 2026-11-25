@@ -1859,12 +1859,14 @@ export class CodexDriver implements AgentDriver {
     const entries = value.map((entry, index) => {
       const object = asObject(entry) ?? {};
       const status = asString(object.status);
+      const modelTitle = asString(object.step) ?? asString(object.title);
       if (status !== 'completed' && status !== 'inProgress' && status !== 'pending') {
         this.#recordUnmapped('turn/plan/updated entry had an unknown status', entry);
       }
       return {
-        // Model text, shown beside host plans that use the `(you)` and `[failed]` labels: cleaned the same way.
-        content: planTitle(asString(object.step) ?? asString(object.title) ?? `Step ${index + 1}`),
+        // Model text, shown beside host plans that use the `(you)` and `[failed]` labels: cleaned and prefixed the same
+        // way, so it never stands where a label stands. A step with no text is named by the host, not the model.
+        content: modelTitle === undefined ? `Step ${index + 1}` : planTitle(modelTitle),
         // Required by ACP (G-362): a client built from the schema drops an entry without one. Codex has no priority.
         priority: PLAN_ENTRY_PRIORITY,
         status: status === 'completed' ? 'completed' : status === 'inProgress' ? 'in_progress' : 'pending',

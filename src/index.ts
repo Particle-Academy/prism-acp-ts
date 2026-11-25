@@ -196,9 +196,12 @@ export { CLAUDE_FORCED_SETTINGS, RemoteControlRefused, assertNoRemoteControlArgs
 export type { AvailableModel, ListModelsOptions, SessionModelState } from './models.js';
 export type { Containment, LaunchOptions, ProcessTreeOptions, ProcessTree, ProviderIo, ProviderProcess, StopOptions, StopVerdict } from './process-tree.js';
 export {
+  PLAN_ENTRY_CONTENT_MAX,
   PLAN_ENTRY_PRIORITY,
+  PLAN_META_MAX_BYTES,
   PLAN_STEPS_MAX,
   PLAN_TITLE_MAX,
+  PLAN_TITLE_NEUTRAL,
   PLAN_UNTITLED,
   PlanProjectionError,
   clientAcceptsPlanUpdates,

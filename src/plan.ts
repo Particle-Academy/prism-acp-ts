@@ -3,7 +3,7 @@
  *
  * A host's plan -- prism-harness's, or any driver's that keeps one -- is projected here into the `session/update` a
  * client can read. Any driver can use it; prism-php's `Prism\Acp\Plan\PlanProjection` is the same mapping, row for row, except
- * that its title label guard is still ASCII-only (the look-alike handling below has not reached it yet).
+ * for titles: it still leaves some unprefixed behind an ASCII look-alike check, where this module prefixes every one.
  *
  * ## The shape depends on the client
  *
@@ -24,11 +24,11 @@
  *
  * A step title was written by a model that may have been steered by something it read. It is cleaned (terminal
  * escapes, controls, invisible and bidi characters become spaces; NFKC folds fullwidth forms; every Unicode space
- * becomes an ASCII one), bounded, and cannot begin with one of the labels this module writes -- otherwise a finished
- * step titled "[failed] ..." would read as failed, and an agent step titled "(you) ..." would read as the person's.
- * A title that does not open with an ASCII letter or digit, or that holds a label word in any form (a homoglyph such
- * as "(yоu)" with a Cyrillic о, "ᑕꓬꓳꓴᑐ", "I[fai1ed]I"), is prefixed with "Step: ", so nothing that looks like a
- * label stands where a host label stands.
+ * becomes an ASCII one) and bounded. A finished step titled "[failed] ..." must not read as failed, and an agent step
+ * titled "(you) ..." must not read as the person's, so the rule is structural rather than a list of look-alikes: an
+ * entry's text is the host's own labels (`[failed] `, `[skipped] `, `(you) `, written only from the step's state and
+ * owner), then {@link PLAN_TITLE_NEUTRAL}, then the model's title. Model text therefore never stands where a label
+ * stands, whatever it spells. The only entry text without the prefix is the host's {@link PLAN_UNTITLED}.
  *
  * ## A malformed snapshot is refused
  *
@@ -81,6 +81,16 @@ export const PLAN_STEPS_MAX = 50;
 export const PLAN_ENTRY_PRIORITY = 'medium';
 /** Shown for a title that is empty once cleaned. */
 export const PLAN_UNTITLED = 'Untitled step';
+/**
+ * The longest plan entry `content` `AcpAgent` sends, in code points. A longer one refuses the whole update, and that
+ * is reported. Room for the host's labels and a {@link PLAN_TITLE_MAX} title many times over; a step is one line.
+ */
+export const PLAN_ENTRY_CONTENT_MAX = 1024;
+/**
+ * The largest `_meta` `AcpAgent` sends on a plan update or one of its entries, in UTF-8 bytes of its JSON. A larger
+ * one refuses the whole update, and that is reported.
+ */
+export const PLAN_META_MAX_BYTES = 16384;
 
 export class PlanProjectionError extends Error {
   constructor(message: string) {
@@ -113,59 +123,12 @@ const ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 const HIDDEN = /[\u{0000}-\u{001F}\u{007F}-\u{009F}\p{Cf}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{034F}\u{180B}-\u{180F}\u{2800}\u{115F}\u{1160}\u{3164}\u{FFA0}\u{2028}\u{2029}\u{D800}-\u{DFFF}]/gu;
 /** Every Unicode space separator (no-break, ideographic, em, thin, ...). Each becomes an ASCII space. */
 const SPACES = /\p{Zs}/gu;
+/** Spaces and combining marks a cleaned title may not begin with; they are removed. */
+const LEADING = /^[ \p{M}]+/u;
 /**
- * What a title may not begin with: the labels this module writes (ASCII, case-insensitive, after NFKC has folded
- * fullwidth forms), and any leading spaces or combining marks. One linear pass: the alternatives start with
- * different characters, so the run cannot backtrack.
+ * Put before every model-written title, so the text at the start of an entry is always the host's: its labels, then
+ * this. Counted in {@link PLAN_TITLE_MAX}.
  */
-const LEADING = /^(?:\[failed\]|\[skipped\]|\(you\)|[ \p{M}])+/iu;
-/**
- * What a title may open with and stand unprefixed: an ASCII letter or digit, nothing else. This is an allow-list on
- * purpose, and a narrow one. Asking which characters look like a bracket, a bar or a Latin letter can never be
- * finished -- `‹you›`, `꒰you꒱` (Yi), `ᑕꓬꓳꓴᑐ` (Canadian syllabics around Lisu), `ǀ[failed]ǀ` (Latin click letters) all
- * read as a label -- so anything else is prefixed with {@link PLAN_TITLE_NEUTRAL}, at the cost of a `Step: ` before
- * a title that opens with an accented letter, a non-Latin script, an emoji or a quotation mark.
- */
-const OPENS_PLAIN = /^[A-Za-z0-9]/;
-/**
- * The first run of three ASCII letters: the first real word. Everything before it, and the whole first word, is the
- * title's opening; see {@link opensLikeLabel}.
- */
-const FIRST_WORD = /[A-Za-z]{3}/;
-/** Anything in a title's opening but an ASCII letter, digit or space. */
-const NOT_PLAIN = /[^A-Za-z0-9 ]/;
-/**
- * Letters and digits of the right-to-left scripts (bidi classes R and AL: Hebrew, Arabic, Syriac, Thaana, NKo, ...
- * and the supplementary-plane RTL scripts). A title whose first strong character is one of these is laid out right
- * to left by a client that renders it with `dir="auto"`, which can bring a `(you)` inside it to the visual start, so
- * it is prefixed too.
- */
-const RTL = /^[\u{0590}-\u{08FF}\u{FB1D}-\u{FDFF}\u{FE70}-\u{FEFF}\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]$/u;
-const LETTER = /^\p{L}$/u;
-const LETTER_OR_DIGIT = /^[\p{L}\p{N}]$/u;
-/** Any one character outside ASCII. */
-const NON_ASCII = '[^\\u0000-\\u007F]';
-/** The ASCII characters that pass for an i or an l. */
-const BAR = '[il1|!]';
-/** Each letter of a label word, and the ASCII that passes for it. */
-const LOOKALIKE: Readonly<Record<string, string>> = {
-  y: 'y', o: '[o0]', u: '[uv]', f: 'f', a: '[a4@]', i: BAR, l: BAR, e: '[e3]', d: '(?:d|cl)', s: '[s5$]',
-  k: `(?:k|${BAR}[<c])`, p: 'p',
-};
-/**
- * The words of the labels this module writes, spelled so that any look-alike matches: each letter is the ASCII
- * letter, the ASCII that passes for it (`I`/`l`/`1`/`|`/`!` for i and l, `0` for o, `v` for u, `cl` for d, `|<` for
- * k, ...), or ANY character outside ASCII. A title holding one of these anywhere, in any case, is prefixed. Matching
- * every non-ASCII character as every letter is crude on purpose: no list of confusables is ever complete, and a
- * false match costs only a `Step: ` before the title. Read after NFKC (fullwidth and mathematical letters are ASCII
- * by then) and with combining marks removed, so `yóu` reads as `you`.
- */
-const LABEL_WORDS = new RegExp(
-  ['you', 'failed', 'skipped'].map((word) => Array.from(word, (letter) => `(?:${LOOKALIKE[letter]!}|${NON_ASCII})`).join('')).join('|'),
-  'iu',
-);
-const MARKS = /\p{M}/gu;
-/** Put before a title whose opening could read as a label; see {@link OPENS_PLAIN} and {@link LABEL_WORDS}. */
 export const PLAN_TITLE_NEUTRAL = 'Step: ';
 
 /**
@@ -218,6 +181,7 @@ export function planEntry(step: PlanStep): { content: string; priority: string; 
   if (typeof step.title !== 'string') throw new PlanProjectionError('a step title must be a string');
   const approvalId = optionalId(step.approvalId, 'approvalId');
 
+  // The host's labels, from the step's state and owner and nothing else; the model's title follows, always prefixed.
   const label = (step.state === 'failed' ? '[failed] ' : step.state === 'skipped' ? '[skipped] ' : '') + (owner === 'human' ? '(you) ' : '');
   return {
     content: label + planTitle(step.title),
@@ -227,41 +191,21 @@ export function planEntry(step: PlanStep): { content: string; priority: string; 
   };
 }
 
-/** A model-written title, made safe to show: one line, nothing hidden, no host label, at most {@link PLAN_TITLE_MAX}. */
+/**
+ * A model-written title, made safe to show: one line, nothing hidden, always opening with {@link PLAN_TITLE_NEUTRAL},
+ * at most {@link PLAN_TITLE_MAX} code points with the prefix. A title that cleans down to nothing is the host's
+ * {@link PLAN_UNTITLED}.
+ */
 export function planTitle(value: string): string {
-  // NFKC folds fullwidth and other compatibility forms ("［failed］") onto the ASCII the label check reads. Every
+  // NFKC folds fullwidth and other compatibility forms onto ASCII, so what is shown is what a reader sees. Every
   // Unicode space becomes an ASCII one and runs collapse, so trimming is one character at each end.
   const cleaned = stripAnsiControlSequences(value).text.normalize('NFKC').replace(HIDDEN, ' ').replace(SPACES, ' ').replace(/ {2,}/g, ' ');
-  let text = trimSpace(cleaned.replace(LEADING, ''));
-  // Whatever is left may still LOOK like a label ("(yоu)" with a Cyrillic о, "ᑕꓬꓳꓴᑐ", "l(y0u)l"). The question is
-  // what it looks like, not which code points it is, so only a plain ASCII opening with no label word stands alone.
-  if (text !== '' && opensLikeLabel(text)) text = PLAN_TITLE_NEUTRAL + text;
+  const title = trimSpace(cleaned.replace(LEADING, ''));
+  if (title === '') return PLAN_UNTITLED;
+  // Always prefixed: the start of an entry belongs to the host, so no spelling of the title can take a label's place.
+  const text = PLAN_TITLE_NEUTRAL + title;
   const points = Array.from(text);
-  if (points.length > PLAN_TITLE_MAX) text = trimSpace(points.slice(0, PLAN_TITLE_MAX - 1).join('')) + '…';
-  return text === '' ? PLAN_UNTITLED : text;
-}
-
-/**
- * Whether a cleaned title must be prefixed: it opens with anything but an ASCII letter or digit, its opening (the
- * first word, and everything before the first run of three ASCII letters) holds anything but ASCII letters, digits
- * and spaces, its first strong character is right-to-left, or it holds a label word in any form ({@link LABEL_WORDS}).
- *
- * The opening rule is structural, and it is the one that cannot be out-spelled: a label needs a bracket, a bar or
- * some other mark around its word, and ASCII alone can spell that word in more ways than any look-alike table lists
- * (`I[FAILE|)]I`, `l(Y()U)l`, `l(|_|)l`). So any punctuation there prefixes the title, whatever it spells, at the cost
- * of a `Step: ` before `Don't ...`, `e.g. ...` or `v1.2 ...`.
- */
-function opensLikeLabel(text: string): boolean {
-  if (!OPENS_PLAIN.test(text)) return true;
-  const space = text.indexOf(' ');
-  const word = FIRST_WORD.exec(text);
-  const opening = text.slice(0, Math.max(space === -1 ? text.length : space, word === null ? text.length : word.index));
-  if (NOT_PLAIN.test(opening)) return true;
-  for (const point of text) {
-    if (LETTER_OR_DIGIT.test(point) && RTL.test(point)) return true;
-    if (LETTER.test(point)) break;
-  }
-  return LABEL_WORDS.test(text.normalize('NFD').replace(MARKS, ''));
+  return points.length > PLAN_TITLE_MAX ? trimSpace(points.slice(0, PLAN_TITLE_MAX - 1).join('')) + '…' : text;
 }
 
 /** Remove one space from each end. Callers have already collapsed runs of spaces, so one is all there can be. */

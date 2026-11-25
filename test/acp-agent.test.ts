@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AcpAgent, PROTOCOL_VERSION, type AcpAgentOptions, type AgentDriver, type DriverEvents } from '../src/acp/agent.js';
 import { JsonRpcPeer } from '../src/jsonrpc.js';
+import { PLAN_ENTRY_CONTENT_MAX, PLAN_META_MAX_BYTES } from '../src/plan.js';
 import type { TurnOutcome } from '../src/claude/driver.js';
 import { sessionNotificationProblems, sessionUpdateProblems } from './acp-schema.js';
 
@@ -1135,9 +1136,66 @@ describe('plan updates and the client capability (G-362)', () => {
     };
     s.driver.emit(flipping() as never);
     s.driver.emit(proxied() as never);
-    const wire = JSON.parse(JSON.stringify(s.updates())) as { update: Record<string, unknown> }[];
-    expect(wire.map((u) => u.update.sessionUpdate)).toEqual(['agent_message_chunk', 'agent_message_chunk']);
+    // The kind is checked on the first read and again on the serialization that is sent; one that changes between
+    // the two is not sent at all, and that is reported.
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toEqual([
+      'update was not sent: it does not serialize as an object of the kind it declares',
+      'update was not sent: it does not serialize as an object of the kind it declares',
+    ]);
+  });
+
+  it.each([{ plan: {} }, {}])('sends what it checked: an own toJSON cannot replace a chunk with a plan (client %j)', async (caps) => {
+    // The transport serializes with JSON.stringify, which calls an own toJSON. What is sent must be what the gate
+    // checked, so the update is read as it serializes, and one that serializes as another kind is refused.
+    const s = await session(caps);
+    const chunk = (wire: unknown) => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' }, toJSON: () => wire });
+    s.driver.emit(chunk({ sessionUpdate: 'plan_removed', planId: 'pl_x', extra: 1 }) as never);
+    s.driver.emit(chunk({ sessionUpdate: 'plan', entries: [{ content: 5, status: 'bogus' }] }) as never);
+    s.driver.emit(chunk(undefined) as never);
+    s.driver.emit(chunk('agent_message_chunk') as never);
+    expect(() => s.driver.emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi', n: BigInt(1) } } as never)).not.toThrow();
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toEqual(Array(5).fill('update was not sent: it does not serialize as an object of the kind it declares'));
+    // One whose toJSON keeps the kind is sent as that serialization: a plain object, never the driver's own.
+    const same = chunk({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'serialized' } });
+    s.driver.emit(same as never);
+    const sent = s.updates()[0]!.update as Record<string, unknown>;
+    expect(sent).toEqual({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'serialized' } });
+    expect(sent).not.toBe(same);
+    expect(Object.hasOwn(sent, 'toJSON')).toBe(false);
+    expect(Object.getPrototypeOf(sent)).toBe(Object.prototype);
+    expect(sessionNotificationProblems(JSON.parse(JSON.stringify(s.updates()[0])))).toEqual([]);
+    expect(s.problems).toHaveLength(5);
+  });
+
+  it.each([{ plan: {} }, {}])('refuses, and reports, an entry content or a _meta over the documented caps (client %j)', async (caps) => {
+    const s = await session(caps);
+    expect(PLAN_ENTRY_CONTENT_MAX).toBe(1024);
+    expect(PLAN_META_MAX_BYTES).toBe(16384);
+    // JSON {"k":"..."} is eight bytes around the value; é is two bytes in UTF-8 and one code point.
+    const meta = (bytes: number) => ({ k: 'x'.repeat(bytes - 8) });
+    const wideMeta = { k: 'é'.repeat(8189) }; // 16386 bytes, 8197 characters
+    const full = { content: 'é'.repeat(PLAN_ENTRY_CONTENT_MAX), priority: 'medium', status: 'pending', _meta: meta(PLAN_META_MAX_BYTES) };
+    s.driver.emit({ sessionUpdate: 'plan', entries: [full], _meta: meta(PLAN_META_MAX_BYTES) } as never);
+    expect(s.updates()).toHaveLength(1);
     expect(s.problems).toEqual([]);
+    const over = { ...full, content: full.content + 'x' };
+    const bad: unknown[] = [
+      { sessionUpdate: 'plan', entries: [over] },
+      { sessionUpdate: 'plan', entries: [{ ...full, _meta: meta(PLAN_META_MAX_BYTES + 1) }] },
+      { sessionUpdate: 'plan', entries: [{ ...full, _meta: wideMeta }] },
+      { sessionUpdate: 'plan', entries: [full], _meta: meta(PLAN_META_MAX_BYTES + 1) },
+      { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [over] } },
+      { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [full], _meta: meta(PLAN_META_MAX_BYTES + 1) } },
+      { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [full] }, _meta: wideMeta },
+      { sessionUpdate: 'plan_removed', planId: 'pl_1', _meta: meta(PLAN_META_MAX_BYTES + 1) },
+    ];
+    for (const update of bad) expect(() => s.driver.emit(update as never)).not.toThrow();
+    expect(s.updates()).toHaveLength(1);
+    expect(s.problems).toHaveLength(bad.length);
+    // A client without plan support is refused plan_removed before its _meta is read; every other refusal names the cap.
+    for (const problem of 'plan' in caps ? s.problems : s.problems.slice(0, -1)) expect(problem).toMatch(/larger than/);
   });
 
   it('does not send an update whose kind is not its own string', async () => {
