@@ -56,7 +56,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   const uuid = value.uuid;
   if (!initialized) {
     initialized = true;
-    send({ type: 'system', subtype: 'init', session_id: SESSION, model: 'claude-sonnet-4-6', tools: [], mcp_servers: [] });
+    send({ type: 'system', subtype: 'init', session_id: SESSION, model: 'claude-sonnet-5-5', tools: [], mcp_servers: [] });
   }
   if (text.startsWith('OVERLOADED') ) {
     if (text === 'OVERLOADED-RETRIED') { send(apiRetry(1, 3037)); send(apiRetry(2, 3080)); }

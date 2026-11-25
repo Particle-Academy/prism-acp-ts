@@ -27,7 +27,7 @@ if (mode === 'claude-native-mcp') {
     binaryArgs: ['--preserve-symlinks', '--preserve-symlinks-main', root + '/program/claude-restricted-loopback.mjs', root + '/program/claude.exe', 'http://127.0.0.1:1', root + '/workspace/owned-native-launch.json'],
     parentEnv: { ...process.env, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' },
     allowEnv: ['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', 'DISABLE_AUTOUPDATER', 'DISABLE_TELEMETRY', 'DISABLE_ERROR_REPORTING'],
-    credentials: { mode: 'apiKey', apiKey: 'owned-restricted-synthetic-key', home }, nativeTools: 'none', model: 'claude-sonnet-4-6',
+    credentials: { mode: 'apiKey', apiKey: 'owned-restricted-synthetic-key', home }, nativeTools: 'none', model: 'claude-sonnet-5-5',
     mcpServers: [{ name: 'owned', command: process.execPath, args: ['--preserve-symlinks', '--preserve-symlinks-main', root + '/program/claude-restricted-mcp.mjs', marker], env: [] }],
     processTree: { windowsStdio: 'local-pipes', startupTimeoutMs: 2000 },
   }, { onProtocolError: reason => refuse(new Error(reason)), onUpdate: update => { if (update.sessionUpdate === 'notice' && update.notice?.message === 'session started') finish(); } });

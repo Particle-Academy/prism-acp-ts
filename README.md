@@ -1298,7 +1298,7 @@ path before launch. Helper preparation errors remain distinct from native
 `CreateDirectoryW` failures, which report their Windows error number and cause
 without printing paths. The library never creates a missing parent as a fallback.
 
-The native regression uses a synthetic key, `claude-sonnet-4-6` request shape and
+The native regression uses a synthetic key, `claude-sonnet-5-5` request shape and
 owned loopback model/MCP servers. It proves a supplied MCP call, refusals of forced
 Bash/Read/Write/WebFetch/inherited-MCP calls, and cancel/stop cleanup. Its
 unrestricted control loads a planted inherited server and runs a planted hook.
