@@ -132,6 +132,10 @@ const ID = /^[A-Za-z0-9_.:-]{1,128}$/;
  * the line/paragraph separators and lone surrogates. PHP's `PlanProjection::HIDDEN` is the same set.
  */
 const HIDDEN = /[\u{0000}-\u{001F}\u{007F}-\u{009F}\p{Cf}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{034F}\u{180B}-\u{180F}\u{2800}\u{115F}\u{1160}\u{3164}\u{FFA0}\u{2028}\u{2029}\u{D800}-\u{DFFF}]/gu;
+/** Whether text holds a character {@link HIDDEN} names: a control, format, invisible or lone-surrogate character. */
+export function holdsHiddenCharacter(value: string): boolean {
+  return new RegExp(HIDDEN.source, 'u').test(value);
+}
 /** Every Unicode space separator (no-break, ideographic, em, thin, ...). Each becomes an ASCII space. */
 const SPACES = /\p{Zs}/gu;
 /** Spaces and combining marks a cleaned title may not begin with; they are removed. */

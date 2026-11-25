@@ -333,6 +333,14 @@ describe('retryAfterMs: only what the provider stated, bounded', () => {
     for (const reason of ['', 7, null, undefined]) expect(await externalSession().fail({ reason, kind: 'overloaded' })).toBeNull();
   });
 
+  it('keeps a fractional reset, rounded up; drops a negative or non-finite one', async () => {
+    expect((await externalSession().fail({ reason: 'r', kind: 'rate_limit', resetsAtMs: 1_792_302_600_000.4 })).resetsAtMs).toBe(1_792_302_600_001);
+    expect((await externalSession().fail({ reason: 'r', kind: 'rate_limit', resetsAtMs: 1_792_302_600_000 })).resetsAtMs).toBe(1_792_302_600_000);
+    for (const resetsAtMs of [-1, Number.NaN, Number.POSITIVE_INFINITY, 1e300, '1']) {
+      expect(await externalSession().fail({ reason: 'r', kind: 'rate_limit', resetsAtMs })).not.toHaveProperty('resetsAtMs');
+    }
+  });
+
   it('resumable is never true for a session whose agent is not running, nor for a non-boolean claim', async () => {
     expect((await externalSession(() => false).fail({ reason: 'r', kind: 'overloaded', resumable: true })).resumable).toBe(false);
     expect(Object.hasOwn(await externalSession().fail({ reason: 'r', kind: 'overloaded', resumable: 'yes' }), 'resumable')).toBe(false);

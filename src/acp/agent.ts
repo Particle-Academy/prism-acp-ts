@@ -29,7 +29,7 @@ import type { StopReason, TurnOutcome } from '../claude/driver.js';
 import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, META_MODEL_INFO, META_PERMISSION_REASON, META_TURN_FAILURE, withMeta } from '../meta.js';
 import type { SessionModelState } from '../models.js';
 import { observeStopVerdict } from '../stop-verdict.js';
-import { clientAcceptsPlanUpdates, PLAN_ENTRIES_MAX, PLAN_ENTRY_CONTENT_MAX, PLAN_ENTRY_PRIORITY, PLAN_ID_MAX, PLAN_MARKDOWN_MAX, PLAN_META_MAX_BYTES, PLAN_PATH_MAX, type PlanClient } from '../plan.js';
+import { clientAcceptsPlanUpdates, holdsHiddenCharacter, PLAN_ENTRIES_MAX, PLAN_ENTRY_CONTENT_MAX, PLAN_ENTRY_PRIORITY, PLAN_ID_MAX, PLAN_MARKDOWN_MAX, PLAN_META_MAX_BYTES, PLAN_PATH_MAX, type PlanClient } from '../plan.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
 import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
 import type { PingOptions } from '../liveness.js';
@@ -254,6 +254,13 @@ const MALFORMED_SNAPSHOT = 'update was not sent: it does not serialize as an obj
 const OVERSIZE_ENTRIES = `plan update was not sent: it has more than ${PLAN_ENTRIES_MAX} entries`;
 const OVERSIZE_MARKDOWN = `plan update was not sent: its markdown content is larger than ${PLAN_MARKDOWN_MAX} code points or its path larger than ${PLAN_PATH_MAX}`;
 const OVERSIZE_PLAN_ID = `plan update was not sent: its planId is larger than ${PLAN_ID_MAX} code points`;
+const HIDDEN_PLAN_ID = 'plan update was not sent: its planId holds a control, format or invisible character';
+
+/** Why a planId may not be sent, or undefined: over the cap, or holding a character a client would not show. */
+function planIdProblem(planId: string): string | undefined {
+  if (longerThan(planId, PLAN_ID_MAX)) return OVERSIZE_PLAN_ID;
+  return holdsHiddenCharacter(planId) ? HIDDEN_PLAN_ID : undefined;
+}
 
 /**
  * A property the object itself holds, read once. Inherited values are not read: a check that sees them passes an
@@ -313,9 +320,13 @@ type CheckedEntry = { content: string; priority: string | undefined; status: str
 function checkedPlanEntries(entries: readonly unknown[]): CheckedEntry[] | string {
   // Counted before any entry is read: a model-written plan can hold any number of steps, and every update replaces the
   // client's whole plan.
-  if (entries.length > PLAN_ENTRIES_MAX) return OVERSIZE_ENTRIES;
+  // The length is read ONCE and the entries by index: an own iterator, or a Proxy answering `length` differently each
+  // time, would otherwise pass the count and then yield any number of entries.
+  const count: unknown = entries.length;
+  if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 || count > PLAN_ENTRIES_MAX) return OVERSIZE_ENTRIES;
   const out: CheckedEntry[] = [];
-  for (const entry of entries) {
+  for (let index = 0; index < count; index += 1) {
+    const entry = entries[index];
     const object = asObject(entry);
     if (object === undefined) return MALFORMED_ENTRIES;
     const content = own(object, 'content'), status = own(object, 'status'), priority = own(object, 'priority');
@@ -778,7 +789,8 @@ export class AcpAgent {
           return refuse('plan_update that is not an ACP plan update was not sent');
         }
         if (!this.#clientAcceptsPlan && !items) return refuse('plan_update was not sent: the client did not advertise plan updates');
-        if (longerThan(planId, PLAN_ID_MAX)) return refuse(OVERSIZE_PLAN_ID);
+        const idProblem = planIdProblem(planId);
+        if (idProblem !== undefined) return refuse(idProblem);
         if (markdown && (longerThan(content as string, PLAN_MARKDOWN_MAX) || (typeof path === 'string' && longerThan(path, PLAN_PATH_MAX)))) {
           return refuse(OVERSIZE_MARKDOWN);
         }
@@ -799,7 +811,8 @@ export class AcpAgent {
         const planId = asString(own(update, 'planId'));
         if (planId === undefined || planId === '') return refuse('plan_removed without a planId was not sent');
         if (!this.#clientAcceptsPlan) return refuse('plan_removed was not sent: the client did not advertise plan updates');
-        if (longerThan(planId, PLAN_ID_MAX)) return refuse(OVERSIZE_PLAN_ID);
+        const removedProblem = planIdProblem(planId);
+        if (removedProblem !== undefined) return refuse(removedProblem);
         const meta = planMeta(own(update, '_meta'));
         if (!meta.ok) return refuse(meta.problem!);
         return withMeta({ sessionUpdate: 'plan_removed', planId }, meta.meta);

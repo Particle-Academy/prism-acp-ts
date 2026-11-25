@@ -77,7 +77,7 @@ const MAX_DETAILS = 16;
  * `toJSON`, a getter or a Proxy would decide what is sent after any check; the failure is therefore read ONCE, as it
  * serializes, and only the documented fields are taken from that snapshot, each checked:
  *   reason (non-empty string, bounded and marked as provider text), kind (one of the five, else `other`),
- *   resetsAtMs (non-negative safe integer), providerMessage (string, bounded and marked), providerDetails (at most
+ *   resetsAtMs (finite, 0 or more, rounded up to a whole millisecond), providerMessage (string, bounded and marked), providerDetails (at most
  *   16 plain-named scalar fields, strings bounded and marked);
  *   retryable from the kind alone; retryAfterMs bounded and only on a retryable failure; resumable the driver's boolean
  *   claim, and false whatever it said when the agent is no longer running -- as of this reply: an agent that exits
@@ -98,7 +98,10 @@ export function wireTurnFailure(failure: unknown, agentRunning: boolean): TurnFa
   if (typeof reason !== 'string' || reason === '') return undefined;
   const kindValue = own(snapshot, 'kind');
   const kind: TurnFailureKind = typeof kindValue === 'string' && KINDS.has(kindValue) ? kindValue as TurnFailureKind : 'other';
+  // A finite time of 0 or more, rounded up to a whole millisecond: fractional seconds from a provider keep their reset.
   const resetsAtMs = own(snapshot, 'resetsAtMs');
+  const reset = typeof resetsAtMs === 'number' && Number.isFinite(resetsAtMs) && resetsAtMs >= 0 && resetsAtMs <= Number.MAX_SAFE_INTEGER
+    ? Math.ceil(resetsAtMs) : undefined;
   const message = own(snapshot, 'providerMessage');
   const details = wireDetails(own(snapshot, 'providerDetails'));
   const retryable = isRetryableKind(kind);
@@ -108,7 +111,7 @@ export function wireTurnFailure(failure: unknown, agentRunning: boolean): TurnFa
   return {
     reason: boundProviderText(reason, WIRE_TEXT_MAX),
     kind,
-    ...(typeof resetsAtMs === 'number' && Number.isSafeInteger(resetsAtMs) && resetsAtMs >= 0 ? { resetsAtMs } : {}),
+    ...(reset === undefined ? {} : { resetsAtMs: reset }),
     ...(typeof message === 'string' && message !== '' ? { providerMessage: boundProviderText(message, WIRE_TEXT_MAX) } : {}),
     ...(details === undefined ? {} : { providerDetails: details }),
     ...(retryable ? { retryable: true as const } : {}),

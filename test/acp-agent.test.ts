@@ -1217,6 +1217,39 @@ describe('plan updates and the client capability (G-362)', () => {
     expect(s.problems).toEqual([`plan update was not sent: it has more than ${PLAN_ENTRIES_MAX} entries`, `plan update was not sent: it has more than ${PLAN_ENTRIES_MAX} entries`]);
   });
 
+  it('counts the entries it reads: an own iterator or a Proxy lying about length cannot pass more than the cap', async () => {
+    const s = await session({ plan: {} });
+    const many = Array.from({ length: 5000 }, (_, i) => ({ content: `step ${i}`, priority: 'medium', status: 'pending' }));
+    // Length 0, and an own iterator yielding 5000: read by index, it is an empty plan, never 5000 entries.
+    const iterating = Object.assign([] as unknown[], { [Symbol.iterator]: function* () { yield* many; } });
+    s.driver.emit({ sessionUpdate: 'plan', entries: iterating } as never);
+    // A Proxy whose length is 1 on the first read and 300 after.
+    let reads = 0;
+    const lying = new Proxy(many.slice(0, 300), { get(target, key, receiver) { if (key === 'length') return ++reads === 1 ? 1 : 300; return Reflect.get(target, key, receiver); } });
+    s.driver.emit({ sessionUpdate: 'plan', entries: lying } as never);
+    // And one whose length is not a count at all.
+    const odd = new Proxy([], { get(target, key, receiver) { return key === 'length' ? Number.POSITIVE_INFINITY : Reflect.get(target, key, receiver); } });
+    s.driver.emit({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: odd } } as never);
+    const sentCounts = s.updates().map((u) => ((u.update as Record<string, unknown>).entries as unknown[] | undefined)?.length);
+    for (const n of sentCounts) expect(n ?? 0).toBeLessThanOrEqual(1);
+    expect(sentCounts.length + s.problems.length).toBe(3);
+  });
+
+  it('refuses, and reports, a planId holding a control, format or invisible character', async () => {
+    const s = await session({ plan: {} });
+    const ids = ['pl\u202E1', 'pl\u001b[31m', 'pl\u200B', 'pl\u0000', 'pl\uD800'];
+    for (const planId of ids) {
+      s.driver.emit({ sessionUpdate: 'plan_update', plan: { type: 'items', planId, entries: [entry] } } as never);
+      s.driver.emit({ sessionUpdate: 'plan_removed', planId } as never);
+    }
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toHaveLength(ids.length * 2);
+    for (const problem of s.problems) expect(problem).toBe('plan update was not sent: its planId holds a control, format or invisible character');
+    // The control: an ordinary id, including non-ASCII letters, is sent.
+    s.driver.emit({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'plan_é.1:a-b', entries: [entry] } } as never);
+    expect(s.updates()).toHaveLength(1);
+  });
+
   it('refuses, and reports, markdown content, a path or a planId over the documented caps', async () => {
     const s = await session({ plan: {} });
     expect([PLAN_MARKDOWN_MAX, PLAN_PATH_MAX, PLAN_ID_MAX]).toEqual([65536, 4096, 256]);
