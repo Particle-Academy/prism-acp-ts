@@ -178,7 +178,7 @@ export type { Served, ServeOptions } from './acp/stdio.js';
 
 export { cliSessionIdOf, turnOutcomeOf } from './claude/driver.js';
 export type { StopReason, TurnOutcome } from './claude/driver.js';
-export { ClaudeTurnFailures, codexFailureOf } from './turn-failure.js';
+export { ClaudeTurnFailures, MAX_RETRY_AFTER_MS, boundRetryAfterMs, codexFailureOf, isRetryableKind, wireTurnFailure } from './turn-failure.js';
 export type { CodexFailureOptions, TurnFailure, TurnFailureKind } from './turn-failure.js';
 
 export { CODEX_DRIVER_CAPABILITIES, CodexDriver } from './codex/driver.js';

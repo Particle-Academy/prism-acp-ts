@@ -29,9 +29,70 @@ export interface TurnFailure {
    * are bounded and marked as `providerMessage` is. Absent when none was sent.
    */
   readonly providerDetails?: Readonly<Record<string, string | number>>;
+  /**
+   * True when waiting and sending the prompt again is the remedy: `overloaded` and `rate_limit`, and nothing else. It
+   * follows the kind alone ({@link isRetryableKind}); absent on every other kind, which is no claim either way.
+   */
+  readonly retryable?: true;
+  /**
+   * How long the PROVIDER asked to wait, in milliseconds, when it said and the driver could read it. Never invented:
+   * not a backoff of ours, and not a CLI's own retry wait (Claude Code's `api_retry.retry_delay_ms` is its jittered
+   * wait, not the provider's statement). An integer from 0 to {@link MAX_RETRY_AFTER_MS}; only on a retryable failure.
+   * Neither shipped CLI forwards the provider's `retry-after` (Claude Code 2.1.332, codex-cli 0.163.0, measured), so
+   * today it comes only from an embedder's own driver.
+   */
+  readonly retryAfterMs?: number;
+  /**
+   * Whether the SAME session takes the next `session/prompt` and continues the conversation. True only where measured:
+   * the shipped drivers on `overloaded` and `rate_limit`, and only while the agent process is still running. False when
+   * the session's agent is gone. Absent means no claim.
+   */
+  readonly resumable?: boolean;
 }
 
 export type TurnFailureKind = 'rate_limit' | 'overloaded' | 'auth' | 'billing' | 'other';
+
+/** The longest retry-after forwarded: one hour. A longer statement is capped to it, so a client never parks forever. */
+export const MAX_RETRY_AFTER_MS = 3_600_000;
+
+/** Whether a kind is one a client should wait out and retry. */
+export function isRetryableKind(kind: TurnFailureKind): boolean {
+  return kind === 'overloaded' || kind === 'rate_limit';
+}
+
+/** A stated retry-after, bounded: a finite number of ms >= 0, rounded up to an integer and capped; anything else undefined. */
+export function boundRetryAfterMs(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.min(Math.ceil(value), MAX_RETRY_AFTER_MS);
+}
+
+/**
+ * A failure as the wire carries it. `retryable` is set from the kind alone; `retryAfterMs` is kept only bounded and
+ * only on a retryable failure; `resumable` is the driver's boolean claim, and false whatever it said when the agent is
+ * no longer running. Every other field passes as the driver gave it.
+ */
+export function wireTurnFailure(failure: TurnFailure, agentRunning: boolean): TurnFailure {
+  const { retryable: _retryable, retryAfterMs, resumable, ...rest } = failure;
+  const retryable = isRetryableKind(rest.kind);
+  const after = retryable ? boundRetryAfterMs(retryAfterMs) : undefined;
+  const claim = typeof resumable === 'boolean' ? resumable : undefined;
+  const resume = agentRunning ? claim : false;
+  return {
+    ...rest,
+    ...(retryable ? { retryable: true as const } : {}),
+    ...(after === undefined ? {} : { retryAfterMs: after }),
+    ...(resume === undefined ? {} : { resumable: resume }),
+  };
+}
+
+/**
+ * A shipped driver's failure, with what was MEASURED of its CLI: on a retryable kind the process stays and the next
+ * prompt continues the conversation (Claude Code 2.1.332 and codex-cli 0.163.0 against a loopback model answering 529
+ * and 429, 2026-11-25), so `retryable` and `resumable` are true. No retry-after: neither CLI forwards one.
+ */
+function measured(failure: TurnFailure): TurnFailure {
+  return isRetryableKind(failure.kind) ? { ...failure, retryable: true, resumable: true } : failure;
+}
 
 /**
  * Claude Code's assistant `error` values, from its own schema (claude-code 2.1.301). An unknown value is `other`, never
@@ -63,8 +124,21 @@ const CODEX_KINDS: Readonly<Record<string, TurnFailureKind>> = {
  * One Claude turn's failure, read from the frames as they pass. Fed every frame the driver accepts; `take()` at the
  * turn's `result` returns the failure (if any) and starts the next turn clean.
  */
+/**
+ * The kind of a Claude failure whose `error` names none, from the HTTP status and API error type the CLI carries beside
+ * it. Claude Code 2.1.332 ends a 529 with `error: "server_error"`, `api_error_status: 529` and `api_error_type:
+ * "overloaded_error"` (measured): read by `error` alone it was `other`, and nothing retried it.
+ */
+function claudeKindOf(status: number | null, type: string | null): TurnFailureKind {
+  if (status === 529 || type === 'overloaded_error') return 'overloaded';
+  if (status === 429 || type === 'rate_limit_error') return 'rate_limit';
+  return 'other';
+}
+
 export class ClaudeTurnFailures {
   #reason: string | null = null;
+  #status: number | null = null;
+  #type: string | null = null;
   #resetsAtMs: number | null = null;
 
   observe(frame: unknown): void {
@@ -76,6 +150,10 @@ export class ClaudeTurnFailures {
     if (value.type === 'assistant' && typeof value.error === 'string'
       && (value.parent_tool_use_id === null || value.parent_tool_use_id === undefined)) {
       this.#reason = value.error;
+      const status = own(value, 'api_error_status');
+      const type = own(value, 'api_error_type');
+      this.#status = typeof status === 'number' && Number.isSafeInteger(status) ? status : null;
+      this.#type = typeof type === 'string' ? type : null;
     }
 
     // A breached window's reset: the only reset this failure may report. An `allowed` event is not a breach.
@@ -92,12 +170,17 @@ export class ClaudeTurnFailures {
   take(): TurnFailure | undefined {
     const reason = this.#reason;
     const resetsAtMs = this.#resetsAtMs;
+    const status = this.#status;
+    const type = this.#type;
     this.#reason = null;
     this.#resetsAtMs = null;
+    this.#status = null;
+    this.#type = null;
     if (reason === null) return undefined;
 
-    const kind = kindOf(CLAUDE_KINDS, reason);
-    return kind === 'rate_limit' && resetsAtMs !== null ? { reason, kind, resetsAtMs } : { reason, kind };
+    const named = kindOf(CLAUDE_KINDS, reason);
+    const kind = named === 'other' ? claudeKindOf(status, type) : named;
+    return measured(kind === 'rate_limit' && resetsAtMs !== null ? { reason, kind, resetsAtMs } : { reason, kind });
   }
 }
 
@@ -145,17 +228,32 @@ export function codexFailureOf(error: unknown, options: CodexFailureOptions = {}
   if (reason === undefined || reason === '') return undefined;
 
   // The code and kind are settled here, from codexErrorInfo alone: nothing the provider wrote below can change them.
-  const failure: TurnFailure = { reason, kind: kindOf(CODEX_KINDS, reason) };
+  const named = kindOf(CODEX_KINDS, reason);
+  const failure: TurnFailure = { reason, kind: named === 'other' ? codexStatusKind(variant) : named };
   const secrets = (options.redact ?? []).filter((secret) => secret !== '');
   const clean = (text: string): string => boundProviderText(secrets.reduce((out, secret) => out.split(secret).join(REDACTED), text));
   const message = own(error, 'message');
   const providerMessage = typeof message === 'string' && message !== '' ? clean(message) : undefined;
   const providerDetails = codexDetails({ error, info: variant, misalignment: own(error, 'misalignment') }, clean);
-  return {
+  return measured({
     ...failure,
     ...(providerMessage === undefined ? {} : { providerMessage }),
     ...(providerDetails === undefined ? {} : { providerDetails }),
-  };
+  });
+}
+
+/**
+ * The kind an HTTP-carrying `codexErrorInfo` variant names by its status. codex-cli 0.163.0 ends a turn whose provider
+ * kept answering 529 with `httpConnectionFailed: { httpStatusCode: 529 }`, and one that kept answering 429 with
+ * `responseTooManyFailedAttempts: { httpStatusCode: 429 }` (measured): neither is `serverOverloaded` or
+ * `rateLimitExceeded`, so read by name alone both were `other`. Only an own integer status counts.
+ */
+function codexStatusKind(variant: unknown): TurnFailureKind {
+  if (!isRecord(variant)) return 'other';
+  const status = own(variant, 'httpStatusCode');
+  if (status === 529) return 'overloaded';
+  if (status === 429) return 'rate_limit';
+  return 'other';
 }
 
 function codexDetails(

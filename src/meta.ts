@@ -334,6 +334,11 @@ export const META_PARENT_TOOL_CALL = metaKey('parent_tool_call_id');
  * A Codex failure may also carry `providerMessage` (the provider's own message) and `providerDetails` (allowlisted
  * scalar detail fields). Both are UNTRUSTED provider text: bounded, with hidden and control characters marked
  * `<U+XXXX>`, and never the source of `reason` or `kind` (G-311).
+ *
+ * Retrying (tynn, 2026-11-25): `retryable: true` on `overloaded` and `rate_limit`, from the kind alone; `retryAfterMs`
+ * only when the provider stated a wait and the driver could read it (bounded to an integer 0..3_600_000, never
+ * invented); `resumable: true` when the same session takes the next prompt and continues the conversation, `false`
+ * when its agent is gone. All three are additions: a client that reads only `reason` and `kind` is unchanged.
  */
 export const META_TURN_FAILURE = metaKey('turn_failure');
 

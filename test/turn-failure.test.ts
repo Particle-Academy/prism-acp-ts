@@ -35,7 +35,7 @@ function claudeTurn(frames: unknown[]) {
 
 describe('Claude: the failure reason rides on the turn outcome', () => {
   it('a turn the CLI ends on rate_limit, with NO rate_limit_event, carries rate_limit', () => {
-    expect(claudeTurn([assistantError('rate_limit'), failedResult])).toEqual({ reason: 'rate_limit', kind: 'rate_limit' });
+    expect(claudeTurn([assistantError('rate_limit'), failedResult])).toEqual({ reason: 'rate_limit', kind: 'rate_limit', retryable: true, resumable: true });
   });
 
   it('the same failed turn without the field carries nothing (the control)', () => {
@@ -44,10 +44,10 @@ describe('Claude: the failure reason rides on the turn outcome', () => {
 
   it('carries the reset time only when a breached rate-limit event in the turn said when', () => {
     expect(claudeTurn([limitEvent('rejected', 1_792_302_600), assistantError('rate_limit'), failedResult]))
-      .toEqual({ reason: 'rate_limit', kind: 'rate_limit', resetsAtMs: 1_792_302_600_000 });
+      .toEqual({ reason: 'rate_limit', kind: 'rate_limit', resetsAtMs: 1_792_302_600_000, retryable: true, resumable: true });
     // An `allowed` event is not a breach, and its reset is not the reset of this failure.
     expect(claudeTurn([limitEvent('allowed', 1_792_302_600), assistantError('rate_limit'), failedResult]))
-      .toEqual({ reason: 'rate_limit', kind: 'rate_limit' });
+      .toEqual({ reason: 'rate_limit', kind: 'rate_limit', retryable: true, resumable: true });
   });
 
   it.each([
@@ -55,7 +55,9 @@ describe('Claude: the failure reason rides on the turn outcome', () => {
     ['cloud_credential_error', 'auth'], ['billing_error', 'billing'], ['account_on_hold', 'billing'],
     ['server_error', 'other'], ['a_reason_added_next_month', 'other'],
   ])('classifies %s as %s, keeping the reason verbatim', (reason, kind) => {
-    expect(claudeTurn([assistantError(reason), failedResult])).toEqual({ reason, kind });
+    // A retryable kind also says so, and that the session takes the next prompt (tynn, 2026-11-25); others claim nothing.
+    const retry = kind === 'overloaded' || kind === 'rate_limit' ? { retryable: true, resumable: true } : {};
+    expect(claudeTurn([assistantError(reason), failedResult])).toEqual({ reason, kind, ...retry });
   });
 
   it('ignores a SUBAGENT\'s error: it is not this turn\'s failure', () => {
@@ -112,7 +114,7 @@ describe('Codex: the failure reason rides on the turn outcome', () => {
   it('usageLimitExceeded is a rate_limit failure, with no reset invented', async () => {
     const outcome = await codexFailedTurn({ message: 'You have hit your usage limit.', codexErrorInfo: 'usageLimitExceeded' });
     expect(outcome.isError).toBe(true);
-    expect(outcome.failure).toEqual({ reason: 'usageLimitExceeded', kind: 'rate_limit', providerMessage: 'You have hit your usage limit.' });
+    expect(outcome.failure).toEqual({ reason: 'usageLimitExceeded', kind: 'rate_limit', providerMessage: 'You have hit your usage limit.', retryable: true, resumable: true });
   });
 
   it('names an object variant by its key', async () => {

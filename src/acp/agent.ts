@@ -35,6 +35,7 @@ import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
 import type { PingOptions } from '../liveness.js';
 import { PromptRefused, promptBlockKind, promptBlocks, type PromptBlockKind, type PromptContent } from '../prompt.js';
 import { CommandUnsupported } from '../codex/commands.js';
+import { wireTurnFailure, type TurnFailure } from '../turn-failure.js';
 import { SteerInputError, SteerUnsupported, safeNativeId, validSteerId, type SteerAcceptance, type SteerOptions, type SteerState, type SteerUpdate, type SteeringState } from '../steer.js';
 
 /** The protocol version this agent speaks. */
@@ -872,11 +873,27 @@ export class AcpAgent {
       throw new RpcError(
         RPC_INTERNAL_ERROR,
         `turn did not complete${outcome.raw === null ? '' : `: ${outcome.raw}`}`,
-        outcome.failure === undefined ? undefined : { [META_TURN_FAILURE]: outcome.failure },
+        outcome.failure === undefined ? undefined : { [META_TURN_FAILURE]: this.#wireFailure(session, outcome.failure) },
       );
     }
 
     return { stopReason: outcome.stopReason satisfies StopReason };
+  }
+
+  /**
+   * A failed turn's reason, as the wire carries it (see wireTurnFailure): retryable from the kind, a retry-after only
+   * bounded, and never resumable once the session's agent is gone -- checked here, where the session is known, not
+   * taken from the driver's word. A driver whose `running` throws counts as not running.
+   */
+  #wireFailure(session: Session, failure: TurnFailure): TurnFailure {
+    if (typeof failure !== 'object' || failure === null) return failure;
+    let running = !session.exited;
+    try {
+      if (running && session.driver.running === false) running = false;
+    } catch {
+      running = false;
+    }
+    return wireTurnFailure(failure, running);
   }
 
   /** The prompt block kinds this agent's driver declared; text only when it declared none. */
