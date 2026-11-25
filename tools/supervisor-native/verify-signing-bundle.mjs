@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 // Reviewed source pins this manifest; a producer's own hash cannot authorize code.
-const MANIFEST_SHA256 = '1e7434cf964332676dacea822de4ea75141c52ef1c32e8de241215a7368e7dcb';
+const MANIFEST_SHA256 = '4b16962d61b7e7aa566140fc9e397690b8ab82a1fc52ef0071eac962b822ef70';
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 export function verifySigningBundle(root) {
   assert(Number(process.versions.node.split('.')[0]) >= 22, 'Supported Node runtime required');
