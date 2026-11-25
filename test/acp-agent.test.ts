@@ -1240,6 +1240,7 @@ describe('plan updates and the client capability (G-362)', () => {
     const markdown = (plan: Record<string, unknown>) => ({ sessionUpdate: 'plan_update', plan: { type: 'markdown', planId: 'pl_md', content: '# plan', ...plan } });
     const bad = [
       { path: '\u202E../../etc/passwd' }, { path: 'a\u200Bb' }, { path: 'a\u0000' },
+      { content: 'safe\rEVIL' }, { content: 'ends\r' }, { content: 'a\u206Ab' }, { content: 'a\uFFF9b' },
       { content: 'x\u001b[2J' }, { content: '\u202Eevil' }, { content: 'a\u2066b\u2069' }, { content: 'a\u0007' }, { content: 'a\uD800' }, { content: 'a\u2028b' },
     ];
     for (const plan of bad) s.driver.emit(markdown(plan) as never);

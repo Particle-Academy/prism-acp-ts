@@ -131,7 +131,9 @@ which is counted before any entry is read. The same applies to markdown
 than `PLAN_PATH_MAX` (4096), and a `planId` longer than `PLAN_ID_MAX` (256)
 or containing a control, format or invisible character. A markdown `path` may
 not contain those characters either. Markdown `content` may not contain control
-characters other than tab and line breaks, bidi characters, or lone surrogates.
+characters other than tab and line breaks (LF or CRLF; a bare CR is refused),
+bidi characters, deprecated format characters, or lone surrogates. A markdown
+`path` is what the driver states. A client must check it before opening it.
 Entries are counted
 from one read of `length` and read by index, so an iterator or `Proxy` of the
 driver's own cannot add more.

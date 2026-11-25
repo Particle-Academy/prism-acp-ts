@@ -257,11 +257,13 @@ const OVERSIZE_PLAN_ID = `plan update was not sent: its planId is larger than ${
 const HIDDEN_PLAN_ID = 'plan update was not sent: its planId holds a control, format or invisible character';
 const HIDDEN_MARKDOWN = 'plan update was not sent: its markdown path holds a control, format or invisible character, or its content a control or bidi character';
 /**
- * What markdown plan content may not hold: C0 and C1 controls other than tab, line feed and carriage return (a terminal
- * would act on ESC), bidi embeddings, overrides, isolates and marks (they reorder what is shown), the line and paragraph
- * separators, the BOM and lone surrogates. Line breaks and zero-width joiners stay: markdown and emoji need them.
+ * What markdown plan content may not hold: C0 and C1 controls other than tab and line feed, and a carriage return not
+ * followed by a line feed (a terminal acts on ESC, and a bare CR overwrites the line it ends); bidi embeddings,
+ * overrides, isolates and marks (they reorder what is shown); the deprecated format characters and interlinear
+ * annotation marks; the line and paragraph separators, the BOM and lone surrogates. Line breaks (LF, CRLF) and
+ * zero-width joiners stay: markdown and emoji need them.
  */
-const MARKDOWN_HIDDEN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\u2028\u2029\uFEFF\uD800-\uDFFF]/u;
+const MARKDOWN_HIDDEN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u206F\u2028\u2029\uFEFF\uFFF9-\uFFFB\uD800-\uDFFF]|\r(?!\n)/u;
 
 /** Why a planId may not be sent, or undefined: over the cap, or holding a character a client would not show. */
 function planIdProblem(planId: string): string | undefined {
