@@ -70,6 +70,8 @@ const KINDS: ReadonlySet<string> = new Set<TurnFailureKind>(['rate_limit', 'over
 /** The wire's bound on provider text: the driver's own bound plus its marker, so text a driver already bounded is unchanged. */
 const WIRE_TEXT_MAX = MAX_PROVIDER_TEXT_CHARS + PROVIDER_TEXT_TRUNCATED.length;
 const DETAIL_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+/** The last instant a JavaScript Date can hold. */
+const MAX_DATE_MS = 8_640_000_000_000_000;
 const MAX_DETAILS = 16;
 
 /**
@@ -77,7 +79,7 @@ const MAX_DETAILS = 16;
  * `toJSON`, a getter or a Proxy would decide what is sent after any check; the failure is therefore read ONCE, as it
  * serializes, and only the documented fields are taken from that snapshot, each checked:
  *   reason (non-empty string, bounded and marked as provider text), kind (one of the five, else `other`),
- *   resetsAtMs (finite, 0 or more, rounded up to a whole millisecond), providerMessage (string, bounded and marked), providerDetails (at most
+ *   resetsAtMs (0 to the last JavaScript date, rounded up to a whole millisecond), providerMessage (string, bounded and marked), providerDetails (at most
  *   16 plain-named scalar fields, strings bounded and marked);
  *   retryable from the kind alone; retryAfterMs bounded and only on a retryable failure; resumable the driver's boolean
  *   claim, and false whatever it said when the agent is no longer running -- as of this reply: an agent that exits
@@ -98,9 +100,10 @@ export function wireTurnFailure(failure: unknown, agentRunning: boolean): TurnFa
   if (typeof reason !== 'string' || reason === '') return undefined;
   const kindValue = own(snapshot, 'kind');
   const kind: TurnFailureKind = typeof kindValue === 'string' && KINDS.has(kindValue) ? kindValue as TurnFailureKind : 'other';
-  // A finite time of 0 or more, rounded up to a whole millisecond: fractional seconds from a provider keep their reset.
+  // A time JavaScript can represent as a date (0 to 8.64e15 ms, G-97), rounded up to a whole millisecond: fractional
+  // seconds from a provider keep their reset, and a client's `new Date(resetsAtMs).toISOString()` never throws.
   const resetsAtMs = own(snapshot, 'resetsAtMs');
-  const reset = typeof resetsAtMs === 'number' && Number.isFinite(resetsAtMs) && resetsAtMs >= 0 && resetsAtMs <= Number.MAX_SAFE_INTEGER
+  const reset = typeof resetsAtMs === 'number' && Number.isFinite(resetsAtMs) && resetsAtMs >= 0 && resetsAtMs <= MAX_DATE_MS
     ? Math.ceil(resetsAtMs) : undefined;
   const message = own(snapshot, 'providerMessage');
   const details = wireDetails(own(snapshot, 'providerDetails'));

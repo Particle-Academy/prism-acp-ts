@@ -1,3 +1,4 @@
+import { boundProviderText } from '../text.js';
 /**
  * The rate-limit payload the Claude CLI reports, declared and narrowed.
  *
@@ -282,5 +283,6 @@ export function rateLimitNotice(limit: ClaudeRateLimit): string {
   const used =
     binding === undefined ? '' : ` at ${Math.round(binding.utilization * 100)}% used`;
 
-  return `Rate limit: ${limit.rateLimitType} window${used}, resets ${new Date(resetsAtMs).toISOString()}.`;
+  // The window name is the provider's string: bounded and marked before it reaches the sentence a person reads.
+  return `Rate limit: ${boundProviderText(limit.rateLimitType, 64)} window${used}, resets ${new Date(resetsAtMs).toISOString()}.`;
 }

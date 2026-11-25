@@ -1235,6 +1235,33 @@ describe('plan updates and the client capability (G-362)', () => {
     expect(sentCounts.length + s.problems.length).toBe(3);
   });
 
+  it('refuses, and reports, a markdown path with a hidden character or markdown content with a control or bidi character', async () => {
+    const s = await session({ plan: {} });
+    const markdown = (plan: Record<string, unknown>) => ({ sessionUpdate: 'plan_update', plan: { type: 'markdown', planId: 'pl_md', content: '# plan', ...plan } });
+    const bad = [
+      { path: '\u202E../../etc/passwd' }, { path: 'a\u200Bb' }, { path: 'a\u0000' },
+      { content: 'x\u001b[2J' }, { content: '\u202Eevil' }, { content: 'a\u2066b\u2069' }, { content: 'a\u0007' }, { content: 'a\uD800' }, { content: 'a\u2028b' },
+    ];
+    for (const plan of bad) s.driver.emit(markdown(plan) as never);
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toHaveLength(bad.length);
+    for (const problem of s.problems) expect(problem).toMatch(/holds a control/);
+    // The control: line breaks, tabs, a joined emoji and a non-ASCII path are ordinary markdown.
+    s.driver.emit(markdown({ content: '# Plan\r\n\t- step \u{1F469}\u200D\u{1F4BB}\n', path: 'docs/plän.md' }) as never);
+    expect(s.updates()).toHaveLength(1);
+  });
+
+  it('reports a length that is not a count as malformed, not as too many entries', async () => {
+    const s = await session({ plan: {} });
+    for (const length of ['2', 1.5, -1]) {
+      const odd = new Proxy([], { get(target, key, receiver) { return key === 'length' ? length : Reflect.get(target, key, receiver); } });
+      s.driver.emit({ sessionUpdate: 'plan', entries: odd } as never);
+    }
+    expect(s.updates()).toEqual([]);
+    for (const problem of s.problems) expect(problem).not.toMatch(/more than/);
+    expect(s.problems).toHaveLength(3);
+  });
+
   it('refuses, and reports, a planId holding a control, format or invisible character', async () => {
     const s = await session({ plan: {} });
     const ids = ['pl\u202E1', 'pl\u001b[31m', 'pl\u200B', 'pl\u0000', 'pl\uD800'];

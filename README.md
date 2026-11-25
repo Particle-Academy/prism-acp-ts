@@ -129,7 +129,10 @@ reported. So does an update with more than `PLAN_ENTRIES_MAX` (256) entries,
 which is counted before any entry is read. The same applies to markdown
 `content` longer than `PLAN_MARKDOWN_MAX` (65536 code points), a `path` longer
 than `PLAN_PATH_MAX` (4096), and a `planId` longer than `PLAN_ID_MAX` (256)
-or containing a control, format or invisible character. Entries are counted
+or containing a control, format or invisible character. A markdown `path` may
+not contain those characters either. Markdown `content` may not contain control
+characters other than tab and line breaks, bidi characters, or lone surrogates.
+Entries are counted
 from one read of `length` and read by index, so an iterator or `Proxy` of the
 driver's own cannot add more.
 Every update's

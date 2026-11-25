@@ -336,7 +336,8 @@ describe('retryAfterMs: only what the provider stated, bounded', () => {
   it('keeps a fractional reset, rounded up; drops a negative or non-finite one', async () => {
     expect((await externalSession().fail({ reason: 'r', kind: 'rate_limit', resetsAtMs: 1_792_302_600_000.4 })).resetsAtMs).toBe(1_792_302_600_001);
     expect((await externalSession().fail({ reason: 'r', kind: 'rate_limit', resetsAtMs: 1_792_302_600_000 })).resetsAtMs).toBe(1_792_302_600_000);
-    for (const resetsAtMs of [-1, Number.NaN, Number.POSITIVE_INFINITY, 1e300, '1']) {
+    expect((await externalSession().fail({ reason: 'r', kind: 'rate_limit', resetsAtMs: 8.64e15 })).resetsAtMs).toBe(8.64e15);
+    for (const resetsAtMs of [-1, Number.NaN, Number.POSITIVE_INFINITY, 1e300, '1', 8.64e15 + 1, 9e15, Number.MAX_SAFE_INTEGER]) {
       expect(await externalSession().fail({ reason: 'r', kind: 'rate_limit', resetsAtMs })).not.toHaveProperty('resetsAtMs');
     }
   });

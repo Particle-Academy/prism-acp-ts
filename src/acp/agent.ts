@@ -255,6 +255,13 @@ const OVERSIZE_ENTRIES = `plan update was not sent: it has more than ${PLAN_ENTR
 const OVERSIZE_MARKDOWN = `plan update was not sent: its markdown content is larger than ${PLAN_MARKDOWN_MAX} code points or its path larger than ${PLAN_PATH_MAX}`;
 const OVERSIZE_PLAN_ID = `plan update was not sent: its planId is larger than ${PLAN_ID_MAX} code points`;
 const HIDDEN_PLAN_ID = 'plan update was not sent: its planId holds a control, format or invisible character';
+const HIDDEN_MARKDOWN = 'plan update was not sent: its markdown path holds a control, format or invisible character, or its content a control or bidi character';
+/**
+ * What markdown plan content may not hold: C0 and C1 controls other than tab, line feed and carriage return (a terminal
+ * would act on ESC), bidi embeddings, overrides, isolates and marks (they reorder what is shown), the line and paragraph
+ * separators, the BOM and lone surrogates. Line breaks and zero-width joiners stay: markdown and emoji need them.
+ */
+const MARKDOWN_HIDDEN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\u2028\u2029\uFEFF\uD800-\uDFFF]/u;
 
 /** Why a planId may not be sent, or undefined: over the cap, or holding a character a client would not show. */
 function planIdProblem(planId: string): string | undefined {
@@ -323,7 +330,8 @@ function checkedPlanEntries(entries: readonly unknown[]): CheckedEntry[] | strin
   // The length is read ONCE and the entries by index: an own iterator, or a Proxy answering `length` differently each
   // time, would otherwise pass the count and then yield any number of entries.
   const count: unknown = entries.length;
-  if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 || count > PLAN_ENTRIES_MAX) return OVERSIZE_ENTRIES;
+  if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) return MALFORMED_ENTRIES;
+  if (count > PLAN_ENTRIES_MAX) return OVERSIZE_ENTRIES;
   const out: CheckedEntry[] = [];
   for (let index = 0; index < count; index += 1) {
     const entry = entries[index];
@@ -793,6 +801,9 @@ export class AcpAgent {
         if (idProblem !== undefined) return refuse(idProblem);
         if (markdown && (longerThan(content as string, PLAN_MARKDOWN_MAX) || (typeof path === 'string' && longerThan(path, PLAN_PATH_MAX)))) {
           return refuse(OVERSIZE_MARKDOWN);
+        }
+        if (markdown && (MARKDOWN_HIDDEN.test(content as string) || (typeof path === 'string' && holdsHiddenCharacter(path)))) {
+          return refuse(HIDDEN_MARKDOWN);
         }
         const checked = items ? checkedPlanEntries(list as unknown[]) : undefined;
         if (typeof checked === 'string') return refuse(checked);
