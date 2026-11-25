@@ -125,7 +125,19 @@ valid priority is sent as `medium`, and that is reported too. An entry
 `content` longer than `PLAN_ENTRY_CONTENT_MAX` (1024 code points), or a
 `_meta` whose JSON is larger than `PLAN_META_MAX_BYTES` (16384 bytes, on an
 entry, the plan or the update), refuses the whole update, and that is
-reported. Every update's
+reported. So does an update with more than `PLAN_ENTRIES_MAX` (256) entries,
+which is counted before any entry is read. The same applies to markdown
+`content` longer than `PLAN_MARKDOWN_MAX` (65536 code points), a `path` longer
+than `PLAN_PATH_MAX` (4096), and a `planId` longer than `PLAN_ID_MAX` (256)
+or containing a control, format or invisible character. A markdown `path` may
+not contain those characters either. Markdown `content` may not contain control
+characters other than tab and line breaks (LF or CRLF; a bare CR is refused),
+bidi characters, deprecated format characters, or lone surrogates. A markdown
+`path` is what the driver states. A client must check it before opening it.
+Entries are counted
+from one read of `length` and read by index, so an iterator or `Proxy` of the
+driver's own cannot add more.
+Every update's
 `sessionUpdate` is read once, from the update's own property; one without its
 own string `sessionUpdate` is not sent and is reported. Every update that is
 not a plan is sent as its JSON serialization read back, never as the driver's
@@ -1463,8 +1475,64 @@ holds `particle.academy/turn_failure` (`META_TURN_FAILURE`):
   resetsAtMs?: number;     // only when the provider said when the limit resets
   providerMessage?: string;                          // Codex only
   providerDetails?: Record<string, string | number>; // Codex only
+  retryable?: true;        // kind 'overloaded' or 'rate_limit'; absent otherwise
+  retryAfterMs?: number;   // only when the provider stated a wait; integer, 0..3_600_000
+  resumable?: boolean;     // true: this session takes the next prompt; false: it is gone
 }
 ```
+
+#### Retrying an overloaded or rate-limited turn
+
+When a provider answers "Overloaded" (HTTP 529) or "Too Many Requests"
+(HTTP 429), the failure is `kind: 'overloaded'` or `kind: 'rate_limit'` with
+`retryable: true`. Wait, then send the prompt again with `session/prompt` on
+the SAME session. You do not need `session/load` or a new session.
+
+```json
+{
+  "reason": "server_error",
+  "kind": "overloaded",
+  "retryable": true,
+  "resumable": true
+}
+```
+
+- **`reason` is still the provider's own value.** Claude Code 2.1.332 ends a 529
+  with `error: "server_error"`. Codex 0.163.0 ends one with
+  `httpConnectionFailed` (`providerDetails.httpStatusCode: 529`), or with
+  `serverOverloaded` when the stream reports it. All of them are
+  `kind: 'overloaded'`. A Codex `responseTooManyFailedAttempts` with status 429
+  is `kind: 'rate_limit'`. Act on `kind`, not on `reason`.
+- **`retryAfterMs` appears only when the provider stated a wait and the driver
+  could read it.** It is never invented, and it is never the CLI's own backoff.
+  Neither shipped CLI forwards the provider's `retry-after` today, so the
+  shipped drivers do not send it. Choose your own backoff when it is absent. A
+  driver you write can set it; it is capped at one hour and dropped unless it
+  is a finite number of 0 or more. The failure is rebuilt from its JSON form,
+  and only the fields above are sent, each checked again. An unknown `kind`
+  becomes `other`, text is bounded and marked as provider text, and anything
+  else a driver attached is dropped.
+- **Both CLIs have already retried before you see the failure.** Claude Code
+  retries 10 times by default with its own growing backoff, which is about two
+  and a half minutes in total. It announces each attempt as an unmapped
+  `system/api_retry` frame. If the provider's `retry-after` is too long, it does
+  not retry at all. Codex retries according to its provider's
+  `request_max_retries` / `stream_max_retries`, waits out `retry-after`, and
+  sends an `error` notification with `willRetry: true` for each attempt. That
+  notification does not end the turn.
+- **`resumable: true`** means the agent process was still running when the
+  failure was answered, and the next `session/prompt` in this session continues
+  the same conversation. If the agent exits after that answer, the retry fails
+  with `error.data.code: 'session_exited'`. Then `session/load` the session to
+  keep the conversation.
+  Everything before the failed turn is kept, and so is any tool work the failed
+  turn finished. It is `false` once the session's agent has gone; that session
+  fails the next prompt, so `session/load` it or start a new one. When it is
+  absent, nothing is claimed.
+- **Whether the failed prompt is still in the conversation depends on the
+  CLI.** Claude Code drops a prompt that failed before any output, and keeps it
+  once the turn did work. Codex always keeps it. Resending the prompt is right
+  in every case. At worst the model sees the prompt twice.
 
 `providerMessage` is Codex's own `TurnError.message`, for example why a
 `cyberPolicy` stop happened. `providerDetails` holds only these fields when

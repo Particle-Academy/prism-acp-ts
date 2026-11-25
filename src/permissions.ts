@@ -40,6 +40,8 @@ const NO_ONE_TO_ASK = 'No one could be asked to approve this tool call.';
  *
  * The client's `reason` is used when the answer itself was valid (an allow, a reject, a cancel), because the decision
  * may not be the person's and the agent should be told the truth. It is ignored for an answer that was not accepted.
+ * It is the client's own text, on the person's side, and is passed verbatim (claude-approval-command pins its bytes);
+ * it never decides `allow`, which comes only from an exact match of an offered option.
  */
 export function permissionDecision(
   offered: PermissionRequest | readonly Readonly<Record<string, unknown>>[],

@@ -178,7 +178,7 @@ export type { Served, ServeOptions } from './acp/stdio.js';
 
 export { cliSessionIdOf, turnOutcomeOf } from './claude/driver.js';
 export type { StopReason, TurnOutcome } from './claude/driver.js';
-export { ClaudeTurnFailures, codexFailureOf } from './turn-failure.js';
+export { ClaudeTurnFailures, MAX_RETRY_AFTER_MS, boundRetryAfterMs, codexFailureOf, isRetryableKind, wireTurnFailure } from './turn-failure.js';
 export type { CodexFailureOptions, TurnFailure, TurnFailureKind } from './turn-failure.js';
 
 export { CODEX_DRIVER_CAPABILITIES, CodexDriver } from './codex/driver.js';
@@ -199,6 +199,10 @@ export {
   PLAN_ENTRY_CONTENT_MAX,
   PLAN_ENTRY_PRIORITY,
   PLAN_META_MAX_BYTES,
+  PLAN_ENTRIES_MAX,
+  PLAN_MARKDOWN_MAX,
+  PLAN_PATH_MAX,
+  PLAN_ID_MAX,
   PLAN_STEPS_MAX,
   PLAN_TITLE_MAX,
   PLAN_TITLE_NEUTRAL,
