@@ -2,7 +2,8 @@
  * An agent plan, as ACP shows it (G-360 §6).
  *
  * A host's plan -- prism-harness's, or any driver's that keeps one -- is projected here into the `session/update` a
- * client can read. Any driver can use it; prism-php's `Prism\Acp\Plan\PlanProjection` is the same mapping, row for row.
+ * client can read. Any driver can use it; prism-php's `Prism\Acp\Plan\PlanProjection` is the same mapping, row for row, except
+ * that its title label guard is still ASCII-only (the look-alike handling below has not reached it yet).
  *
  * ## The shape depends on the client
  *
@@ -22,9 +23,11 @@
  * ## Titles are model text
  *
  * A step title was written by a model that may have been steered by something it read. It is cleaned (terminal
- * escapes, controls, invisible and bidi characters become spaces), bounded, and cannot begin with one of the labels
- * this module writes -- otherwise a finished step titled "[failed] ..." would read as failed, and an agent step titled
- * "(you) ..." would read as the person's.
+ * escapes, controls, invisible and bidi characters become spaces; NFKC folds fullwidth forms; every Unicode space
+ * becomes an ASCII one), bounded, and cannot begin with one of the labels this module writes -- otherwise a finished
+ * step titled "[failed] ..." would read as failed, and an agent step titled "(you) ..." would read as the person's.
+ * A title that still begins with a bracket of any kind (a homoglyph such as "(yоu)" with a Cyrillic о, "❨you❩",
+ * "【failed】") is prefixed with "Step: ", so nothing that looks like a label stands where a host label stands.
  *
  * ## A malformed snapshot is refused
  *
@@ -107,8 +110,23 @@ const ID = /^[A-Za-z0-9_.:-]{1,128}$/;
  * the line/paragraph separators and lone surrogates. PHP's `PlanProjection::HIDDEN` is the same set.
  */
 const HIDDEN = /[\u{0000}-\u{001F}\u{007F}-\u{009F}\p{Cf}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{034F}\u{180B}-\u{180F}\u{2800}\u{115F}\u{1160}\u{3164}\u{FFA0}\u{2028}\u{2029}\u{D800}-\u{DFFF}]/gu;
-/** The labels this module writes, which model text may not begin with. ASCII, case-insensitive. */
-const LABEL = /^(?:\[failed\]|\[skipped\]|\(you\))/i;
+/** Every Unicode space separator (no-break, ideographic, em, thin, ...). Each becomes an ASCII space. */
+const SPACES = /\p{Zs}/gu;
+/**
+ * What a title may not begin with: the labels this module writes (ASCII, case-insensitive, after NFKC has folded
+ * fullwidth forms), and any leading spaces or combining marks. One linear pass: the alternatives start with
+ * different characters, so the run cannot backtrack.
+ */
+const LEADING = /^(?:\[failed\]|\[skipped\]|\(you\)|[ \p{M}])+/iu;
+/**
+ * A first character that looks like the start of a label: any opening or closing bracket (`(`, `[`, and every
+ * look-alike Unicode classes as punctuation -- ornament, CJK, mathematical), and the bracket pieces. A title that
+ * begins with one is prefixed with {@link PLAN_TITLE_NEUTRAL}, so a look-alike such as "(yоu)" (Cyrillic о) cannot
+ * stand where a host label stands.
+ */
+const BRACKET = /^[\p{Ps}\p{Pe}\u{239B}-\u{23AD}]/u;
+/** Put before a title whose first visible character is a bracket. */
+export const PLAN_TITLE_NEUTRAL = 'Step: ';
 
 /**
  * Whether `clientCapabilities` (the client's `initialize` params) advertises plan updates. ACP: omitted or `null`
@@ -171,11 +189,13 @@ export function planEntry(step: PlanStep): { content: string; priority: string; 
 
 /** A model-written title, made safe to show: one line, nothing hidden, no host label, at most {@link PLAN_TITLE_MAX}. */
 export function planTitle(value: string): string {
-  // Runs of spaces collapse to one first, so trimming is one character at each end, with no backtracking regex.
-  let text = trimSpace(stripAnsiControlSequences(value).text.replace(HIDDEN, ' ').replace(/ {2,}/g, ' '));
-  for (let match = LABEL.exec(text); match !== null; match = LABEL.exec(text)) {
-    text = trimSpace(text.slice(match[0].length));
-  }
+  // NFKC folds fullwidth and other compatibility forms ("［failed］") onto the ASCII the label check reads. Every
+  // Unicode space becomes an ASCII one and runs collapse, so trimming is one character at each end.
+  const cleaned = stripAnsiControlSequences(value).text.normalize('NFKC').replace(HIDDEN, ' ').replace(SPACES, ' ').replace(/ {2,}/g, ' ');
+  let text = trimSpace(cleaned.replace(LEADING, ''));
+  // Whatever is left may still LOOK like a label ("(yоu)" with a Cyrillic о, "❨you❩", "【failed】"). The question is
+  // what the first visible character looks like, not which code point it is, so every bracket is neutralised.
+  if (BRACKET.test(text)) text = PLAN_TITLE_NEUTRAL + text;
   const points = Array.from(text);
   if (points.length > PLAN_TITLE_MAX) text = trimSpace(points.slice(0, PLAN_TITLE_MAX - 1).join('')) + '…';
   return text === '' ? PLAN_UNTITLED : text;

@@ -1,7 +1,12 @@
 import type { PermissionOutcome, PermissionRequest } from './acp/agent.js';
 
 /**
- * THE PERMISSION DECISION RULE, for every driver -- the shipped ones and any written outside this package.
+ * THE PERMISSION DECISION RULE, for the Claude driver and for any driver written outside this package.
+ *
+ * The Codex driver does not use it. Codex offers its own options per request (including "Allow for this session",
+ * kind `allow_always`) and keeps an exact-id map from each offered option to the answer Codex expects
+ * (`codexDecision` in codex/driver.ts). That map also fails closed on any id it did not offer. This rule denies
+ * `allow_always`, so a driver that offers allow-for-session options and decides with this rule never allows on them.
  *
  * A tool call is allowed by exactly one answer: the client selected an option that the request OFFERED, named by an
  * id that matches one offered option exactly, whose kind is `allow_once`. Everything else denies: an option that was

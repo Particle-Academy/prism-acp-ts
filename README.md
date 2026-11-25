@@ -89,16 +89,21 @@ events.onUpdate?.(planUpdate({ planId, revision, planStatus: 'active', holdingAp
 - Each entry's real state is in `_meta["particle.academy/plan_step"]`. The
   plan's revision and status are in `_meta["particle.academy/plan"]`.
 - Titles are treated as model text. Controls and invisible characters are
-  removed, the title is capped at 160 characters, and it cannot begin with one
-  of the labels above.
+  removed, fullwidth forms are folded (NFKC) and every Unicode space becomes a
+  plain one, the title is capped at 160 characters, and it cannot begin with
+  one of the labels above. A title that still begins with a bracket of any
+  kind, such as a look-alike `(you)` spelled with a Cyrillic letter, is shown
+  with `Step: ` in front. Codex plan step text is cleaned the same way.
 - A snapshot with an unknown state, owner or status, or a bad id, throws
   `PlanProjectionError`.
 
 `AcpAgent` checks every plan update a driver sends, whichever driver sent it.
 It never sends `plan_update` or `plan_removed` to a client that did not
 advertise `plan`. For that client, an items `plan_update` is sent as `plan`, and
-anything else is dropped and reported. An entry without a valid priority is
-sent as `medium`, and that is reported too.
+anything else is dropped and reported. A plan with an entry that is not an
+object with a string `content` and a status of `pending`, `in_progress` or
+`completed` is not sent at all, and that is reported. An entry without a valid
+priority is sent as `medium`, and that is reported too.
 
 ## Why drive a CLI rather than call an API
 
@@ -1974,7 +1979,10 @@ driver does not copy them:
   a cancel, a malformed answer. `askPermission(events.onRequestPermission,
   request)` asks and decides in one step, and also denies when the client throws
   or there is no client to ask. `ALLOW_ONCE_OR_DENY` is the frozen option list
-  the Claude driver offers.
+  the Claude driver offers. The Codex driver does not use this rule: it offers
+  Codex's own options, including "Allow for this session" (`allow_always`), and
+  maps each offered id to Codex's answer exactly. This rule denies
+  `allow_always`.
 
 ```ts
 import { ALLOW_ONCE_OR_DENY, askPermission } from '@particle-academy/prism-acp';
