@@ -88,29 +88,23 @@ events.onUpdate?.(planUpdate({ planId, revision, planStatus: 'active', holdingAp
   `[failed]` or `[skipped]`. A person's step is labelled `(you)`.
 - Each entry's real state is in `_meta["particle.academy/plan_step"]`. The
   plan's revision and status are in `_meta["particle.academy/plan"]`.
-- Titles are treated as model text. Controls and invisible characters are
-  removed, fullwidth forms are folded (NFKC) and every Unicode space becomes a
-  plain one, the title is capped at 160 characters, and it cannot begin with
-  one of the labels above. A title is shown with `Step: ` in front when any
-  of these holds:
-  - it does not begin with an ASCII letter or digit (any bracket, quote,
-    symbol, emoji, accented letter or non-Latin script);
-  - its opening holds anything but ASCII letters, digits and spaces, where the
-    opening is the first word (up to the first space) and everything before the
-    first run of three ASCII letters. So `I[FAILE|)]I x`, `l(Y()U)l x`,
-    `l (Y()U) l x`, `Don't deploy`, `e.g. docs` and `v1.2 release` are all
-    prefixed, whatever their punctuation spells;
-  - its first strong character is right-to-left;
-  - it contains `you`, `failed` or `skipped` anywhere, in any case, with
-    combining marks removed, with each letter matched by itself, by one of a
-    fixed set of ASCII stand-ins (`0` for `o`, `1`, `I`, `|` or `!` for
-    `l` and `i`, `v` for `u`, `cl` for `d`, ...) or by any non-ASCII
-    character (so `Do (yоu) x` with a Cyrillic letter is prefixed).
-
-  The opening rule does not depend on how a word is spelled; the label-word
-  rule matches only the stand-ins listed there. The rules are deliberately broad;
-  a false match costs only the prefix. Codex plan step text is cleaned the
-  same way.
+- Titles are treated as model text, and **a model-written title is always
+  shown with `Step: ` in front**. An entry's text is the host's labels
+  (`[failed] `, `[skipped] `, `(you) `, written only from the step's state
+  and owner), then `Step: `, then the title: `[failed] (you) Step: Sign off`,
+  `Step: Run the tests`. So nothing a model writes can stand where a host
+  label stands, however it is spelled. A title that is empty once cleaned is
+  shown as `Untitled step`, which is host text.
+- Before that, controls and invisible characters are removed, fullwidth forms
+  are folded (NFKC), every Unicode space becomes a plain one, and the result,
+  prefix included, is capped at 160 characters. Codex plan step text is
+  cleaned and prefixed the same way; a Codex step with no text is shown as
+  `Step 1`, `Step 2`, ... by position.
+- This replaced an earlier rule that prefixed only titles that looked like a
+  label. That rule was a list of look-alikes and could always be spelled
+  around, so it is gone: every title now carries the prefix, including plain
+  ones such as `Run the tests`. A client that showed `Run the tests` before
+  shows `Step: Run the tests` now.
 - A snapshot with an unknown state, owner or status, or a bad id, throws
   `PlanProjectionError`.
 
@@ -127,10 +121,18 @@ same way. `plan_removed` follows the same rules. Only an object's own
 properties are read, a read that throws refuses the update (it is reported, not
 thrown back into the driver), and what is sent is built from the checked
 fields, so nothing else the driver attached goes with it. An entry without a
-valid priority is sent as `medium`, and that is reported too. Every update's
-`sessionUpdate` is read once, from the update's own property, and the update
-sent carries that same value; one without its own string `sessionUpdate` is
-not sent and is reported. If the host's `onProtocolError` throws, that is
+valid priority is sent as `medium`, and that is reported too. An entry
+`content` longer than `PLAN_ENTRY_CONTENT_MAX` (1024 code points), or a
+`_meta` whose JSON is larger than `PLAN_META_MAX_BYTES` (16384 bytes, on an
+entry, the plan or the update), refuses the whole update, and that is
+reported. Every update's
+`sessionUpdate` is read once, from the update's own property; one without its
+own string `sessionUpdate` is not sent and is reported. Every update that is
+not a plan is sent as its JSON serialization read back, never as the driver's
+object, and only if that serialization is an object with the same
+`sessionUpdate`. One that serializes as another kind (an own `toJSON`, or a
+getter or Proxy that answers differently the second time) or cannot be
+serialized (a `BigInt`) is not sent, and that is reported. If the host's `onProtocolError` throws, that is
 contained: it does not reach the driver or change what is sent.
 
 ## Why drive a CLI rather than call an API
@@ -2011,10 +2013,12 @@ driver does not copy them:
   Codex's own options, including "Allow for this session" (`allow_always`), and
   maps each offered id to Codex's answer exactly. This rule denies
   `allow_always`.
-- **Plan text.** The gate checks a plan's shape, not its words, and entry
-  `content` is shown next to the host's `(you)` and `[failed]` labels. Pass
-  model-written step text through `planTitle` (or project the plan with
-  `planUpdate`, which does), and clean a markdown plan's content yourself.
+- **Plan text.** The gate checks a plan's shape and size, not its words, and
+  entry `content` is shown next to the host's `(you)` and `[failed]` labels.
+  Pass model-written step text through `planTitle` (or project the plan with
+  `planUpdate`, which does): it always puts `Step: ` in front, so only labels
+  your driver adds from its own state come before it. Clean a markdown plan's
+  content yourself.
 
 ```ts
 import { ALLOW_ONCE_OR_DENY, askPermission } from '@particle-academy/prism-acp';

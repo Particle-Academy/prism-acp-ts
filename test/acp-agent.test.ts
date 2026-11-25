@@ -1136,9 +1136,13 @@ describe('plan updates and the client capability (G-362)', () => {
     };
     s.driver.emit(flipping() as never);
     s.driver.emit(proxied() as never);
-    const wire = JSON.parse(JSON.stringify(s.updates())) as { update: Record<string, unknown> }[];
-    expect(wire.map((u) => u.update.sessionUpdate)).toEqual(['agent_message_chunk', 'agent_message_chunk']);
-    expect(s.problems).toEqual([]);
+    // The kind is checked on the first read and again on the serialization that is sent; one that changes between
+    // the two is not sent at all, and that is reported.
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toEqual([
+      'update was not sent: it does not serialize as an object of the kind it declares',
+      'update was not sent: it does not serialize as an object of the kind it declares',
+    ]);
   });
 
   it.each([{ plan: {} }, {}])('sends what it checked: an own toJSON cannot replace a chunk with a plan (client %j)', async (caps) => {
@@ -1152,7 +1156,7 @@ describe('plan updates and the client capability (G-362)', () => {
     s.driver.emit(chunk('agent_message_chunk') as never);
     expect(() => s.driver.emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi', n: BigInt(1) } } as never)).not.toThrow();
     expect(s.updates()).toEqual([]);
-    expect(s.problems).toHaveLength(5);
+    expect(s.problems).toEqual(Array(5).fill('update was not sent: it does not serialize as an object of the kind it declares'));
     // One whose toJSON keeps the kind is sent as that serialization: a plain object, never the driver's own.
     const same = chunk({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'serialized' } });
     s.driver.emit(same as never);

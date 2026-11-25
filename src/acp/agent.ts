@@ -29,7 +29,7 @@ import type { StopReason, TurnOutcome } from '../claude/driver.js';
 import { META_CLI_SESSION_ID, META_DRIVER_CAPABILITIES, META_MODEL_INFO, META_PERMISSION_REASON, META_TURN_FAILURE, withMeta } from '../meta.js';
 import type { SessionModelState } from '../models.js';
 import { observeStopVerdict } from '../stop-verdict.js';
-import { clientAcceptsPlanUpdates, PLAN_ENTRY_PRIORITY, type PlanClient } from '../plan.js';
+import { clientAcceptsPlanUpdates, PLAN_ENTRY_CONTENT_MAX, PLAN_ENTRY_PRIORITY, PLAN_META_MAX_BYTES, type PlanClient } from '../plan.js';
 import { assertMcpSupport, readMcpServers, type McpCapabilities, type McpServer } from '../mcp.js';
 import type { ProcessTree, StopOptions, StopVerdict } from '../process-tree.js';
 import type { PingOptions } from '../liveness.js';
@@ -247,6 +247,9 @@ const PLAN_ENTRY_STATUSES: ReadonlySet<string> = new Set(['pending', 'in_progres
 const MALFORMED_ENTRIES = 'plan update was not sent: an entry was not an object with a string content, an ACP status and an object _meta';
 const MALFORMED_META = 'plan update was not sent: its _meta was not an object that serializes as one';
 const MALFORMED_READ = 'plan update was not sent: reading it threw';
+const OVERSIZE_CONTENT = `plan update was not sent: an entry content is larger than ${PLAN_ENTRY_CONTENT_MAX} code points`;
+const OVERSIZE_META = `plan update was not sent: a _meta is larger than ${PLAN_META_MAX_BYTES} bytes of JSON`;
+const MALFORMED_SNAPSHOT = 'update was not sent: it does not serialize as an object of the kind it declares';
 
 /**
  * A property the object itself holds, read once. Inherited values are not read: a check that sees them passes an
@@ -262,37 +265,57 @@ function own(object: Record<string, unknown>, key: string): unknown {
  * would carry -- so an own `toJSON`, a nested value JSON cannot hold (a BigInt), or a getter or Proxy that throws is
  * caught here and refused, not discovered by the client or thrown at send time.
  */
-function planMeta(value: unknown): { ok: boolean; meta?: Record<string, unknown> } {
+function planMeta(value: unknown): { ok: boolean; problem?: string; meta?: Record<string, unknown> } {
   if (value === undefined || value === null) return { ok: true };
   const object = asObject(value);
-  if (object === undefined) return { ok: false };
+  if (object === undefined) return { ok: false, problem: MALFORMED_META };
   const proto = Object.getPrototypeOf(object);
-  if (proto !== Object.prototype && proto !== null) return { ok: false };
+  if (proto !== Object.prototype && proto !== null) return { ok: false, problem: MALFORMED_META };
+  let text: string | undefined;
   let wire: unknown;
   try {
-    const text = JSON.stringify(object);
+    text = JSON.stringify(object);
     wire = typeof text === 'string' ? JSON.parse(text) : undefined;
   } catch {
-    return { ok: false };
+    return { ok: false, problem: MALFORMED_META };
   }
   const meta = asObject(wire);
-  return meta === undefined ? { ok: false } : { ok: true, meta };
+  if (meta === undefined || text === undefined) return { ok: false, problem: MALFORMED_META };
+  return utf8Bytes(text) > PLAN_META_MAX_BYTES ? { ok: false, problem: OVERSIZE_META } : { ok: true, meta };
+}
+
+/** UTF-8 length of a string. A UTF-16 code unit never takes fewer bytes, so a long string is answered without encoding. */
+function utf8Bytes(text: string): number {
+  return text.length > PLAN_META_MAX_BYTES ? text.length : new TextEncoder().encode(text).length;
+}
+
+/** Whether a string holds more than `max` code points, read no further than that. */
+function longerThan(text: string, max: number): boolean {
+  if (text.length <= max) return false;
+  let count = 0;
+  for (let index = 0; index < text.length; index += text.codePointAt(index)! > 0xffff ? 2 : 1) {
+    count += 1;
+    if (count > max) return true;
+  }
+  return false;
 }
 
 type CheckedEntry = { content: string; priority: string | undefined; status: string; _meta?: Record<string, unknown> };
 
 /**
- * Each entry as ACP can carry it (priority aside, which the gate supplies), read from own properties only; or
- * `undefined` if any entry is not.
+ * Each entry as ACP can carry it (priority aside, which the gate supplies) and within the caps, read from own
+ * properties only; or the problem with the first entry that is not.
  */
-function checkedPlanEntries(entries: readonly unknown[]): CheckedEntry[] | undefined {
+function checkedPlanEntries(entries: readonly unknown[]): CheckedEntry[] | string {
   const out: CheckedEntry[] = [];
   for (const entry of entries) {
     const object = asObject(entry);
-    if (object === undefined) return undefined;
+    if (object === undefined) return MALFORMED_ENTRIES;
     const content = own(object, 'content'), status = own(object, 'status'), priority = own(object, 'priority');
     const meta = planMeta(own(object, '_meta'));
-    if (typeof content !== 'string' || typeof status !== 'string' || !PLAN_ENTRY_STATUSES.has(status) || !meta.ok) return undefined;
+    if (typeof content !== 'string' || typeof status !== 'string' || !PLAN_ENTRY_STATUSES.has(status)) return MALFORMED_ENTRIES;
+    if (!meta.ok) return meta.problem === OVERSIZE_META ? OVERSIZE_META : MALFORMED_ENTRIES;
+    if (longerThan(content, PLAN_ENTRY_CONTENT_MAX)) return OVERSIZE_CONTENT;
     out.push({ content, status, priority: typeof priority === 'string' ? priority : undefined, ...(meta.meta === undefined ? {} : { _meta: meta.meta }) });
   }
   return out;
@@ -681,11 +704,13 @@ export class AcpAgent {
    * shape is never sent, and neither is a plan (of either kind) with an entry that is not an object with a string
    * `content` and a status of `pending`, `in_progress` or `completed`, nor one whose `_meta` (entry, plan or update)
    * is present and not a plain object that serializes as an object (it is sent as that serialization, read back).
-   * `plan_removed` is held to the same rules. Fields are read from own properties only, a read that throws refuses
-   * the update, and what is sent is built from the checked fields, never a copy of the driver's object. A plan entry
-   * with no valid priority is given
-   * `medium`, because a client built from the schema drops it otherwise. Each refusal and correction is reported, so
-   * a driver that needs one is visible.
+   * `plan_removed` is held to the same rules. An entry `content` over {@link PLAN_ENTRY_CONTENT_MAX} code points, or a
+   * `_meta` over {@link PLAN_META_MAX_BYTES} bytes of JSON, refuses the update. Fields are read from own properties
+   * only, a read that throws refuses the update, and what is sent is built from the checked fields, never a copy of
+   * the driver's object. Every other update is sent as its JSON serialization read back, and only if that is an
+   * object of the kind that was checked. A plan entry with no valid priority is given `medium`, because a client
+   * built from the schema drops it otherwise. Each refusal and correction is reported, so a driver that needs one is
+   * visible.
    */
   #planGate(sessionId: string, update: AcpUpdate): AcpUpdate | null {
     // A getter or Proxy in the driver's object can throw on any read. That is the driver's fault, not the client's,
@@ -728,9 +753,9 @@ export class AcpAgent {
         const list = own(update, 'entries');
         if (!Array.isArray(list)) return refuse('plan update without an entries list was not sent');
         const checked = checkedPlanEntries(list);
-        if (checked === undefined) return refuse(MALFORMED_ENTRIES);
+        if (typeof checked === 'string') return refuse(checked);
         const meta = planMeta(own(update, '_meta'));
-        if (!meta.ok) return refuse(MALFORMED_META);
+        if (!meta.ok) return refuse(meta.problem!);
         return withMeta({ sessionUpdate: 'plan', entries: this.#planEntries(sessionId, checked) }, meta.meta);
       }
       case 'plan_update': {
@@ -747,10 +772,11 @@ export class AcpAgent {
         }
         if (!this.#clientAcceptsPlan && !items) return refuse('plan_update was not sent: the client did not advertise plan updates');
         const checked = items ? checkedPlanEntries(list as unknown[]) : undefined;
-        if (items && checked === undefined) return refuse(MALFORMED_ENTRIES);
+        if (typeof checked === 'string') return refuse(checked);
         const planMetaValue = planMeta(own(plan, '_meta'));
         const updateMeta = planMeta(own(update, '_meta'));
-        if (!planMetaValue.ok || !updateMeta.ok) return refuse(MALFORMED_META);
+        if (!planMetaValue.ok) return refuse(planMetaValue.problem!);
+        if (!updateMeta.ok) return refuse(updateMeta.problem!);
         const entries = checked === undefined ? undefined : this.#planEntries(sessionId, checked);
         if (!this.#clientAcceptsPlan) return withMeta({ sessionUpdate: 'plan', entries }, planMetaValue.meta);
         const body = items
@@ -763,13 +789,24 @@ export class AcpAgent {
         if (planId === undefined || planId === '') return refuse('plan_removed without a planId was not sent');
         if (!this.#clientAcceptsPlan) return refuse('plan_removed was not sent: the client did not advertise plan updates');
         const meta = planMeta(own(update, '_meta'));
-        if (!meta.ok) return refuse(MALFORMED_META);
+        if (!meta.ok) return refuse(meta.problem!);
         return withMeta({ sessionUpdate: 'plan_removed', planId }, meta.meta);
       }
-      default:
-        // A fresh object whose kind is the one checked above, whatever the driver's object would answer on a second
-        // read. Its other fields are the driver's own enumerable ones, as before.
-        return { ...update, sessionUpdate: kind } as AcpUpdate;
+      default: {
+        // Sent as it serializes, read back: the transport calls JSON.stringify, so an own `toJSON`, a getter or a Proxy
+        // decides what goes on the wire. The snapshot is what the wire would carry, it must be a plain object of the
+        // kind checked above, and it is what is sent -- never the driver's object -- so nothing can turn into a plan
+        // after the check. One that cannot be serialized (a BigInt, a throwing toJSON) is refused here too.
+        let snapshot: Record<string, unknown> | undefined;
+        try {
+          const text = JSON.stringify(update);
+          snapshot = asObject(typeof text === 'string' ? JSON.parse(text) : undefined);
+        } catch {
+          return refuse(MALFORMED_SNAPSHOT);
+        }
+        if (snapshot === undefined || own(snapshot, 'sessionUpdate') !== kind) return refuse(MALFORMED_SNAPSHOT);
+        return snapshot as AcpUpdate;
+      }
     }
   }
 
