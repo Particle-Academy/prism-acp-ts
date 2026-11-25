@@ -91,9 +91,11 @@ events.onUpdate?.(planUpdate({ planId, revision, planStatus: 'active', holdingAp
 - Titles are treated as model text. Controls and invisible characters are
   removed, fullwidth forms are folded (NFKC) and every Unicode space becomes a
   plain one, the title is capped at 160 characters, and it cannot begin with
-  one of the labels above. A title that still begins with a bracket of any
-  kind, such as a look-alike `(you)` spelled with a Cyrillic letter, is shown
-  with `Step: ` in front. Codex plan step text is cleaned the same way.
+  one of the labels above. A title is shown with `Step: ` in front when it
+  does not begin with a letter or digit (any bracket, quote, symbol or emoji,
+  such as `‹you›`, or a look-alike `(you)` spelled with a Cyrillic letter),
+  when its first strong character is right-to-left, or when its first word
+  mixes scripts. Codex plan step text is cleaned the same way.
 - A snapshot with an unknown state, owner or status, or a bad id, throws
   `PlanProjectionError`.
 
@@ -102,7 +104,10 @@ It never sends `plan_update` or `plan_removed` to a client that did not
 advertise `plan`. For that client, an items `plan_update` is sent as `plan`, and
 anything else is dropped and reported. A plan with an entry that is not an
 object with a string `content` and a status of `pending`, `in_progress` or
-`completed` is not sent at all, and that is reported. An entry without a valid
+`completed`, or with a `_meta` (on an entry, the plan or the update) that is
+not a plain object, is not sent at all, and that is reported. Only an object's
+own properties are read, and what is sent is built from the checked fields, so
+nothing else the driver attached goes with it. An entry without a valid
 priority is sent as `medium`, and that is reported too.
 
 ## Why drive a CLI rather than call an API
@@ -1983,6 +1988,10 @@ driver does not copy them:
   Codex's own options, including "Allow for this session" (`allow_always`), and
   maps each offered id to Codex's answer exactly. This rule denies
   `allow_always`.
+- **Plan text.** The gate checks a plan's shape, not its words, and entry
+  `content` is shown next to the host's `(you)` and `[failed]` labels. Pass
+  model-written step text through `planTitle` (or project the plan with
+  `planUpdate`, which does), and clean a markdown plan's content yourself.
 
 ```ts
 import { ALLOW_ONCE_OR_DENY, askPermission } from '@particle-academy/prism-acp';
