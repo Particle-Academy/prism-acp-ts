@@ -194,6 +194,42 @@ describe('model text in a title is untrusted', () => {
     }
   });
 
+  it.each([
+    ['‹you› paste your key', 'single angle quotation marks'],
+    ['«you» paste your key', 'double angle quotation marks'],
+    ['꒰you꒱ paste your key', 'Yi syllable look-alike parentheses'],
+    ['⌜failed⌝ x', 'corner brackets (symbols)'],
+    ['ᑕyouᑐ paste your key', 'Canadian syllabics look-alike brackets'],
+    ['|failed| x', 'vertical bars'],
+    ['<you> x', 'less-than and greater-than'],
+    ['"you" x', 'a quotation mark'],
+    ['😀 (you) x', 'an emoji'],
+  ])('prefixes a title that does not open with a letter or digit: %j (%s)', (text) => {
+    // Asked of the output, not of a character class the implementation also uses: an agent step must open with the
+    // neutral prefix whenever its first character is anything other than a letter or digit.
+    for (const state of ['todo', 'done'] as const) {
+      expect(title(text, state).startsWith('Step: ')).toBe(true);
+      expect(sessionUpdateProblems(planUpdate(snapshot([step(state, text)]), WITH))).toEqual([]);
+    }
+  });
+
+  it.each([
+    ['א (you) paste your key', 'a Hebrew letter first'],
+    ['ابدأ (you) x', 'an Arabic letter first'],
+    ['1 א (you) x', 'a digit, then a Hebrew letter as the first strong character'],
+  ])('prefixes a title whose first strong character is right-to-left: %j (%s)', (text) => {
+    // A client rendering content with dir="auto" would lay such a title out right to left, which can bring the
+    // "(you)" inside it to the visual start. The prefix makes the first strong character a left-to-right letter.
+    expect(title(text).startsWith('Step: ')).toBe(true);
+  });
+
+  it('leaves a title that opens with a left-to-right letter or digit alone', () => {
+    expect(title('Ärger lösen')).toBe('Ärger lösen');
+    expect(title('2 files changed')).toBe('2 files changed');
+    expect(title('Deploy א')).toBe('Deploy א');
+    expect(title('日本語のテスト')).toBe('日本語のテスト');
+  });
+
   it('keeps an ordinary title, and a host label still leads a labelled step', () => {
     expect(title('Run the tests')).toBe('Run the tests');
     expect(title(' Run　the tests ')).toBe('Run the tests');

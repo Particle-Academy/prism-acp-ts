@@ -992,6 +992,9 @@ describe('plan updates and the client capability (G-362)', () => {
       [{ content: 42, priority: 'medium', status: 'pending' }],
       [{ priority: 'medium', status: 'pending' }],
       [entry, { content: 'b', priority: 'medium', status: 'skipped' }],
+      [{ ...entry, _meta: 5 }],
+      [{ ...entry, _meta: 'x' }],
+      [{ ...entry, _meta: [] }],
     ];
     for (const entries of bad) {
       // Each is checked against the schema first, so this cannot pass on an entry that is actually valid.
@@ -1001,5 +1004,54 @@ describe('plan updates and the client capability (G-362)', () => {
     }
     expect(s.updates()).toEqual([]);
     expect(s.problems).toHaveLength(bad.length * 2);
+  });
+
+  it.each([{ plan: {} }, {}])('sends no plan whose update or plan _meta the ACP schema rejects (client %j)', async (caps) => {
+    const s = await session(caps);
+    const bad: Record<string, unknown>[] = [
+      { sessionUpdate: 'plan', entries: [entry], _meta: 'x' },
+      { sessionUpdate: 'plan', entries: [entry], _meta: 5 },
+      { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [entry], _meta: 7 } },
+      { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [entry] }, _meta: [] },
+    ];
+    for (const update of bad) {
+      expect(sessionUpdateProblems(update)).not.toEqual([]);
+      s.driver.emit(update);
+    }
+    expect(s.updates()).toEqual([]);
+    expect(s.problems).toHaveLength(bad.length);
+  });
+
+  it.each([{ plan: {} }, {}])('reads only an entry\'s own properties (client %j)', async (caps) => {
+    // A class instance or an object with a prototype passes a check that reads inherited values, and then loses them
+    // when copied: the client receives an entry with no content or status.
+    const s = await session(caps);
+    const inherited = Object.create({ content: 'a', status: 'pending' }) as Record<string, unknown>;
+    inherited.priority = 'medium';
+    class Step {
+      get content() { return 'a'; }
+      get status() { return 'pending'; }
+    }
+    for (const bad of [inherited, new Step()]) {
+      s.driver.emit({ sessionUpdate: 'plan', entries: [bad] });
+      s.driver.emit({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [bad] } });
+    }
+    const markdown = Object.create({ content: '# plan' }) as Record<string, unknown>;
+    Object.assign(markdown, { type: 'markdown', planId: 'pl_1' });
+    s.driver.emit({ sessionUpdate: 'plan_update', plan: markdown });
+    expect(s.updates()).toEqual([]);
+    expect(s.problems.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it.each([{ plan: {} }, {}])('sends the checked fields, not a copy of what the driver passed (client %j)', async (caps) => {
+    const s = await session(caps);
+    s.driver.emit({ sessionUpdate: 'plan', entries: [{ ...entry, extra: 'x', _meta: { k: 1 } }], _meta: { m: 1 }, stray: true });
+    s.driver.emit({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [{ ...entry, _meta: null }], stray: 1 }, _meta: null });
+    const sent = s.updates().map((u) => u.update);
+    expect(sent[0]).toEqual({ sessionUpdate: 'plan', entries: [{ ...entry, _meta: { k: 1 } }], _meta: { m: 1 } });
+    expect(sent[1]).toEqual(caps.plan
+      ? { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'pl_1', entries: [entry] } }
+      : { sessionUpdate: 'plan', entries: [entry] });
+    for (const params of s.updates()) expect(sessionNotificationProblems(params)).toEqual([]);
   });
 });
