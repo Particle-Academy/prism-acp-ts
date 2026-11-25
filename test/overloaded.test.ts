@@ -70,7 +70,14 @@ async function claudeSession() {
   await client.call('initialize', { protocolVersion: 1 });
   const opened = await client.call('session/new', { cwd: root, mcpServers: [] });
   expect(opened.error).toBeUndefined();
-  return { ...client, received, driver: () => driver };
+  // The stand-in records each prompt on STDERR, a separate pipe from the stdout that carries the turn's result, so the
+  // record can land just after the reply. Wait for it (bounded) instead of reading it the instant the reply arrives.
+  const receivedAll = async (count: number): Promise<string[]> => {
+    const deadline = Date.now() + 5000;
+    while (received.length < count && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    return [...received];
+  };
+  return { ...client, received, receivedAll, driver: () => driver };
 }
 
 const OVERLOADED_CLAUDE = { reason: 'server_error', kind: 'overloaded', retryable: true, resumable: true };
@@ -87,7 +94,7 @@ describe('Claude: a 529 is an overloaded, retryable failure, and the same sessio
     const next = await s.prompt('continue');
     expect(next.result).toEqual({ stopReason: 'end_turn' });
     // The same process took it: two prompts reached one CLI, which was never restarted.
-    expect(s.received).toEqual(['OVERLOADED-RETRIED', 'continue']);
+    expect(await s.receivedAll(2)).toEqual(['OVERLOADED-RETRIED', 'continue']);
     expect(s.driver().running).toBe(true);
   });
 
@@ -104,7 +111,7 @@ describe('Claude: a 529 is an overloaded, retryable failure, and the same sessio
     expect((await s.prompt('first')).result).toEqual({ stopReason: 'end_turn' });
     expect(s.failureOf(await s.prompt('OVERLOADED-MID-TURN'))).toEqual(OVERLOADED_CLAUDE);
     expect((await s.prompt('third')).result).toEqual({ stopReason: 'end_turn' });
-    expect(s.received).toEqual(['first', 'OVERLOADED-MID-TURN', 'third']);
+    expect(await s.receivedAll(3)).toEqual(['first', 'OVERLOADED-MID-TURN', 'third']);
   });
 
   it('a 429 is rate_limit, retryable and resumable', async () => {
