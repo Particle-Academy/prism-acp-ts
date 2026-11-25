@@ -1529,10 +1529,12 @@ the SAME session. You do not need `session/load` or a new session.
   turn finished. It is `false` once the session's agent has gone; that session
   fails the next prompt, so `session/load` it or start a new one. When it is
   absent, nothing is claimed.
-- **Whether the failed prompt is still in the conversation depends on the
-  CLI.** Claude Code drops a prompt that failed before any output, and keeps it
-  once the turn did work. Codex always keeps it. Resending the prompt is right
-  in every case. At worst the model sees the prompt twice.
+- **Do not rely on whether the failed prompt is still in the conversation.**
+  Codex always keeps it. Claude Code keeps it once the turn did work. Before any
+  output, Claude Code 2.1.332 was measured doing both. Through `ClaudeDriver`,
+  it kept the prompt and joined it to the next user message. Driven directly,
+  it dropped the prompt. Resending the prompt is right in every case. At worst
+  the model sees the prompt twice.
 
 `providerMessage` is Codex's own `TurnError.message`, for example why a
 `cyberPolicy` stop happened. `providerDetails` holds only these fields when
