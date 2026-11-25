@@ -26,8 +26,9 @@
  * escapes, controls, invisible and bidi characters become spaces; NFKC folds fullwidth forms; every Unicode space
  * becomes an ASCII one), bounded, and cannot begin with one of the labels this module writes -- otherwise a finished
  * step titled "[failed] ..." would read as failed, and an agent step titled "(you) ..." would read as the person's.
- * A title that still begins with a bracket of any kind (a homoglyph such as "(yоu)" with a Cyrillic о, "❨you❩",
- * "【failed】") is prefixed with "Step: ", so nothing that looks like a label stands where a host label stands.
+ * A title that does not open with an ASCII letter or digit, or that holds a label word in any form (a homoglyph such
+ * as "(yоu)" with a Cyrillic о, "ᑕꓬꓳꓴᑐ", "I[fai1ed]I"), is prefixed with "Step: ", so nothing that looks like a
+ * label stands where a host label stands.
  *
  * ## A malformed snapshot is refused
  *
@@ -119,13 +120,13 @@ const SPACES = /\p{Zs}/gu;
  */
 const LEADING = /^(?:\[failed\]|\[skipped\]|\(you\)|[ \p{M}])+/iu;
 /**
- * What a title may open with and stand unprefixed: a letter that is not a modifier letter (`\p{Lm}` holds quote and
- * prime look-alikes such as U+02BF), or a digit. This is an allow-list on purpose. Asking which characters look like
- * a bracket can never be finished -- `‹you›`, `«you»`, `꒰you꒱` (Yi), `⌜failed⌝` (symbols) all read as a label and none
- * of them is classed as a bracket -- so anything else is prefixed with {@link PLAN_TITLE_NEUTRAL}, at the cost of an
- * occasional `Step: ` before a title that opens with an emoji or a quotation mark.
+ * What a title may open with and stand unprefixed: an ASCII letter or digit, nothing else. This is an allow-list on
+ * purpose, and a narrow one. Asking which characters look like a bracket, a bar or a Latin letter can never be
+ * finished -- `‹you›`, `꒰you꒱` (Yi), `ᑕꓬꓳꓴᑐ` (Canadian syllabics around Lisu), `ǀ[failed]ǀ` (Latin click letters) all
+ * read as a label -- so anything else is prefixed with {@link PLAN_TITLE_NEUTRAL}, at the cost of a `Step: ` before
+ * a title that opens with an accented letter, a non-Latin script, an emoji or a quotation mark.
  */
-const OPENS_PLAIN = /^(?:(?!\p{Lm})\p{L}|\p{N})/u;
+const OPENS_PLAIN = /^[A-Za-z0-9]/;
 /**
  * Letters and digits of the right-to-left scripts (bidi classes R and AL: Hebrew, Arabic, Syriac, Thaana, NKo, ...
  * and the supplementary-plane RTL scripts). A title whose first strong character is one of these is laid out right
@@ -135,18 +136,29 @@ const OPENS_PLAIN = /^(?:(?!\p{Lm})\p{L}|\p{N})/u;
 const RTL = /^[\u{0590}-\u{08FF}\u{FB1D}-\u{FDFF}\u{FE70}-\u{FEFF}\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]$/u;
 const LETTER = /^\p{L}$/u;
 const LETTER_OR_DIGIT = /^[\p{L}\p{N}]$/u;
+/** Any one character outside ASCII. */
+const NON_ASCII = '[^\\u0000-\\u007F]';
+/** The ASCII characters that pass for an i or an l. */
+const BAR = '[il1|!]';
+/** Each letter of a label word, and the ASCII that passes for it. */
+const LOOKALIKE: Readonly<Record<string, string>> = {
+  y: 'y', o: '[o0]', u: '[uv]', f: 'f', a: '[a4@]', i: BAR, l: BAR, e: '[e3]', d: '(?:d|cl)', s: '[s5$]',
+  k: `(?:k|${BAR}[<c])`, p: 'p',
+};
 /**
- * Scripts a first word may not mix. Letters from two of these in the opening word (`ᑕyouᑐ`: Canadian syllabics
- * around Latin) are the look-alike-label shape; a real title's first word is in one script. Han, kana, Hangul and
- * Bopomofo are written together, so they count as one. A letter in none of them counts as one more group.
+ * The words of the labels this module writes, spelled so that any look-alike matches: each letter is the ASCII
+ * letter, the ASCII that passes for it (`I`/`l`/`1`/`|`/`!` for i and l, `0` for o, `v` for u, `cl` for d, `|<` for
+ * k, ...), or ANY character outside ASCII. A title holding one of these anywhere, in any case, is prefixed. Matching
+ * every non-ASCII character as every letter is crude on purpose: no list of confusables is ever complete, and a
+ * false match costs only a `Step: ` before the title. Read after NFKC (fullwidth and mathematical letters are ASCII
+ * by then) and with combining marks removed, so `yóu` reads as `you`.
  */
-const SCRIPTS: readonly RegExp[] = [
-  /\p{Script=Latin}/u,
-  /\p{Script=Greek}/u,
-  /\p{Script=Cyrillic}/u,
-  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Bopomofo}]/u,
-];
-/** Put before a title whose opening could read as a label; see {@link OPENS_PLAIN}. */
+const LABEL_WORDS = new RegExp(
+  ['you', 'failed', 'skipped'].map((word) => Array.from(word, (letter) => `(?:${LOOKALIKE[letter]!}|${NON_ASCII})`).join('')).join('|'),
+  'iu',
+);
+const MARKS = /\p{M}/gu;
+/** Put before a title whose opening could read as a label; see {@link OPENS_PLAIN} and {@link LABEL_WORDS}. */
 export const PLAN_TITLE_NEUTRAL = 'Step: ';
 
 /**
@@ -214,8 +226,8 @@ export function planTitle(value: string): string {
   // Unicode space becomes an ASCII one and runs collapse, so trimming is one character at each end.
   const cleaned = stripAnsiControlSequences(value).text.normalize('NFKC').replace(HIDDEN, ' ').replace(SPACES, ' ').replace(/ {2,}/g, ' ');
   let text = trimSpace(cleaned.replace(LEADING, ''));
-  // Whatever is left may still LOOK like a label ("(yоu)" with a Cyrillic о, "‹you›", "꒰you꒱", "ᑕyouᑐ"). The question
-  // is what the opening looks like, not which code point it is, so only a plain opening stands unprefixed.
+  // Whatever is left may still LOOK like a label ("(yоu)" with a Cyrillic о, "ᑕꓬꓳꓴᑐ", "l(y0u)l"). The question is
+  // what it looks like, not which code points it is, so only a plain ASCII opening with no label word stands alone.
   if (text !== '' && opensLikeLabel(text)) text = PLAN_TITLE_NEUTRAL + text;
   const points = Array.from(text);
   if (points.length > PLAN_TITLE_MAX) text = trimSpace(points.slice(0, PLAN_TITLE_MAX - 1).join('')) + '…';
@@ -223,8 +235,8 @@ export function planTitle(value: string): string {
 }
 
 /**
- * Whether a cleaned title must be prefixed: it opens with anything but a letter or digit, its first strong character
- * is right-to-left, or its first word mixes scripts.
+ * Whether a cleaned title must be prefixed: it opens with anything but an ASCII letter or digit, its first strong
+ * character is right-to-left, or it holds a label word in any form ({@link LABEL_WORDS}).
  */
 function opensLikeLabel(text: string): boolean {
   if (!OPENS_PLAIN.test(text)) return true;
@@ -232,13 +244,7 @@ function opensLikeLabel(text: string): boolean {
     if (LETTER_OR_DIGIT.test(point) && RTL.test(point)) return true;
     if (LETTER.test(point)) break;
   }
-  const groups = new Set<number>();
-  for (const point of text.split(' ', 1)[0]!) {
-    if (!LETTER.test(point)) continue;
-    groups.add(SCRIPTS.findIndex((script) => script.test(point)));
-    if (groups.size > 1) return true;
-  }
-  return false;
+  return LABEL_WORDS.test(text.normalize('NFD').replace(MARKS, ''));
 }
 
 /** Remove one space from each end. Callers have already collapsed runs of spaces, so one is all there can be. */

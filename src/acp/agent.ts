@@ -245,7 +245,8 @@ const PRIORITIES: ReadonlySet<string> = new Set(['high', 'medium', 'low']);
 /** ACP's plan entry statuses. A failed or skipped step has none of its own; see plan.ts. */
 const PLAN_ENTRY_STATUSES: ReadonlySet<string> = new Set(['pending', 'in_progress', 'completed']);
 const MALFORMED_ENTRIES = 'plan update was not sent: an entry was not an object with a string content, an ACP status and an object _meta';
-const MALFORMED_META = 'plan update was not sent: its _meta was not an object';
+const MALFORMED_META = 'plan update was not sent: its _meta was not an object that serializes as one';
+const MALFORMED_READ = 'plan update was not sent: reading it threw';
 
 /**
  * A property the object itself holds, read once. Inherited values are not read: a check that sees them passes an
@@ -255,13 +256,27 @@ function own(object: Record<string, unknown>, key: string): unknown {
   return Object.hasOwn(object, key) ? object[key] : undefined;
 }
 
-/** `_meta` as ACP allows it: absent or null (both mean none, and are sent as none), or a plain object. */
+/**
+ * `_meta` as ACP allows it: absent or null (both mean none, and are sent as none), or a plain object that serializes
+ * as an object. What is returned is that serialization read back -- a fresh object holding exactly what the wire
+ * would carry -- so an own `toJSON`, a nested value JSON cannot hold (a BigInt), or a getter or Proxy that throws is
+ * caught here and refused, not discovered by the client or thrown at send time.
+ */
 function planMeta(value: unknown): { ok: boolean; meta?: Record<string, unknown> } {
   if (value === undefined || value === null) return { ok: true };
   const object = asObject(value);
   if (object === undefined) return { ok: false };
   const proto = Object.getPrototypeOf(object);
-  return proto === Object.prototype || proto === null ? { ok: true, meta: object } : { ok: false };
+  if (proto !== Object.prototype && proto !== null) return { ok: false };
+  let wire: unknown;
+  try {
+    const text = JSON.stringify(object);
+    wire = typeof text === 'string' ? JSON.parse(text) : undefined;
+  } catch {
+    return { ok: false };
+  }
+  const meta = asObject(wire);
+  return meta === undefined ? { ok: false } : { ok: true, meta };
 }
 
 type CheckedEntry = { content: string; priority: string | undefined; status: string; _meta?: Record<string, unknown> };
@@ -665,12 +680,25 @@ export class AcpAgent {
    * the full-replacement `plan` it is equivalent to, and anything else is not sent. A plan_update that is not ACP's
    * shape is never sent, and neither is a plan (of either kind) with an entry that is not an object with a string
    * `content` and a status of `pending`, `in_progress` or `completed`, nor one whose `_meta` (entry, plan or update)
-   * is present and not a plain object. Fields are read from own properties only, and what is sent is built from the
-   * checked fields, never a copy of the driver's object. A plan entry with no valid priority is given
+   * is present and not a plain object that serializes as an object (it is sent as that serialization, read back).
+   * `plan_removed` is held to the same rules. Fields are read from own properties only, a read that throws refuses
+   * the update, and what is sent is built from the checked fields, never a copy of the driver's object. A plan entry
+   * with no valid priority is given
    * `medium`, because a client built from the schema drops it otherwise. Each refusal and correction is reported, so
    * a driver that needs one is visible.
    */
   #planGate(sessionId: string, update: AcpUpdate): AcpUpdate | null {
+    // A getter or Proxy in the driver's object can throw on any read. That is the driver's fault, not the client's,
+    // and it must not escape into the driver's event path: the update is not sent, and that is reported.
+    try {
+      return this.#checkPlan(sessionId, update);
+    } catch {
+      this.#options.onProtocolError?.(sessionId, MALFORMED_READ, { recoverable: true });
+      return null;
+    }
+  }
+
+  #checkPlan(sessionId: string, update: AcpUpdate): AcpUpdate | null {
     const refuse = (problem: string): null => {
       this.#options.onProtocolError?.(sessionId, problem, { recoverable: true });
       return null;
@@ -715,10 +743,12 @@ export class AcpAgent {
         return withMeta({ sessionUpdate: 'plan_update', plan: withMeta(body, planMetaValue.meta) }, updateMeta.meta);
       }
       case 'plan_removed': {
-        const planId = asString(update.planId);
+        const planId = asString(own(update, 'planId'));
         if (planId === undefined || planId === '') return refuse('plan_removed without a planId was not sent');
         if (!this.#clientAcceptsPlan) return refuse('plan_removed was not sent: the client did not advertise plan updates');
-        return update;
+        const meta = planMeta(own(update, '_meta'));
+        if (!meta.ok) return refuse(MALFORMED_META);
+        return withMeta({ sessionUpdate: 'plan_removed', planId }, meta.meta);
       }
       default:
         return update;

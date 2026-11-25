@@ -241,9 +241,6 @@ describe('model text in a title is untrusted', () => {
     ['Ꮣyouᑐ x', 'Cherokee and syllabics'],
     ['ᴦyouᴦ', 'small capital gamma'],
     ['ʾyou x', 'a modifier letter'],
-    ['⁽you⁾', 'superscript parentheses'],
-    ['︵you︶', 'vertical presentation parentheses'],
-    ['﹙you﹚', 'small parentheses'],
     ['((you)) x', 'doubled parentheses'],
     // Neighbours: every way to open with something other than an ASCII letter or digit.
     ['Ｓtep x', 'a fullwidth letter that NFKC folds is fine, but the rest must still be checked'],
@@ -259,7 +256,6 @@ describe('model text in a title is untrusted', () => {
     ['ℓyouℓ x', 'script small l'],
     ['ᛁyouᛁ x', 'runic bars'],
     ['ߊyou x', 'an NKo letter'],
-    ['́(you) x', 'a leading combining mark'],
   ])('prefixes a title that does not open with an ASCII letter or digit: %j (%s)', (text) => {
     for (const state of ['todo', 'done'] as const) {
       const content = title(text, state);
@@ -268,6 +264,16 @@ describe('model text in a title is untrusted', () => {
       expect(sessionUpdateProblems(planUpdate(snapshot([step(state, text)]), WITH))).toEqual([]);
     }
     if (text !== 'Ｓtep x') expect(planTitle(text).startsWith('Step: ')).toBe(true);
+  });
+
+  it.each([
+    ['⁽you⁾', 'Untitled step'],
+    ['︵you︶', 'Untitled step'],
+    ['﹙you﹚ x', 'x'],
+    ['́(you) x', 'x'],
+  ])('removes a label that folds to the real one: %j', (text, expected) => {
+    // NFKC folds these onto the ASCII label, and a leading combining mark is stripped, so the label itself is removed.
+    expect(title(text, 'done')).toBe(expected);
   });
 
   it.each([
