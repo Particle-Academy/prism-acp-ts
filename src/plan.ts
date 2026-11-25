@@ -119,13 +119,34 @@ const SPACES = /\p{Zs}/gu;
  */
 const LEADING = /^(?:\[failed\]|\[skipped\]|\(you\)|[ \p{M}])+/iu;
 /**
- * A first character that looks like the start of a label: any opening or closing bracket (`(`, `[`, and every
- * look-alike Unicode classes as punctuation -- ornament, CJK, mathematical), and the bracket pieces. A title that
- * begins with one is prefixed with {@link PLAN_TITLE_NEUTRAL}, so a look-alike such as "(yоu)" (Cyrillic о) cannot
- * stand where a host label stands.
+ * What a title may open with and stand unprefixed: a letter that is not a modifier letter (`\p{Lm}` holds quote and
+ * prime look-alikes such as U+02BF), or a digit. This is an allow-list on purpose. Asking which characters look like
+ * a bracket can never be finished -- `‹you›`, `«you»`, `꒰you꒱` (Yi), `⌜failed⌝` (symbols) all read as a label and none
+ * of them is classed as a bracket -- so anything else is prefixed with {@link PLAN_TITLE_NEUTRAL}, at the cost of an
+ * occasional `Step: ` before a title that opens with an emoji or a quotation mark.
  */
-const BRACKET = /^[\p{Ps}\p{Pe}\u{239B}-\u{23AD}]/u;
-/** Put before a title whose first visible character is a bracket. */
+const OPENS_PLAIN = /^(?:(?!\p{Lm})\p{L}|\p{N})/u;
+/**
+ * Letters and digits of the right-to-left scripts (bidi classes R and AL: Hebrew, Arabic, Syriac, Thaana, NKo, ...
+ * and the supplementary-plane RTL scripts). A title whose first strong character is one of these is laid out right
+ * to left by a client that renders it with `dir="auto"`, which can bring a `(you)` inside it to the visual start, so
+ * it is prefixed too.
+ */
+const RTL = /^[\u{0590}-\u{08FF}\u{FB1D}-\u{FDFF}\u{FE70}-\u{FEFF}\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]$/u;
+const LETTER = /^\p{L}$/u;
+const LETTER_OR_DIGIT = /^[\p{L}\p{N}]$/u;
+/**
+ * Scripts a first word may not mix. Letters from two of these in the opening word (`ᑕyouᑐ`: Canadian syllabics
+ * around Latin) are the look-alike-label shape; a real title's first word is in one script. Han, kana, Hangul and
+ * Bopomofo are written together, so they count as one. A letter in none of them counts as one more group.
+ */
+const SCRIPTS: readonly RegExp[] = [
+  /\p{Script=Latin}/u,
+  /\p{Script=Greek}/u,
+  /\p{Script=Cyrillic}/u,
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Bopomofo}]/u,
+];
+/** Put before a title whose opening could read as a label; see {@link OPENS_PLAIN}. */
 export const PLAN_TITLE_NEUTRAL = 'Step: ';
 
 /**
@@ -193,12 +214,31 @@ export function planTitle(value: string): string {
   // Unicode space becomes an ASCII one and runs collapse, so trimming is one character at each end.
   const cleaned = stripAnsiControlSequences(value).text.normalize('NFKC').replace(HIDDEN, ' ').replace(SPACES, ' ').replace(/ {2,}/g, ' ');
   let text = trimSpace(cleaned.replace(LEADING, ''));
-  // Whatever is left may still LOOK like a label ("(yоu)" with a Cyrillic о, "❨you❩", "【failed】"). The question is
-  // what the first visible character looks like, not which code point it is, so every bracket is neutralised.
-  if (BRACKET.test(text)) text = PLAN_TITLE_NEUTRAL + text;
+  // Whatever is left may still LOOK like a label ("(yоu)" with a Cyrillic о, "‹you›", "꒰you꒱", "ᑕyouᑐ"). The question
+  // is what the opening looks like, not which code point it is, so only a plain opening stands unprefixed.
+  if (text !== '' && opensLikeLabel(text)) text = PLAN_TITLE_NEUTRAL + text;
   const points = Array.from(text);
   if (points.length > PLAN_TITLE_MAX) text = trimSpace(points.slice(0, PLAN_TITLE_MAX - 1).join('')) + '…';
   return text === '' ? PLAN_UNTITLED : text;
+}
+
+/**
+ * Whether a cleaned title must be prefixed: it opens with anything but a letter or digit, its first strong character
+ * is right-to-left, or its first word mixes scripts.
+ */
+function opensLikeLabel(text: string): boolean {
+  if (!OPENS_PLAIN.test(text)) return true;
+  for (const point of text) {
+    if (LETTER_OR_DIGIT.test(point) && RTL.test(point)) return true;
+    if (LETTER.test(point)) break;
+  }
+  const groups = new Set<number>();
+  for (const point of text.split(' ', 1)[0]!) {
+    if (!LETTER.test(point)) continue;
+    groups.add(SCRIPTS.findIndex((script) => script.test(point)));
+    if (groups.size > 1) return true;
+  }
+  return false;
 }
 
 /** Remove one space from each end. Callers have already collapsed runs of spaces, so one is all there can be. */

@@ -244,14 +244,43 @@ const MINTED_SESSION_ID = /^sess_\d+_\d+$/;
 const PRIORITIES: ReadonlySet<string> = new Set(['high', 'medium', 'low']);
 /** ACP's plan entry statuses. A failed or skipped step has none of its own; see plan.ts. */
 const PLAN_ENTRY_STATUSES: ReadonlySet<string> = new Set(['pending', 'in_progress', 'completed']);
-const MALFORMED_ENTRIES = 'plan update was not sent: an entry was not an object with a string content and an ACP status';
+const MALFORMED_ENTRIES = 'plan update was not sent: an entry was not an object with a string content, an ACP status and an object _meta';
+const MALFORMED_META = 'plan update was not sent: its _meta was not an object';
 
-/** Whether every entry is one ACP can carry (priority aside, which the gate supplies). */
-function planEntriesValid(entries: readonly unknown[]): boolean {
-  return entries.every((entry) => {
+/**
+ * A property the object itself holds, read once. Inherited values are not read: a check that sees them passes an
+ * entry whose copy then loses them, and a getter could answer the check and the copy differently.
+ */
+function own(object: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(object, key) ? object[key] : undefined;
+}
+
+/** `_meta` as ACP allows it: absent or null (both mean none, and are sent as none), or a plain object. */
+function planMeta(value: unknown): { ok: boolean; meta?: Record<string, unknown> } {
+  if (value === undefined || value === null) return { ok: true };
+  const object = asObject(value);
+  if (object === undefined) return { ok: false };
+  const proto = Object.getPrototypeOf(object);
+  return proto === Object.prototype || proto === null ? { ok: true, meta: object } : { ok: false };
+}
+
+type CheckedEntry = { content: string; priority: string | undefined; status: string; _meta?: Record<string, unknown> };
+
+/**
+ * Each entry as ACP can carry it (priority aside, which the gate supplies), read from own properties only; or
+ * `undefined` if any entry is not.
+ */
+function checkedPlanEntries(entries: readonly unknown[]): CheckedEntry[] | undefined {
+  const out: CheckedEntry[] = [];
+  for (const entry of entries) {
     const object = asObject(entry);
-    return object !== undefined && typeof object.content === 'string' && typeof object.status === 'string' && PLAN_ENTRY_STATUSES.has(object.status);
-  });
+    if (object === undefined) return undefined;
+    const content = own(object, 'content'), status = own(object, 'status'), priority = own(object, 'priority');
+    const meta = planMeta(own(object, '_meta'));
+    if (typeof content !== 'string' || typeof status !== 'string' || !PLAN_ENTRY_STATUSES.has(status) || !meta.ok) return undefined;
+    out.push({ content, status, priority: typeof priority === 'string' ? priority : undefined, ...(meta.meta === undefined ? {} : { _meta: meta.meta }) });
+  }
+  return out;
 }
 
 export class AcpAgent {
@@ -635,7 +664,9 @@ export class AcpAgent {
    * `plan_removed` MUST NOT reach a client that did not advertise `clientCapabilities.plan`: an items update becomes
    * the full-replacement `plan` it is equivalent to, and anything else is not sent. A plan_update that is not ACP's
    * shape is never sent, and neither is a plan (of either kind) with an entry that is not an object with a string
-   * `content` and a status of `pending`, `in_progress` or `completed`. A plan entry with no valid priority is given
+   * `content` and a status of `pending`, `in_progress` or `completed`, nor one whose `_meta` (entry, plan or update)
+   * is present and not a plain object. Fields are read from own properties only, and what is sent is built from the
+   * checked fields, never a copy of the driver's object. A plan entry with no valid priority is given
    * `medium`, because a client built from the schema drops it otherwise. Each refusal and correction is reported, so
    * a driver that needs one is visible.
    */
@@ -644,29 +675,44 @@ export class AcpAgent {
       this.#options.onProtocolError?.(sessionId, problem, { recoverable: true });
       return null;
     };
+    // What is sent is built here from the fields checked here, read from own properties only, never a copy of the
+    // driver's object: a copy would carry whatever the check did not look at.
+    const withMeta = <T extends Record<string, unknown>>(body: T, meta: Record<string, unknown> | undefined) =>
+      meta === undefined ? body : { ...body, _meta: meta };
     switch (update.sessionUpdate) {
       case 'plan': {
-        if (!Array.isArray(update.entries)) return refuse('plan update without an entries list was not sent');
-        if (!planEntriesValid(update.entries)) return refuse(MALFORMED_ENTRIES);
-        const entries = this.#planEntries(sessionId, update.entries);
-        return entries === update.entries ? update : { ...update, entries };
+        const list = own(update, 'entries');
+        if (!Array.isArray(list)) return refuse('plan update without an entries list was not sent');
+        const checked = checkedPlanEntries(list);
+        if (checked === undefined) return refuse(MALFORMED_ENTRIES);
+        const meta = planMeta(own(update, '_meta'));
+        if (!meta.ok) return refuse(MALFORMED_META);
+        return withMeta({ sessionUpdate: 'plan', entries: this.#planEntries(sessionId, checked) }, meta.meta);
       }
       case 'plan_update': {
-        const plan = asObject(update.plan);
-        const planId = asString(plan?.planId);
-        const items = plan?.type === 'items' && Array.isArray(plan.entries);
-        const markdown = plan?.type === 'markdown' && typeof plan.content === 'string';
+        const plan = asObject(own(update, 'plan'));
+        const type = plan === undefined ? undefined : own(plan, 'type');
+        const planId = plan === undefined ? undefined : asString(own(plan, 'planId'));
+        const list = plan === undefined ? undefined : own(plan, 'entries');
+        const content = plan === undefined ? undefined : own(plan, 'content');
+        const path = plan === undefined ? undefined : own(plan, 'path');
+        const items = type === 'items' && Array.isArray(list);
+        const markdown = type === 'markdown' && typeof content === 'string' && (path === undefined || path === null || typeof path === 'string');
         if (plan === undefined || planId === undefined || planId === '' || (!items && !markdown)) {
           return refuse('plan_update that is not an ACP plan update was not sent');
         }
         if (!this.#clientAcceptsPlan && !items) return refuse('plan_update was not sent: the client did not advertise plan updates');
-        if (items && !planEntriesValid(plan.entries as unknown[])) return refuse(MALFORMED_ENTRIES);
-        const entries = items ? this.#planEntries(sessionId, plan.entries as unknown[]) : undefined;
-        if (!this.#clientAcceptsPlan) {
-          const meta = asObject(plan._meta);
-          return { sessionUpdate: 'plan', entries, ...(meta === undefined ? {} : { _meta: meta }) };
-        }
-        return entries === undefined || entries === plan.entries ? update : { ...update, plan: { ...plan, entries } };
+        const checked = items ? checkedPlanEntries(list as unknown[]) : undefined;
+        if (items && checked === undefined) return refuse(MALFORMED_ENTRIES);
+        const planMetaValue = planMeta(own(plan, '_meta'));
+        const updateMeta = planMeta(own(update, '_meta'));
+        if (!planMetaValue.ok || !updateMeta.ok) return refuse(MALFORMED_META);
+        const entries = checked === undefined ? undefined : this.#planEntries(sessionId, checked);
+        if (!this.#clientAcceptsPlan) return withMeta({ sessionUpdate: 'plan', entries }, planMetaValue.meta);
+        const body = items
+          ? { type: 'items', planId, entries }
+          : { type: 'markdown', planId, content, ...(typeof path === 'string' ? { path } : {}) };
+        return withMeta({ sessionUpdate: 'plan_update', plan: withMeta(body, planMetaValue.meta) }, updateMeta.meta);
       }
       case 'plan_removed': {
         const planId = asString(update.planId);
@@ -679,15 +725,14 @@ export class AcpAgent {
     }
   }
 
-  #planEntries(sessionId: string, entries: readonly unknown[]): readonly unknown[] {
+  #planEntries(sessionId: string, entries: readonly CheckedEntry[]): Record<string, unknown>[] {
     let fixed = 0;
-    const out = entries.map((entry) => {
-      const object = asObject(entry);
-      if (object === undefined || (typeof object.priority === 'string' && PRIORITIES.has(object.priority))) return entry;
-      fixed += 1;
-      return { ...object, priority: PLAN_ENTRY_PRIORITY };
+    const out = entries.map(({ content, priority, status, _meta }) => {
+      const valid = priority !== undefined && PRIORITIES.has(priority);
+      if (!valid) fixed += 1;
+      return { content, priority: valid ? priority : PLAN_ENTRY_PRIORITY, status, ...(_meta === undefined ? {} : { _meta }) };
     });
-    if (fixed === 0) return entries;
+    if (fixed === 0) return out;
     this.#options.onProtocolError?.(sessionId, `${fixed} plan entr${fixed === 1 ? 'y' : 'ies'} had no valid priority and were sent as medium`, { recoverable: true });
     return out;
   }
