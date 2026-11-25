@@ -340,7 +340,7 @@ describe('model text in a title is untrusted', () => {
     expect(planTitle('Fix the build')).toBe('Fix the build');
     // Punctuation after the first word, once a run of three ASCII letters has opened the title, is left alone.
     expect(title('Fix (unit) tests')).toBe('Fix (unit) tests');
-    expect(title('Lint, then build')).toBe('Lint, then build');
+    expect(title('Lint it, then build')).toBe('Lint it, then build');
     expect(title('Run a/b checks')).toBe('Run a/b checks');
   });
 
@@ -350,6 +350,7 @@ describe('model text in a title is untrusted', () => {
     ['v1.2 release', 'a version'],
     ['a/b test', 'a slash'],
     ['Re-run the job', 'a hyphen in the first word'],
+    ['Lint, then build', 'a comma ending the first word'],
     ['A (big) change', 'a one-letter word, then brackets'],
   ])('prefixes a title whose first word, or opening before a three-letter word, holds punctuation: %j (%s)', (text) => {
     expect(title(text)).toBe('Step: ' + text);

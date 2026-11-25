@@ -91,15 +91,26 @@ events.onUpdate?.(planUpdate({ planId, revision, planStatus: 'active', holdingAp
 - Titles are treated as model text. Controls and invisible characters are
   removed, fullwidth forms are folded (NFKC) and every Unicode space becomes a
   plain one, the title is capped at 160 characters, and it cannot begin with
-  one of the labels above. A title is shown with `Step: ` in front when it
-  does not begin with an ASCII letter or digit (any bracket, quote, symbol,
-  emoji, accented letter or non-Latin script), when its first strong character
-  is right-to-left, or when it contains `you`, `failed` or `skipped` anywhere
-  in any form: any case, with combining marks, with ASCII stand-ins such as
-  `0` for `o` or `1` for `l`, or with any non-ASCII character in place of a
-  letter (so `(yоu)` with a Cyrillic letter, or `I[fai1ed]I`, is prefixed).
-  The rule is deliberately broad; a false match costs only the prefix. Codex
-  plan step text is cleaned the same way.
+  one of the labels above. A title is shown with `Step: ` in front when any
+  of these holds:
+  - it does not begin with an ASCII letter or digit (any bracket, quote,
+    symbol, emoji, accented letter or non-Latin script);
+  - its opening holds anything but ASCII letters, digits and spaces, where the
+    opening is the first word (up to the first space) and everything before the
+    first run of three ASCII letters. So `I[FAILE|)]I x`, `l(Y()U)l x`,
+    `l (Y()U) l x`, `Don't deploy`, `e.g. docs` and `v1.2 release` are all
+    prefixed, whatever their punctuation spells;
+  - its first strong character is right-to-left;
+  - it contains `you`, `failed` or `skipped` anywhere, in any case, with
+    combining marks removed, with each letter matched by itself, by one of a
+    fixed set of ASCII stand-ins (`0` for `o`, `1`, `I`, `|` or `!` for
+    `l` and `i`, `v` for `u`, `cl` for `d`, ...) or by any non-ASCII
+    character (so `Do (yоu) x` with a Cyrillic letter is prefixed).
+
+  The opening rule does not depend on how a word is spelled; the label-word
+  rule matches only the stand-ins listed there. The rules are deliberately broad;
+  a false match costs only the prefix. Codex plan step text is cleaned the
+  same way.
 - A snapshot with an unknown state, owner or status, or a bad id, throws
   `PlanProjectionError`.
 
@@ -116,7 +127,11 @@ same way. `plan_removed` follows the same rules. Only an object's own
 properties are read, a read that throws refuses the update (it is reported, not
 thrown back into the driver), and what is sent is built from the checked
 fields, so nothing else the driver attached goes with it. An entry without a
-valid priority is sent as `medium`, and that is reported too.
+valid priority is sent as `medium`, and that is reported too. Every update's
+`sessionUpdate` is read once, from the update's own property, and the update
+sent carries that same value; one without its own string `sessionUpdate` is
+not sent and is reported. If the host's `onProtocolError` throws, that is
+contained: it does not reach the driver or change what is sent.
 
 ## Why drive a CLI rather than call an API
 
