@@ -1132,8 +1132,10 @@ type RateLimitReading = {
     resetsAtMs: number | null;
     binding?: boolean;            // absent when the provider does not say
     limited?: boolean;            // absent unless this window's own status says so
+    scope?: { model?: string };   // absent unless the provider scopes the window
   }>;
   absent: 'provider_says_none' | 'not_stated'; // how to read a window not in the list
+  reasonCode?: string;            // only on an account read that could not read
 };
 ```
 
@@ -1157,6 +1159,45 @@ type RateLimitReading = {
   `codexRateLimitReading` are exported if you hold a payload yourself.
 - `readRateLimits()` still resolves to nothing: the fresh reading arrives on the
   update it emits.
+
+### Reading an account's limits with no session
+
+`claudeAccounts.readRateLimits(configDir)` returns the same `RateLimitReading`
+for one Claude account, without a session and without a turn:
+
+```ts
+import { claudeAccounts } from '@particle-academy/prism-acp';
+
+const reading = await claudeAccounts.readRateLimits('/path/to/work-account');
+// { state: 'reported', limited: false, absent: 'not_stated', asOfMs, windows: [
+//   { id: 'claude:seven_day', label: 'seven day', lengthSeconds: null, usedPercent: 34, resetsAtMs },
+//   { id: 'claude:model:fable', label: 'Fable weekly', lengthSeconds: null, usedPercent: 12.5, resetsAtMs,
+//     scope: { model: 'Fable' } },
+// ] }
+```
+
+- It asks the CLI in that directory with its own `get_usage` control request,
+  so no prompt is sent and nothing is billed. The CLI reads its own login: the
+  credential variables are withheld as for every launch, and the library opens
+  no file in the directory. Pass `null` for the CLI's default account.
+- It returns every window the CLI reports, with no fixed set. Per-model caps
+  carry `scope.model`, and a window name never becomes a scope by inference.
+  `usedPercent` is 0 to 100 and is not capped. A window at or over 100 has
+  `limited: true`, and so does the reading.
+- **It never throws.** When it cannot read, `state` is `unsupported` (code
+  `no_plan_limits`: an API key, a cloud provider, or no sign-in) or
+  `unreadable`, and `reasonCode` is one of `unavailable`, `refused`,
+  `malformed`, `timeout`, `cli_unavailable`, `cli_exited`, `too_large` or
+  `invalid_options`.
+- The CLI marks `get_usage` experimental, so a changed answer is reported as
+  `malformed`, never as a guessed figure.
+- Readings are cached for each binary and directory: `maxAgeMs` defaults to
+  60 s (`0` always asks), a failed read is reused for at most 5 s, and callers
+  who ask at the same time share one CLI. `timeoutMs` (default 15 s, 1 to 60 s)
+  bounds the whole read. `asOfMs` is when the CLI answered.
+- The CLI runs with `--safe-mode`, `--setting-sources user` and
+  `--strict-mcp-config`, so hooks, plugins, project settings and MCP servers do
+  not run for a read. Remote control stays off.
 
 ## Using it
 

@@ -41,6 +41,7 @@ import { assertNoRemoteControlArgs } from '../remote-control.js';
 import { boundProviderText, stripAnsiControlSequences } from '../text.js';
 import { ClaudeAccountError } from './account-error.js';
 import { signInClaudeAccount, signOutClaudeAccount } from './login.js';
+import { readClaudeRateLimits } from './read-rate-limits.js';
 
 /**
  * Which configuration directory: an absolute path the host chose for one account, or `null` for the CLI's own default
@@ -613,6 +614,8 @@ function isInside(child: string, parent: string): boolean {
 /** The account-selection API in one place. */
 export const claudeAccounts = Object.freeze({
   describe: describeClaudeAccount,
+  /** The account's limit windows, from the CLI's own get_usage control request: no turn, no credential (G-394). Never throws. */
+  readRateLimits: readClaudeRateLimits,
   /** Sign an added account in with no terminal: the CLI's own flow, hidden; the host opens the URL. */
   login: signInClaudeAccount,
   /** Sign an added account out with no terminal: the CLI's own `auth logout`, hidden. */
