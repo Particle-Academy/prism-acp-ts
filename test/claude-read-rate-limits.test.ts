@@ -301,6 +301,8 @@ describe('readRateLimits(): unknown, never a throw', () => {
       const reading = await readClaudeRateLimits(dir as string, { ...cli, cwd: tmp(), ...extra });
       expect(reading).toMatchObject({ state: 'unreadable', reasonCode: 'invalid_options' });
     }
+    // A JavaScript caller passing null options still gets a reading, never a rejection.
+    expect(await readClaudeRateLimits(tmp(), null as never)).toMatchObject({ state: 'unreadable', reasonCode: 'invalid_options' });
     expect(cli.runs()).toEqual([]);
   });
 

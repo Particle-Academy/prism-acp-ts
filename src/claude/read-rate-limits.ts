@@ -84,6 +84,16 @@ const unknown = (code: RateLimitUnknownReason, reason: string) => unknownRateLim
  * {@link RateLimitReading} shape both drivers emit. Never throws and never rejects.
  */
 export async function readClaudeRateLimits(configDir: ClaudeConfigDir, options: ReadClaudeRateLimitsOptions = {}): Promise<RateLimitReading> {
+  // A JavaScript caller can pass anything; the promise still never rejects.
+  if (typeof options !== 'object' || options === null) return unknown('invalid_options', 'claude_usage: options must be an object');
+  try {
+    return await readChecked(configDir, options);
+  } catch {
+    return unknown('cli_exited', 'claude_usage: the read failed');
+  }
+}
+
+async function readChecked(configDir: ClaudeConfigDir, options: ReadClaudeRateLimitsOptions): Promise<RateLimitReading> {
   let dir: string | null;
   let timeoutMs: number;
   let maxAgeMs: number;
