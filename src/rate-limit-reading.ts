@@ -8,6 +8,7 @@
  */
 import { bindingWindow, readRateLimit } from './claude/rate-limit.js';
 import { readCodexRateLimit, type CodexRateLimitWindow } from './codex/rate-limit.js';
+import { boundProviderText, stripAnsiControlSequences } from './text.js';
 
 /**
  * - `reported`: the provider gave a reading, and `windows` is it.
@@ -36,7 +37,32 @@ export interface RateLimitReadingWindow {
   readonly binding?: boolean;
   /** True when the provider's own status for this window is not `allowed`. ABSENT otherwise. */
   readonly limited?: boolean;
+  /**
+   * What the window is limited to, when the provider says. ABSENT when it does not: a key name such as
+   * `seven_day_opus` is never turned into a scope. Today only Claude's per-model caps (`model_scoped`) carry one.
+   */
+  readonly scope?: RateLimitWindowScope;
 }
+
+export interface RateLimitWindowScope {
+  /** The provider's own label for the model bucket (`Fable`), cleaned and bounded. */
+  readonly model?: string;
+}
+
+/**
+ * Why an account read (`claudeAccounts.readRateLimits`) knows nothing. Only that read sets it; a session's readings
+ * never do.
+ */
+export type RateLimitUnknownReason =
+  | 'no_plan_limits'
+  | 'unavailable'
+  | 'refused'
+  | 'malformed'
+  | 'timeout'
+  | 'cli_unavailable'
+  | 'cli_exited'
+  | 'too_large'
+  | 'invalid_options';
 
 export interface RateLimitReading {
   readonly state: RateLimitReadingState;
@@ -51,6 +77,8 @@ export interface RateLimitReading {
   readonly limited: boolean;
   readonly windows: readonly RateLimitReadingWindow[];
   readonly absent: RateLimitAbsent;
+  /** Set only by an account read that knows nothing (`unreadable` or `unsupported`). See {@link RateLimitUnknownReason}. */
+  readonly reasonCode?: RateLimitUnknownReason;
 }
 
 /** More than any provider reports. A payload past it is refused rather than truncated, which would be a partial. */
@@ -228,4 +256,122 @@ export function codexRateLimitReading(payload: unknown, asOfMs: number, options:
   const saysNone = !sparse && everySlotStated && (rates.primary === null || rates.secondary === null);
   const limited = read.limit.ordinaryUsageAllowed === false || (read.limit.rateLimitReachedType ?? null) !== null;
   return { state: 'reported', asOfMs, limited, windows, absent: saysNone ? 'provider_says_none' : 'not_stated' };
+}
+
+/** An account read that knows nothing, with its reason code. `reason` must already be free of provider values. */
+export function unknownRateLimitReading(reasonCode: RateLimitUnknownReason, reason: string, asOfMs: number): RateLimitReading {
+  const state: RateLimitReadingState = reasonCode === 'no_plan_limits' ? 'unsupported' : 'unreadable';
+  return { ...empty(state, asOfMs, state === 'unreadable' ? reason : undefined), reasonCode };
+}
+
+/** The windows Claude Code's `get_usage` schema declares. A non-null one of another shape refuses the payload. */
+const CLAUDE_USAGE_DECLARED = new Set(['five_hour', 'seven_day', 'seven_day_oauth_apps', 'seven_day_opus', 'seven_day_sonnet']);
+const MAX_MODEL_LABEL = 64;
+
+function describeValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'string') return `string(${value.length})`;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return `array(${value.length})`;
+  return typeof value;
+}
+
+type UsageWindowRead =
+  | { readonly ok: true; readonly usedPercent: number | null; readonly resetsAtMs: number | null }
+  | { readonly ok: false; readonly reason: string };
+
+function isUsageWindow(value: unknown): value is Record<string, unknown> {
+  return isObject(value) && Object.hasOwn(value, 'utilization') && Object.hasOwn(value, 'resets_at');
+}
+
+/** `utilization` is a PERCENT here (schema: "0-100"), unlike the stream event's fraction; `resets_at` is ISO 8601. */
+function readUsageWindow(path: string, window: Record<string, unknown>): UsageWindowRead {
+  const { utilization, resets_at: resetsAt } = window;
+  if (utilization !== null && (typeof utilization !== 'number' || !Number.isFinite(utilization) || utilization < 0)) {
+    return { ok: false, reason: `claude_usage: ${path}.utilization expected a finite number >= 0 or null, got ${describeValue(utilization)}` };
+  }
+  let resetsAtMs: number | null = null;
+  if (resetsAt !== null) {
+    const parsed = typeof resetsAt === 'string' ? Date.parse(resetsAt) : Number.NaN;
+    if (!Number.isFinite(parsed)) return { ok: false, reason: `claude_usage: ${path}.resets_at expected an ISO 8601 date or null, got ${describeValue(resetsAt)}` };
+    resetsAtMs = parsed;
+  }
+  return { ok: true, usedPercent: utilization === null ? null : Number(utilization.toPrecision(12)), resetsAtMs };
+}
+
+/** Server text for a model bucket: escapes removed, hidden characters marked, bounded. */
+function modelLabel(value: string): string {
+  return boundProviderText(stripAnsiControlSequences(value).text.trim(), MAX_MODEL_LABEL);
+}
+
+function modelSlug(label: string): string {
+  const slug = label.replace(/<U\+[0-9A-F]+>/g, '').toLowerCase().replace(/[^a-z0-9.-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48);
+  return slug === '' ? 'model' : slug;
+}
+
+/**
+ * Read the answer to Claude Code's `get_usage` control request (measured on claude-code 2.1.332; the CLI marks the
+ * request experimental, so a changed shape is refused as `malformed` rather than guessed at).
+ *
+ * A window is any own key of `rate_limits` holding `{ utilization, resets_at }`, so a window the server adds later is
+ * carried without a release; `model_scoped[]` rows are per-model weekly caps and carry `scope.model`. This source never
+ * states a length or a binding window, so those stay null and absent. Nothing else in the answer (plan, spend,
+ * credits, session cost, code-name keys) is carried.
+ */
+export function claudeUsageRateLimitReading(payload: unknown, asOfMs: number): RateLimitReading {
+  const malformed = (reason: string) => unknownRateLimitReading('malformed', reason, asOfMs);
+  if (!isObject(payload)) return malformed(`claude_usage: answer expected an object, got ${describeValue(payload)}`);
+  if (payload.rate_limits_available === false) return unknownRateLimitReading('no_plan_limits', 'claude_usage: plan rate limits do not apply', asOfMs);
+  if (payload.rate_limits_available !== true) {
+    return malformed(`claude_usage: rate_limits_available expected a boolean, got ${describeValue(payload.rate_limits_available)}`);
+  }
+  const rates = payload.rate_limits;
+  if (rates === null || rates === undefined) return unknownRateLimitReading('unavailable', 'claude_usage: the usage endpoint did not answer', asOfMs);
+  if (!isObject(rates)) return malformed(`claude_usage: rate_limits expected an object, got ${describeValue(rates)}`);
+
+  const windows: RateLimitReadingWindow[] = [];
+  const add = (window: RateLimitReadingWindow): string | undefined => {
+    if (windows.length >= MAX_WINDOWS) return `claude_usage: expected at most ${MAX_WINDOWS} windows`;
+    // A window at or past its allowance is limited by the provider's own figure.
+    const limited = window.usedPercent !== null && window.usedPercent >= 100;
+    windows.push(limited ? { ...window, limited: true } : window);
+    return undefined;
+  };
+
+  for (const [name, value] of Object.entries(rates)) {
+    if (name === 'model_scoped' || value === null || value === undefined) continue;
+    if (!isUsageWindow(value)) {
+      if (CLAUDE_USAGE_DECLARED.has(name)) return malformed(`claude_usage: rate_limits.${name} expected { utilization, resets_at }, got ${describeValue(value)}`);
+      continue;
+    }
+    if (!SAFE_WINDOW_NAME.test(name)) return malformed(unsafeName(`rate_limits key ${windows.length}`, name));
+    const read = readUsageWindow(`rate_limits.${name}`, value);
+    if (!read.ok) return malformed(read.reason);
+    const refused = add({ id: `claude:${name}`, label: name.replaceAll('_', ' '), lengthSeconds: null, usedPercent: read.usedPercent, resetsAtMs: read.resetsAtMs });
+    if (refused !== undefined) return malformed(refused);
+  }
+
+  const scoped = rates.model_scoped;
+  if (scoped !== undefined && scoped !== null) {
+    if (!Array.isArray(scoped)) return malformed(`claude_usage: rate_limits.model_scoped expected an array, got ${describeValue(scoped)}`);
+    for (const [index, row] of scoped.entries()) {
+      const path = `rate_limits.model_scoped[${index}]`;
+      if (!isUsageWindow(row) || typeof row.display_name !== 'string') {
+        return malformed(`claude_usage: ${path} expected { display_name, utilization, resets_at }, got ${describeValue(isObject(row) ? row.display_name : row)}`);
+      }
+      const read = readUsageWindow(path, row);
+      if (!read.ok) return malformed(read.reason);
+      const model = modelLabel(row.display_name);
+      const base = `claude:model:${modelSlug(model)}`;
+      let id = base;
+      for (let n = 2; windows.some((existing) => existing.id === id); n += 1) id = `${base}:${n}`;
+      const refused = add({
+        id, label: `${model === '' ? 'model' : model} weekly`, lengthSeconds: null, usedPercent: read.usedPercent, resetsAtMs: read.resetsAtMs, scope: { model },
+      });
+      if (refused !== undefined) return malformed(refused);
+    }
+  }
+
+  return { state: 'reported', asOfMs, limited: windows.some((window) => window.limited === true), windows, absent: 'not_stated' };
 }

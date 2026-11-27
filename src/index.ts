@@ -128,6 +128,7 @@ export { parseRateLimit, rateLimitNotice, readRateLimit } from './claude/rate-li
 export type { ClaudeRateLimit, ClaudeRateLimitWindow, RateLimitRead } from './claude/rate-limit.js';
 export {
   claudeRateLimitReading,
+  claudeUsageRateLimitReading,
   codexRateLimitReading,
   notYetReportedRateLimitReading,
   unreadableRateLimitReading,
@@ -138,7 +139,11 @@ export type {
   RateLimitReading,
   RateLimitReadingState,
   RateLimitReadingWindow,
+  RateLimitUnknownReason,
+  RateLimitWindowScope,
 } from './rate-limit-reading.js';
+export { clearClaudeRateLimitCache, readClaudeRateLimits } from './claude/read-rate-limits.js';
+export type { ReadClaudeRateLimitsOptions } from './claude/read-rate-limits.js';
 
 export {
   CLAUDE_DRIVER_CAPABILITIES,
